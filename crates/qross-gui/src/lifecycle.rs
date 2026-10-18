@@ -24,6 +24,9 @@ pub struct AppState {
     pub last_update_check: Option<u64>,
     /// Autostart wurde beim ersten Start eingerichtet; danach entscheidet nur noch der Nutzer.
     pub autostart_configured: bool,
+    /// Netzwerk, nach dem zuletzt das Profil gewählt wurde (siehe `profiles::signature`). Ist es beim
+    /// Start dasselbe, bleibt ein von Hand gewähltes Profil aktiv.
+    pub network: Option<String>,
 }
 
 impl AppState {
@@ -126,7 +129,12 @@ mod tests {
     fn state_roundtrip_and_broken_file() {
         let dir = std::env::temp_dir().join(format!("qross-state-test-{}", std::process::id()));
         assert_eq!(AppState::load(&dir), AppState::default());
-        let state = AppState { last_running: Some(Role::Client), last_update_check: Some(42), autostart_configured: true };
+        let state = AppState {
+            last_running: Some(Role::Client),
+            last_update_check: Some(42),
+            autostart_configured: true,
+            network: Some("192.168.178.1|3c:a6:2f:0a:1b:2c|192.168.178.0/24".into()),
+        };
         state.save(&dir).unwrap();
         assert_eq!(AppState::load(&dir), state);
         fs::write(dir.join(STATE_FILE), "{ kaputt").unwrap();

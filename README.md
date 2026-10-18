@@ -75,6 +75,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Spielemodus: bei Vollbild festhalten, relative Mausbewegung für Spiele | ✔ Vollbild, eingefangener Zeiger | ✔ Vollbild | – | ✔ Vollbild¹ |
 | Dateiübertragungen: Fortschritt, Rate und Restzeit, Abbrechen auf beiden Seiten | ✔ | ✔ | ✔ | ✔¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
+| Profile je Ort, automatisch nach Netzwerk (Gateway, ohne Zusatzrechte)⁴ | ✔ mit Netzwerkname | ✔, Name über NetworkManager | ✔ wie X11 | ✔ ohne WLAN-Namen¹ |
 
 ¹ macOS wird in der CI auf Apple Silicon gebaut und getestet, auch mit der echten Zwischenablage. Erfassung und
 Einspeisung sind auf einem echten Mac noch nicht geprüft. Qross braucht dort die Rechte „Bedienungshilfen“ und
@@ -88,6 +89,11 @@ Version 50 bei jedem Start). Geprüft sind die Logik, das Einspeisen über libei
 Gegenstelle und gegen mutter ohne Bildschirm. Auf einem echten GNOME- oder KDE-Desktop ist Wayland
 noch nicht getestet, ebenso wenig der Freigabe-Dialog. Sway und andere wlroots-Desktops: Server nur in
 einer X11-Sitzung. Details, Grenzen und Testanleitung: [Wayland](docs/wayland.md).
+⁴ Nur in der Oberfläche; `qross.toml` bleibt eine Konfiguration (für mehrere Orte mehrere Dateien und
+`--config`). Erkannt wird das Netzwerk an Adresse und MAC-Adresse des Standard-Gateways und am Subnetz. Den
+WLAN-Namen gibt macOS ab Version 14 nur mit Ortungsdiensten heraus; Qross fragt nicht danach. Unter Windows
+echt geprüft; Linux und macOS lesen Routen und ARP-Cache aus `/proc/net` bzw. `netstat`, dort nur mit Testdaten
+geprüft.
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
@@ -112,6 +118,10 @@ einer X11-Sitzung. Details, Grenzen und Testanleitung: [Wayland](docs/wayland.md
   einer echten Maus, auch wenn sie den Zeiger einfangen. Die Fang-Taste gibt den Cursor frei; abschaltbar in
   den Einstellungen bzw. mit `[game] enabled = false`.
 - **Strg+Alt+Shift+Esc** holt Maus und Tastatur sofort zurück (macOS: Strg+Option+Shift+Esc).
+- **Profile je Ort** (Einstellungen → Profile): z. B. „Büro“ als Client und „Zuhause“ als Server mit eigener
+  Anordnung. Ein Profil umfasst alles aus dem Hauptfenster: Rolle, Anordnung, Name und Port, Wechsel und die
+  Server-Adresse. Umschalten in der Kopfzeile oder im Tray-Menü. Mit „Aktuelles Netzwerk übernehmen“ wählt
+  Qross das Profil beim Start und bei jedem Netzwerkwechsel selbst und startet Server bzw. Client neu.
 - **Kürzel zum Wechseln** (frei belegbar, Einstellungen → Tastatur bzw. `[keys.switch]`): zu einem bestimmten
   Rechner, der Cursor landet in dessen Mitte, oder zum Nachbarn links, rechts, oben oder unten, dann an der
   gegenüberliegenden Kante. Sie wirken auf jedem Rechner und erreichen keine Programme; hält die Fang-Taste den

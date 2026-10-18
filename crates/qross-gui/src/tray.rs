@@ -1,14 +1,15 @@
-//! Tray-Icon: zeigt den Zustand als farbigen Punkt und im Tooltip.
+//! Tray-Icon: zeigt den Zustand als farbigen Punkt und im Tooltip; im Menü auch die Profile.
 //!
 //! Nicht jedes System zeigt Tray-Icons an (z. B. GNOME ohne AppIndicator-Erweiterung). Dann
 //! beendet Schließen die App, statt das Fenster unerreichbar zu verstecken.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use qross_gui::profiles::{ProfileEdit, Profiles};
 use qross_gui::Role;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Wry};
 use tracing::{info, warn};
@@ -18,7 +19,11 @@ use crate::runtime::{Phase, Runtime, Status};
 const TRAY_ID: &str = "main";
 
 static TOGGLE: OnceLock<MenuItem<Wry>> = OnceLock::new();
+static PROFILES: OnceLock<Submenu<Wry>> = OnceLock::new();
+/// Name des aktiven Profils für den Tooltip, sofern es mehrere Profile gibt
+static PROFILE_NAME: Mutex<Option<String>> = Mutex::new(None);
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
+const PROFILE_PREFIX: &str = "profile:";
 
 /// Ist ein Tray-Icon sichtbar, über das sich das versteckte Fenster zurückholen lässt?
 pub fn available() -> bool {
@@ -100,8 +105,14 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
     let settings = MenuItem::with_id(app, "settings", "Einstellungen", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "Starten", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Beenden", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &news, &settings, &toggle, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let profiles = Submenu::with_id(app, "profiles", "Profil", true)?;
+    let current = app.state::<Arc<Runtime>>().profiles();
+    fill_profiles(app, &profiles, &current)?;
+    set_profile_name(&current);
+    let separator = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&show, &news, &settings, &profiles, &toggle, &separator, &quit])?;
     let _ = TOGGLE.set(toggle);
+    let _ = PROFILES.set(profiles);
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(&Status::default()))
@@ -132,6 +143,31 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
                 });
             }
             "quit" => crate::quit(app),
+            "profiles-manage" => {
+                crate::show_main(app);
+                let _ = app.emit("show-settings", "set-profiles");
+            }
+            "profiles-auto" => {
+                let rt = app.state::<Arc<Runtime>>().inner().clone();
+                let enabled = !rt.profiles().auto;
+                if let Err(e) = rt.edit_profiles(ProfileEdit::SetAutomatic { enabled }) {
+                    warn!("Automatik nicht umgeschaltet: {e}");
+                } else if enabled {
+                    tauri::async_runtime::spawn(async move { crate::netwatch::check_now(&rt).await });
+                }
+            }
+            id if id.starts_with(PROFILE_PREFIX) => {
+                let id = id[PROFILE_PREFIX.len()..].to_owned();
+                let app = app.clone();
+                let rt = app.state::<Arc<Runtime>>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    if !matches!(rt.activate_profile(&id).await, Ok(None)) {
+                        // Fehler oder unbekannter Server: im Fenster zeigen
+                        crate::show_main(&app);
+                        let _ = app.emit("start-from-tray", ());
+                    }
+                });
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -143,20 +179,55 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Profile als Häkchen-Einträge, dazu die Automatik und der Weg in die Einstellungen
+fn fill_profiles(app: &AppHandle, menu: &Submenu<Wry>, profiles: &Profiles) -> tauri::Result<()> {
+    while menu.remove_at(0)?.is_some() {}
+    // „&“ markiert sonst ein Tastenkürzel im Menü
+    let text = |name: &str| name.replace('&', "&&");
+    for profile in &profiles.list {
+        let id = format!("{PROFILE_PREFIX}{}", profile.id);
+        let active = profile.id == profiles.active;
+        menu.append(&CheckMenuItem::with_id(app, id, text(&profile.name), true, active, None::<&str>)?)?;
+    }
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "profiles-auto", "Automatisch nach Netzwerk", true, profiles.auto, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "profiles-manage", "Profile verwalten …", true, None::<&str>)?)?;
+    let active = profiles.active_profile().map(|p| p.name.as_str()).unwrap_or("–");
+    menu.set_text(format!("Profil: {}", text(active)))
+}
+
+fn set_profile_name(profiles: &Profiles) {
+    let name = profiles.active_profile().filter(|_| profiles.list.len() > 1).map(|p| p.name.clone());
+    *PROFILE_NAME.lock().unwrap() = name;
+}
+
+/// Profile haben sich geändert (anderes aktiv, umbenannt, Automatik …)
+pub fn update_profiles(app: &AppHandle, profiles: &Profiles) {
+    set_profile_name(profiles);
+    if let Some(menu) = PROFILES.get() {
+        if let Err(e) = fill_profiles(app, menu, profiles) {
+            warn!("Profile im Tray-Menü nicht aktualisiert: {e}");
+        }
+    }
+    update(app, &app.state::<Arc<Runtime>>().status());
+}
+
 pub fn update(app: &AppHandle, status: &Status) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
     let _ = tray.set_icon(Some(icon(status)));
-    let _ = tray.set_tooltip(Some(tooltip(status)));
+    let profile = PROFILE_NAME.lock().unwrap().clone();
+    let _ = tray.set_tooltip(Some(tooltip(status, profile.as_deref())));
     if let Some(toggle) = TOGGLE.get() {
         let _ = toggle.set_text(if status.running() { "Stoppen" } else { "Starten" });
     }
 }
 
-fn tooltip(status: &Status) -> String {
+fn tooltip(status: &Status, profile: Option<&str>) -> String {
+    let profile = profile.map(|name| format!(" ({name})")).unwrap_or_default();
     let role = match status.role {
         Some(Role::Server) => "Server",
         Some(Role::Client) => "Client",
-        None => return format!("Qross – {}", if status.phase == Phase::Error { "Fehler" } else { "gestoppt" }),
+        None => return format!("Qross{profile} – {}", if status.phase == Phase::Error { "Fehler" } else { "gestoppt" }),
     };
     let detail = match (status.role, status.phase) {
         (Some(Role::Server), Phase::Listening) => match status.clients.len() {
@@ -176,7 +247,7 @@ fn tooltip(status: &Status) -> String {
     } else {
         ""
     };
-    format!("Qross {role} – {detail}{lock}")
+    format!("Qross {role}{profile} – {detail}{lock}")
 }
 
 /// Basis-Icon mit Statuspunkt unten links.

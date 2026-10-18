@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod logs;
+mod netwatch;
 mod runtime;
 mod tray;
 mod updates;
@@ -12,7 +13,8 @@ use std::sync::Arc;
 
 use qross_gui::changelog::{self, Release};
 use qross_gui::lifecycle;
-use qross_gui::{Role, Settings, EXPORT_FILE, GRID_COLS, GRID_ROWS};
+use qross_gui::profiles::{NetworkMark, ProfileEdit, Profiles};
+use qross_gui::{Role, Settings, GRID_COLS, GRID_ROWS};
 use qross_platform::{Desktop, Permission, PortalProblem};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WindowEvent};
@@ -74,6 +76,7 @@ pub fn notify(app: &AppHandle, title: &str, body: &str) {
 #[derive(Serialize)]
 struct Snapshot {
     settings: Settings,
+    profiles: Profiles,
     status: Status,
     fingerprint: String,
     hostname: String,
@@ -102,6 +105,7 @@ fn get_state(rt: Rt<'_>, logs: State<'_, Arc<LogBuffer>>) -> Result<Snapshot, St
     let fingerprint = rt.identity().map_err(|e| format!("{e:#}"))?.fingerprint().to_string();
     Ok(Snapshot {
         settings: rt.settings.lock().unwrap().clone(),
+        profiles: rt.profiles(),
         status: rt.status(),
         fingerprint,
         hostname: hostname(),
@@ -279,22 +283,14 @@ fn preview_layout(settings: Settings) -> LayoutPreview {
     LayoutPreview { toml: settings.server_toml(), error: s.validate().err(), isolated: s.isolated() }
 }
 
-/// Speichert die Einstellungen. Was ein laufender Server oder Client erst beim Start übernimmt
-/// (Layout, Port, Wechsel, Grenze für kopierte Dateien), führt zu einem Neustart.
+/// Speichert die Einstellungen (samt aktivem Profil). Was ein laufender Server oder Client erst
+/// beim Start übernimmt (Layout, Port, Wechsel, Grenze für kopierte Dateien), führt zu einem Neustart.
 #[tauri::command]
 async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
     let rt = rt.inner().clone();
-    let old = rt.settings.lock().unwrap().clone();
-    if settings == old {
+    let Some((old, settings)) = rt.store_settings(settings).map_err(|e| format!("{e:#}"))? else {
         return Ok(());
-    }
-    settings.save(&rt.data_dir).map_err(|e| format!("{e:#}"))?;
-    if settings.server.validate().is_ok() {
-        if let Err(e) = std::fs::write(rt.data_dir.join(EXPORT_FILE), settings.server_toml()) {
-            warn!("{EXPORT_FILE} nicht geschrieben: {e}");
-        }
-    }
-    *rt.settings.lock().unwrap() = settings.clone();
+    };
 
     let status = rt.status();
     let server_changed = settings.server.needs_restart(&old.server);
@@ -313,6 +309,39 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
         _ => {}
     }
     Ok(())
+}
+
+/// Wechselt das Profil; ein laufender Server oder Client startet mit dessen Werten neu. Liefert
+/// beim Client einen zu bestätigenden Fingerprint, wenn der Server des Profils noch unbekannt ist.
+#[tauri::command]
+async fn activate_profile(rt: Rt<'_>, id: String) -> Result<Option<ServerProbe>, String> {
+    rt.inner().clone().activate_profile(&id).await.map_err(|e| format!("{e:#}"))
+}
+
+#[derive(Serialize)]
+struct ProfilesEdited {
+    profiles: Profiles,
+    /// Hinweis, z. B. dass ein Netzwerk bisher zu einem anderen Profil gehörte
+    note: Option<String>,
+}
+
+/// Profile anlegen, umbenennen, duplizieren, löschen, Netzwerke zuordnen, Automatik schalten
+#[tauri::command]
+fn edit_profiles(rt: Rt<'_>, edit: ProfileEdit) -> Result<ProfilesEdited, String> {
+    let automatic_on = edit == ProfileEdit::SetAutomatic { enabled: true };
+    let note = rt.edit_profiles(edit)?;
+    if automatic_on {
+        // Eingeschaltet: gleich nach dem aktuellen Netzwerk wählen, nicht erst beim nächsten Wechsel
+        let rt = rt.inner().clone();
+        tauri::async_runtime::spawn(async move { netwatch::check_now(&rt).await });
+    }
+    Ok(ProfilesEdited { profiles: rt.profiles(), note })
+}
+
+/// Netzwerke, in denen dieser Rechner gerade ist (bevorzugtes zuerst), für „Aktuelles Netzwerk übernehmen“
+#[tauri::command]
+async fn current_networks() -> Vec<NetworkMark> {
+    netwatch::networks(true).await
 }
 
 #[tauri::command]
@@ -457,6 +486,33 @@ pub fn resume(app: &AppHandle) {
     });
 }
 
+/// Lädt die Profile und führt sie mit den Einstellungen zusammen; beim ersten Start mit Profilen
+/// werden die bisherigen Einstellungen zum Profil „Standard“. `loaded`: `gui.json` war lesbar.
+fn load_profiles(data_dir: &std::path::Path, settings: &mut Settings, loaded: bool) -> Profiles {
+    let mut profiles = match Profiles::load(data_dir) {
+        Ok(profiles) => profiles.unwrap_or_default(),
+        Err(e) => {
+            // Nicht überschreiben: Vielleicht lässt sich die Datei von Hand retten.
+            let broken = data_dir.join(format!("{}.defekt", qross_gui::profiles::PROFILES_FILE));
+            warn!("{e:#} – Profile beginnen neu, die alte Datei liegt unter {}", broken.display());
+            let _ = std::fs::rename(data_dir.join(qross_gui::profiles::PROFILES_FILE), &broken);
+            Profiles::default()
+        }
+    };
+    if !loaded {
+        profiles.restore(settings);
+    }
+    if profiles.attach(settings) {
+        let saved = profiles.save(data_dir).and_then(|()| settings.save(data_dir));
+        if let Err(e) = saved {
+            warn!("Profile nicht gespeichert: {e:#}");
+        }
+    }
+    let active = profiles.active_profile().map(|p| p.name.as_str()).unwrap_or_default();
+    info!("Profil „{active}“ ({} Profile)", profiles.list.len());
+    profiles
+}
+
 fn data_dir() -> PathBuf {
     std::env::var_os("QROSS_DATA_DIR")
         .map(PathBuf::from)
@@ -471,14 +527,15 @@ fn main() {
     let data_dir = data_dir();
     // Dort merkt sich Qross unter Wayland die Freigaben der Desktop-Portale
     qross_platform::set_data_dir(&data_dir);
-    let settings = match Settings::load(&data_dir) {
-        Ok(Some(settings)) => settings,
-        Ok(None) => Settings::for_host(&hostname()),
+    let (mut settings, loaded) = match Settings::load(&data_dir) {
+        Ok(Some(settings)) => (settings, true),
+        Ok(None) => (Settings::for_host(&hostname()), false),
         Err(e) => {
             warn!("{e:#} – verwende Standardeinstellungen");
-            Settings::for_host(&hostname())
+            (Settings::for_host(&hostname()), false)
         }
     };
+    let profiles = load_profiles(&data_dir, &mut settings, loaded);
     info!("Daten in {}", data_dir.display());
     log_permissions();
 
@@ -517,6 +574,9 @@ fn main() {
             key_names,
             trust_server,
             simulate_clipboard_files,
+            activate_profile,
+            edit_profiles,
+            current_networks,
             cancel_transfer,
             get_prefs,
             set_autostart,
@@ -531,13 +591,20 @@ fn main() {
         ])
         .setup(move |app| {
             logs.attach(app.handle().clone());
-            let rt = Arc::new(Runtime::new(app.handle().clone(), data_dir.clone(), settings.clone()));
+            let rt = Arc::new(Runtime::new(app.handle().clone(), data_dir.clone(), settings.clone(), profiles.clone()));
             app.manage(rt.clone());
             app.manage(Arc::new(Updates::new(&rt.app_state())));
             tray::init(app.handle());
             configure_autostart(app.handle(), &rt);
             show_window(app.handle());
-            resume(app.handle());
+            let handle = app.handle().clone();
+            let watch = rt.clone();
+            tauri::async_runtime::spawn(async move {
+                // Erst das Profil zum Netzwerk wählen, dann Server oder Client fortsetzen
+                netwatch::check_at_start(&watch).await;
+                resume(&handle);
+                netwatch::spawn(watch);
+            });
             updates::spawn_scheduler(app.handle().clone());
             Ok(())
         })

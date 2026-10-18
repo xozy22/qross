@@ -8,6 +8,31 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [Unreleased]
+
+### Neu
+
+- **Profile je Ort:** mehrere benannte Profile, z. B. „Büro“ und „Zuhause“, jedes mit eigener Rolle, Anordnung
+  der Bildschirme, Name und Port, Wechsel-Einstellungen und Server-Adresse. Umschalten in der Kopfzeile oder im
+  Tray-Menü; anlegen, umbenennen, duplizieren und löschen unter Einstellungen → Profile. Tastatur, Spielemodus,
+  Zwischenablage, Updates und Autostart gelten weiter für alle Profile.
+- **Profil automatisch nach Netzwerk:** Jedes Profil lässt sich an ein oder mehrere Netzwerke binden
+  („Aktuelles Netzwerk übernehmen“). Qross erkennt das Netzwerk am Router, an Adresse und MAC-Adresse des
+  Gateways, ohne zusätzliche Rechte. Es wechselt beim Start und sobald sich das Netzwerk ändert, startet Server
+  bzw. Client mit dem neuen Profil neu und meldet den Wechsel. Passt kein Profil, gilt ein wählbares Profil für
+  andere Netzwerke. Abschaltbar je Profil und insgesamt, auch im Tray-Menü.
+
+### Behoben
+
+- In den Einstellungen schob der Sprung zu einem Bereich die Kopfzeile des Fensters aus dem Bild.
+
+### Wichtig
+
+- Die bisherigen Einstellungen werden beim ersten Start zum Profil „Standard“. Die Profile stehen in
+  `profiles.json` neben `gui.json`; eine ältere Version lädt `gui.json` weiter und lässt die Profile in Ruhe.
+- Den WLAN-Namen zeigt Qross unter Windows und Linux (NetworkManager). macOS gibt ihn ab Version 14 nur mit
+  Ortungsdiensten heraus; dort zeigt Qross das Subnetz und erkennt das Netzwerk trotzdem.
+
 ## [0.6.0] - 2026-10-18
 
 ### Neu

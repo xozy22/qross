@@ -7,6 +7,7 @@ pub mod changelog;
 pub mod clipboard_files;
 pub mod keys;
 pub mod lifecycle;
+pub mod profiles;
 pub mod transfers;
 
 use std::collections::HashSet;
@@ -56,6 +57,9 @@ pub struct Settings {
     /// Spielemodus: Als Server bei Vollbild auf dem Rechner mit dem Cursor festhalten, als Client
     /// dem Server melden, dass hier etwas im Vollbild läuft.
     pub game_mode: bool,
+    /// Profil, zu dem Rolle, Server- und Client-Werte gehören (siehe [`profiles`]); leer bei
+    /// Einstellungen aus einer Version ohne Profile
+    pub profile: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -131,6 +135,7 @@ impl Settings {
             resume_role: true,
             auto_update: true,
             game_mode: true,
+            profile: String::new(),
         }
     }
 
@@ -500,5 +505,12 @@ mod tests {
         assert_eq!(old.server.keys, crate::keys::KeySettings::default());
         assert_eq!(old.server.keys.config().unwrap(), qross_core::keys::KeyConfig::default());
         assert_eq!(old.clipboard_file_limit(), qross_net::clipfiles::DEFAULT_LIMIT);
+        // … und gehört noch zu keinem Profil (das legt `profiles::Profiles::attach` an)
+        assert_eq!(old.profile, "");
+
+        // Ältere Versionen lesen gui.json mit Feldern, die sie nicht kennen (z. B. `profile`), ohne
+        // Fehler; dasselbe gilt hier für Felder späterer Versionen.
+        let newer: Settings = serde_json::from_str(r#"{"role":"client","profile":"p2","zukunft":{"x":1}}"#).unwrap();
+        assert_eq!((newer.role, newer.profile.as_str()), (Role::Client, "p2"));
     }
 }
