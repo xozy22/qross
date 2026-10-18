@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use qross_core::keys::{KeyConfig, SwitchTarget};
+use qross_core::keys::KeyConfig;
 use qross_core::server::{Action, ServerEvent, ServerState, SwitchOptions};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard};
@@ -160,8 +160,8 @@ impl Server {
         })
     }
 
-    /// Fang-Taste, Wechsel-Kürzel, Medientasten und Umbelegung je Rechner (Standard: Rollen-Taste,
-    /// keine Wechsel-Kürzel, Medientasten an den aktiven Rechner, keine Umbelegung).
+    /// Fang-Taste, Medientasten und Umbelegung je Rechner (Standard: Rollen-Taste,
+    /// Medientasten an den aktiven Rechner, keine Umbelegung) sowie Wechsel-Kürzel (Standard: keine).
     pub fn with_keys(mut self, keys: KeyConfig) -> Self {
         self.keys = keys;
         self
@@ -249,7 +249,7 @@ impl Server {
         state.set_switch_options(self.switching);
         state.set_key_maps(self.keys.remap.clone());
         for (hotkey, target) in &self.keys.options.switch {
-            if let SwitchTarget::Screen(name) = target {
+            if let qross_core::keys::SwitchTarget::Screen(name) = target {
                 if *name != self.config.name && !self.config.layout.contains(name) {
                     warn!("Kürzel „{hotkey}“ führt zu „{name}“, der nicht im Layout steht");
                 }

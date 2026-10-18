@@ -175,35 +175,6 @@ mod tests {
         assert_eq!(keys.options.lock, Some(Hotkey::SCROLL_LOCK));
         assert_eq!(keys.options.media, MediaKeys::Active);
         assert_eq!(keys.remap["laptop"].len(), 1, "Beispiel: Alt und Windows-Taste am Mac");
-        let switch: Vec<String> = keys.options.switch.iter().map(|(h, t)| format!("{h} = {t}")).collect();
-        assert_eq!(switch, ["Ctrl+Alt+ArrowLeft = left", "Ctrl+Alt+ArrowRight = right", "Ctrl+Alt+Digit1 = pc", "Ctrl+Alt+Digit2 = laptop"]);
-    }
-
-    #[test]
-    fn switch_keys_are_checked() {
-        let file: ServerFile = toml::from_str("[keys.switch]
-\"Ctrl+Alt+Digit1\" = \"laptop\"
-\"Ctrl+Alt+ArrowUp\" = \"up\"").unwrap();
-        let switch = file.keys.config().unwrap().options.switch;
-        assert_eq!(switch[0], ("Ctrl+Alt+ArrowUp".parse().unwrap(), SwitchTarget::Direction(Edge::Top)));
-        assert_eq!(switch[1].1, SwitchTarget::Screen("laptop".into()));
-
-        let error = |text: &str| toml::from_str::<ServerFile>(text).unwrap().keys.config().unwrap_err().to_string();
-        assert!(error("[keys.switch]
-\"Ctrl+Gibtsnicht\" = \"left\"").contains("[keys.switch]"));
-        assert!(error("[keys.switch]
-\"Ctrl+Alt+KeyL\" = \"\"").contains("Ziel fehlt"));
-        let lock = error("[keys]
-lock = \"Ctrl+Alt+KeyL\"
-[keys.switch]
-\"Alt+Ctrl+KeyL\" = \"laptop\"");
-        assert!(lock.contains("schon die Fang-Taste"), "{lock}");
-        let twice = error("[keys.switch]
-\"Ctrl+Alt+KeyL\" = \"laptop\"
-\"Alt+Ctrl+KeyL\" = \"left\"");
-        assert!(twice.contains("schon belegt"), "{twice}");
-        assert!(error("[keys.switch]
-\"Ctrl+Alt+Shift+Escape\" = \"pc\"").contains("Notausgang"));
     }
 
     #[test]
@@ -215,6 +186,27 @@ lock = \"Ctrl+Alt+KeyL\"
         assert!(file.keys.config().is_err());
         let file: ServerFile = toml::from_str("[keys.remap.laptop]\nAltLeft = \"Falsch\"").unwrap();
         assert!(file.keys.config().unwrap_err().to_string().contains("laptop"));
+    }
+
+    #[test]
+    fn switch_keys_are_checked() {
+        let example: ServerFile = toml::from_str(include_str!("../../../qross.example.toml")).unwrap();
+        let switch: Vec<String> = example.keys.config().unwrap().options.switch.iter().map(|(h, t)| format!("{h} = {t}")).collect();
+        assert_eq!(switch, ["Ctrl+Alt+ArrowLeft = left", "Ctrl+Alt+ArrowRight = right", "Ctrl+Alt+Digit1 = pc", "Ctrl+Alt+Digit2 = laptop"]);
+
+        let file: ServerFile = toml::from_str("[keys.switch]\n\"Ctrl+Alt+Digit1\" = \"laptop\"\n\"Ctrl+Alt+ArrowUp\" = \"up\"").unwrap();
+        let switch = file.keys.config().unwrap().options.switch;
+        assert_eq!(switch[0], ("Ctrl+Alt+ArrowUp".parse().unwrap(), SwitchTarget::Direction(Edge::Top)));
+        assert_eq!(switch[1].1, SwitchTarget::Screen("laptop".into()));
+
+        let error = |text: &str| toml::from_str::<ServerFile>(text).unwrap().keys.config().unwrap_err().to_string();
+        assert!(error("[keys.switch]\n\"Ctrl+Gibtsnicht\" = \"left\"").contains("[keys.switch]"));
+        assert!(error("[keys.switch]\n\"Ctrl+Alt+KeyL\" = \"\"").contains("Ziel fehlt"));
+        let lock = error("[keys]\nlock = \"Ctrl+Alt+KeyL\"\n[keys.switch]\n\"Alt+Ctrl+KeyL\" = \"laptop\"");
+        assert!(lock.contains("schon die Fang-Taste"), "{lock}");
+        let twice = error("[keys.switch]\n\"Ctrl+Alt+KeyL\" = \"laptop\"\n\"Alt+Ctrl+KeyL\" = \"left\"");
+        assert!(twice.contains("schon belegt"), "{twice}");
+        assert!(error("[keys.switch]\n\"Ctrl+Alt+Shift+Escape\" = \"pc\"").contains("Notausgang"));
     }
 
     #[test]
