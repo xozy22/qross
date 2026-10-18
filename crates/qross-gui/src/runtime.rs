@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+use qross_core::sharing::SharingRules;
 use qross_core::CaptureEvent;
 use qross_gui::lifecycle::AppState;
 use qross_gui::profiles::{self, Place, ProfileEdit, Profiles};
@@ -16,11 +17,11 @@ use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::clipfiles::FilesNotice;
 use qross_net::progress::{Progress, Transfers};
 use qross_net::quality::Quality;
-use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, StopHandle};
+use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle, StopHandle};
 use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{LogInjector, MemoryClipboard};
 use qross_platform::Capture;
-use qross_proto::{GameState, Platform, Rect, DEFAULT_PORT};
+use qross_proto::{GameState, Platform, Rect, Sharing, DEFAULT_PORT};
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
 use tauri::{AppHandle, Emitter};
@@ -96,6 +97,9 @@ pub struct Status {
     pub cursor_here: bool,
     /// Server: eigener Bildschirm samt Monitoren
     pub local_screen: Option<LocalScreen>,
+    /// Client: was der Server mit diesem Rechner teilt (`None`: noch nicht gemeldet, etwa von
+    /// einem Server bis Qross 0.6, der alles erlaubt)
+    pub sharing: Option<Sharing>,
 }
 
 impl Status {
@@ -152,7 +156,8 @@ pub fn platform_name(platform: Platform) -> &'static str {
 }
 
 enum Running {
-    Server { task: JoinHandle<()>, stop: StopHandle, name: String },
+    /// `sharing`: Rechte je Rechner, im Betrieb änderbar
+    Server { task: JoinHandle<()>, stop: StopHandle, name: String, sharing: SharingHandle },
     Client { task: JoinHandle<()> },
 }
 
@@ -302,7 +307,7 @@ impl Runtime {
     async fn shutdown(&self, running: Running) {
         *self.transfers.lock().unwrap() = None;
         match running {
-            Running::Server { task, stop, name } => {
+            Running::Server { task, stop, name, .. } => {
                 let _ = tokio::time::timeout(Duration::from_secs(2), stop.stop()).await;
                 task.abort();
                 if let Some(hub) = self.capture.lock().unwrap().as_ref() {
@@ -463,8 +468,9 @@ impl Runtime {
             .with_discovery(s.discovery)
             .with_clipboard_file_limit(settings.clipboard_file_limit())
             .with_keys(keys)
-            .with_game_mode(settings.game_mode);
-        let stop = server.stop_handle();
+            .with_game_mode(settings.game_mode)
+            .with_sharing(s.effective_sharing());
+        let (stop, sharing) = (server.stop_handle(), server.sharing());
         *self.transfers.lock().unwrap() = Some(server.transfers());
         let platform = ServerPlatform {
             capture,
@@ -489,7 +495,14 @@ impl Runtime {
             let result = server.run(platform).await;
             rt.finished(generation, result);
         });
-        Ok(Running::Server { task, stop, name: s.name.clone() })
+        Ok(Running::Server { task, stop, name: s.name.clone(), sharing })
+    }
+
+    /// Rechte je Rechner im laufenden Server ändern. Sie gelten sofort, ohne die Clients zu trennen.
+    pub async fn set_sharing(&self, rules: SharingRules) {
+        if let Some(Running::Server { sharing, .. }) = self.running.lock().await.as_ref() {
+            sharing.set(rules);
+        }
     }
 
     fn on_server_notice(&self, notice: ServerNotice) {
@@ -718,18 +731,22 @@ impl Runtime {
                 s.phase = Phase::Connected;
                 s.message = format!("Verbunden mit „{server_name}“ ({addr})");
                 s.server_name = Some(server_name);
+                // Die Rechte meldet ein Server ab Qross 0.7 gleich danach.
+                s.sharing = None;
             }),
             ClientNotice::Disconnected { reason } => self.update(|s| {
                 s.phase = Phase::Connecting;
                 s.message = format!("{reason} – neuer Versuch in Kürze");
                 s.server_name = None;
                 s.cursor_here = false;
+                s.sharing = None;
             }),
             ClientNotice::CursorEntered => self.update(|s| s.cursor_here = true),
             ClientNotice::CursorLeft => self.update(|s| s.cursor_here = false),
             ClientNotice::ClipboardFiles(notice) => self.on_files_notice(notice),
             ClientNotice::Quality(quality) => self.emit_quality(None, quality),
             ClientNotice::Transfer(progress) => self.on_transfer(progress),
+            ClientNotice::Sharing(sharing) => self.update(|s| s.sharing = Some(sharing)),
         }
     }
 

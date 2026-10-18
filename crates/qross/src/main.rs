@@ -159,13 +159,18 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     if file.game.enabled {
         info!("Spielemodus: Bei Vollbildprogrammen bleibt der Cursor auf dem Rechner, auf dem sie laufen");
     }
+    let sharing = file.sharing.rules();
+    if sharing.default != qross_core::sharing::Sharing::ALL {
+        info!("Rechte für Rechner ohne eigenen Eintrag: {}", qross_core::sharing::describe(sharing.default));
+    }
 
     let server = Server::bind(ServerConfig { name, listen: file.listen, layout }, &identity, trust)?
         .with_switch_options(file.switching.options())
         .with_discovery(file.discovery)
         .with_clipboard_file_limit(file.clipboard.file_limit())
         .with_keys(file.keys.config()?)
-        .with_game_mode(file.game.enabled);
+        .with_game_mode(file.game.enabled)
+        .with_sharing(sharing);
     let platform = ServerPlatform {
         capture,
         events: events_rx,

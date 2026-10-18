@@ -21,6 +21,14 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
   Gateways, ohne zusätzliche Rechte. Es wechselt beim Start und sobald sich das Netzwerk ändert, startet Server
   bzw. Client mit dem neuen Profil neu und meldet den Wechsel. Passt kein Profil, gilt ein wählbares Profil für
   andere Netzwerke. Abschaltbar je Profil und insgesamt, auch im Tray-Menü.
+- **Rechte je Rechner:** Der Server legt je Client fest, was geteilt wird: Zwischenablage (Text, HTML, Bild),
+  kopierte Dateien und Drag & Drop, jeweils senden und empfangen, nur empfangen, nur senden oder gar nicht. Eine
+  Vorgabe gilt für Rechner, die neu dazukommen. Einstellbar in der Server-Ansicht unter „Rechte je Rechner“ bzw.
+  mit `[sharing]` in `qross.toml`. Änderungen gelten sofort, ohne die Verbindung zu trennen; laufende
+  Übertragungen, die nicht mehr erlaubt sind, brechen ab.
+- Eingeschränkte Rechner tragen in der Anordnung ein Schild. Clients zeigen an, was der Server für sie
+  einschränkt, und versuchen es gar nicht erst: Wohin Drag & Drop nicht darf, wechselt der Cursor mit gedrückter
+  Taste auch nicht.
 
 ### Behoben
 
@@ -32,6 +40,8 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
   `profiles.json` neben `gui.json`; eine ältere Version lädt `gui.json` weiter und lässt die Profile in Ruhe.
 - Den WLAN-Namen zeigt Qross unter Windows und Linux (NetworkManager). macOS gibt ihn ab Version 14 nur mit
   Ortungsdiensten heraus; dort zeigt Qross das Subnetz und erkennt das Netzwerk trotzdem.
+- Der Server setzt die Rechte auch gegenüber Clients mit Qross 0.5 und 0.6 durch: Was sie trotzdem schicken,
+  weist er ab, ohne Reste zu hinterlassen. Anzeigen können die Rechte erst Clients ab dieser Version.
 
 ## [0.6.0] - 2026-10-18
 

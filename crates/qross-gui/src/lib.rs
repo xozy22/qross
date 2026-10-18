@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use qross_core::server::SwitchOptions;
+use qross_core::sharing::{Share, Sharing, SharingRules};
 use qross_core::{Layout, LinkConfig};
 use qross_proto::{Edge, DEFAULT_PORT};
 use serde::{Deserialize, Serialize};
@@ -77,6 +78,9 @@ pub struct ServerSettings {
     pub discovery: bool,
     /// Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung je Rechner (wirkt auf dem Server)
     pub keys: KeySettings,
+    /// Rechte je Rechner: was mit welchem Client geteilt wird. Jeder Rechner in der Anordnung hat
+    /// einen eigenen Eintrag; die Vorgabe gilt für Rechner, die neu hinzukommen. Wirkt sofort.
+    pub sharing: SharingRules,
 }
 
 /// Ein Bildschirm im Raster des Layout-Editors.
@@ -129,6 +133,7 @@ impl Settings {
                 switch_delay_ms: SwitchOptions::RECOMMENDED.delay.as_millis() as u64,
                 discovery: true,
                 keys: KeySettings::default(),
+                sharing: SharingRules::default(),
             },
             client: ClientSettings { address: String::new(), name: hostname.to_owned(), dry_run: false },
             clipboard_files_mb: qross_net::clipfiles::DEFAULT_LIMIT / 1_000_000,
@@ -159,6 +164,7 @@ impl Settings {
         let mut settings: Self =
             serde_json::from_str(&text).with_context(|| format!("{} ist ungültig", path.display()))?;
         settings.server.fit_grid();
+        settings.server.complete_sharing();
         Ok(Some(settings))
     }
 
@@ -186,6 +192,23 @@ impl ServerSettings {
             || self.switch_options() != old.switch_options()
             || self.discovery != old.discovery
             || self.keys != old.keys
+    }
+
+    /// Rechner in der Anordnung ohne eigene Rechte bekommen die Vorgabe als eigenen Eintrag. So
+    /// wirkt eine spätere Änderung der Vorgabe nur auf Rechner, die danach hinzukommen.
+    pub fn complete_sharing(&mut self) {
+        for screen in &self.screens {
+            if screen.name != self.name && !self.sharing.clients.contains_key(&screen.name) {
+                self.sharing.clients.insert(screen.name.clone(), self.sharing.default);
+            }
+        }
+    }
+
+    /// Rechte, wie sie gelten: eigene Einträge nur für Clients in der Anordnung
+    pub fn effective_sharing(&self) -> SharingRules {
+        let mut rules = self.sharing.clone();
+        rules.clients.retain(|name, _| *name != self.name && self.contains(name));
+        rules
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -295,6 +318,7 @@ impl ServerSettings {
         out += &format!("\n[switching]\ncorner_size = {}\ndelay_ms = {}\n", self.corner_size, self.switch_delay_ms);
         out += &format!("\n[clipboard]\nmax_file_mb = {clipboard_files_mb}\n");
         out += &self.effective_keys().to_toml();
+        out += &sharing_toml(&self.effective_sharing());
         for link in self.links() {
             out += &format!(
                 "\n[[links]]\nfrom = {}\nedge = \"{}\"\nto = {}\n",
@@ -304,6 +328,31 @@ impl ServerSettings {
             );
         }
         out
+    }
+}
+
+/// Abschnitt `[sharing]` für `qross.toml`, nur wenn etwas eingeschränkt ist (sonst gilt dort ohnehin
+/// alles). Jeder Client steht mit allen drei Arten darin, damit die Vorgabe ihn nicht berührt.
+fn sharing_toml(rules: &SharingRules) -> String {
+    if !rules.restricts() {
+        return String::new();
+    }
+    let entries = |s: &Sharing| {
+        format!("clipboard = \"{}\"\nfiles = \"{}\"\ndrag = \"{}\"\n", share_name(s.clipboard), share_name(s.files), share_name(s.drag))
+    };
+    let mut out = format!("\n[sharing]\n{}", entries(&rules.default));
+    for (name, sharing) in &rules.clients {
+        out += &format!("\n[sharing.clients.{}]\n{}", quote(name), entries(sharing));
+    }
+    out
+}
+
+fn share_name(share: Share) -> &'static str {
+    match share {
+        Share::Both => "both",
+        Share::ToClient => "to-client",
+        Share::FromClient => "from-client",
+        Share::Off => "off",
     }
 }
 
@@ -458,6 +507,54 @@ mod tests {
         assert!(enabled(&settings));
         settings.game_mode = false;
         assert!(!enabled(&settings));
+    }
+
+    #[test]
+    fn every_client_in_the_layout_gets_its_own_rights() {
+        // Eine gui.json aus 0.6 kennt keine Rechte: Alles bleibt erlaubt, nichts landet in der Datei.
+        let dir = std::env::temp_dir().join(format!("qross-gui-rechte-{}", std::process::id()));
+        let old = r#"{"server":{"name":"pc","port":24900,"screens":[{"name":"pc","col":2,"row":1},{"name":"laptop","col":3,"row":1}]}}"#;
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(SETTINGS_FILE), old).unwrap();
+        let mut settings = Settings::load(&dir).unwrap().unwrap();
+        assert_eq!(settings.server.sharing.clients.get("laptop"), Some(&Sharing::ALL));
+        assert!(!settings.server.sharing.clients.contains_key("pc"), "der Server teilt nicht mit sich selbst");
+        assert!(!settings.server.to_toml(0).contains("[sharing"), "{}", settings.server.to_toml(0));
+
+        // Eine strengere Vorgabe gilt nur für Rechner ohne eigenen Eintrag.
+        settings.server.sharing.default = Sharing { clipboard: Share::Off, files: Share::Off, drag: Share::Off };
+        assert_eq!(settings.server.effective_sharing().for_client("laptop"), Sharing::ALL);
+        assert_eq!(settings.server.effective_sharing().for_client("tablet").clipboard, Share::Off);
+        // So steht es in gui.json und so liest es app.js
+        let json = serde_json::to_value(&settings.server.sharing).unwrap();
+        assert_eq!(json["default"], serde_json::json!({ "clipboard": "off", "files": "off", "drag": "off" }));
+        assert_eq!(json["clients"]["laptop"]["drag"], "both");
+        let from_ui: SharingRules =
+            serde_json::from_str(r#"{"default":{"clipboard":"to-client","files":"from-client","drag":"both"},"clients":{}}"#).unwrap();
+        assert_eq!(from_ui.default, Sharing { clipboard: Share::ToClient, files: Share::FromClient, drag: Share::Both });
+        // Wer die Anordnung verlässt, fällt aus den geltenden Rechten.
+        settings.server.screens.retain(|s| s.name != "laptop");
+        assert!(settings.server.effective_sharing().clients.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exported_toml_carries_the_rights() {
+        let mut s = server(&[("pc", 3, 2), ("lap\"top", 4, 2), ("tablet", 3, 1)]);
+        s.sharing.default.drag = Share::Off;
+        s.complete_sharing();
+        s.sharing.clients.insert("lap\"top".into(), Sharing { clipboard: Share::ToClient, files: Share::FromClient, drag: Share::Both });
+        s.sharing.clients.insert("weg".into(), Sharing::ALL);
+        let file: toml::Table = toml::from_str(&s.to_toml(0)).unwrap();
+        let sharing = file["sharing"].as_table().unwrap();
+        assert_eq!(sharing["drag"].as_str(), Some("off"));
+        assert_eq!(sharing["clipboard"].as_str(), Some("both"));
+        let clients = sharing["clients"].as_table().unwrap();
+        assert_eq!(clients.keys().collect::<Vec<_>>(), ["lap\"top", "tablet"], "nur Rechner der Anordnung");
+        let laptop = clients["lap\"top"].as_table().unwrap();
+        let values: Vec<&str> = ["clipboard", "files", "drag"].iter().map(|k| laptop[*k].as_str().unwrap()).collect();
+        assert_eq!(values, ["to-client", "from-client", "both"], "jeder Client mit allen drei Arten");
+        assert_eq!(clients["tablet"]["drag"].as_str(), Some("off"), "die Vorgabe zum Zeitpunkt der Aufnahme");
     }
 
     #[test]

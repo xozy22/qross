@@ -9,22 +9,24 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use qross_core::keys::KeyConfig;
 use qross_core::server::{Action, Hold, ServerEvent, ServerState, SwitchOptions};
+use qross_core::sharing::{describe as describe_sharing, SharingRules};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard};
 use qross_proto::{
     encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
-    FileEntry, GameState, Input, Platform, Rect, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
+    FileEntry, GameState, Input, Platform, Rect, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
 };
-use quinn::{Connection, Endpoint, Incoming};
-use tokio::sync::{mpsc, oneshot};
+use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Notify, Ready};
 use crate::files::{FileOutcome, Receiver, Staging};
 use crate::game::{self, Detector};
-use crate::progress::{Progress, Transfers};
+use crate::progress::{Direction, Kind, Progress, Transfers};
 use crate::quality::{self, Quality};
+use crate::rights::{self, Allowed};
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
 use crate::tls::{peer_fingerprint, server_config};
@@ -66,6 +68,28 @@ pub struct Server {
     fingerprint: Fingerprint,
     /// Laufende Dateiübertragungen (Fortschritt, Abbrechen)
     transfers: Transfers,
+    /// Rechte je Rechner, auch während des Laufs änderbar
+    sharing: SharingHandle,
+}
+
+/// Ändert die Rechte je Rechner eines laufenden Servers (siehe [`Server::sharing`]). Sie gelten
+/// sofort, auch für bestehende Verbindungen: Was nicht mehr erlaubt ist, bricht ab, und Clients
+/// ab Qross 0.7 erfahren ihre neuen Rechte.
+#[derive(Clone)]
+pub struct SharingHandle(Arc<watch::Sender<SharingRules>>);
+
+impl SharingHandle {
+    pub fn set(&self, rules: SharingRules) {
+        self.0.send_if_modified(|current| {
+            let changed = *current != rules;
+            *current = rules;
+            changed
+        });
+    }
+
+    pub fn get(&self) -> SharingRules {
+        self.0.borrow().clone()
+    }
 }
 
 /// Bricht eine Hintergrundaufgabe ab, sobald der Server (bzw. `run`) beendet wird.
@@ -125,7 +149,7 @@ enum NetEvent {
         screen: Rect,
         fingerprint: Fingerprint,
         conn: Connection,
-        reply: oneshot::Sender<Result<String, String>>,
+        reply: oneshot::Sender<Result<Admitted, String>>,
     },
     ScreenChanged { name: String, id: usize, screen: Rect },
     Monitors { name: String, id: usize, monitors: Vec<Rect> },
@@ -137,6 +161,12 @@ enum NetEvent {
     DragOffer { name: String, id: usize, probe: u32, transfer: u64, entries: Vec<FileEntry> },
     DragFile { name: String, id: usize, outcome: FileOutcome },
     Closed { name: String, id: usize },
+}
+
+/// Angenommen: Name des Servers fürs `Welcome` und die Rechte des Clients, die sich mit den Regeln ändern
+struct Admitted {
+    server_name: String,
+    sharing: watch::Receiver<Sharing>,
 }
 
 /// Zwischenordner für ankommende Dateien
@@ -158,6 +188,8 @@ struct ClientHandle {
     monitors: Vec<Rect>,
     /// Misst die Verbindungsqualität, solange der Client verbunden ist (nur mit Oberfläche)
     _quality: Option<quality::Monitor>,
+    /// Was der Server mit ihm teilt; die Verbindung liest mit (Streams prüfen, Client informieren).
+    sharing: watch::Sender<Sharing>,
 }
 
 impl Server {
@@ -177,7 +209,19 @@ impl Server {
             game_mode: true,
             fingerprint: identity.fingerprint(),
             transfers: Transfers::new(),
+            sharing: SharingHandle(Arc::new(watch::channel(SharingRules::default()).0)),
         })
+    }
+
+    /// Rechte je Rechner (Standard: alles in beide Richtungen). Ändern im Betrieb über [`Server::sharing`].
+    pub fn with_sharing(self, rules: SharingRules) -> Self {
+        self.sharing.set(rules);
+        self
+    }
+
+    /// Griff, um die Rechte je Rechner im Betrieb zu ändern
+    pub fn sharing(&self) -> SharingHandle {
+        self.sharing.clone()
     }
 
     /// Spielemodus (Standard: an): Läuft auf dem Rechner mit dem Cursor ein Vollbildprogramm oder
@@ -311,6 +355,8 @@ impl Server {
         let mut clients: HashMap<String, ClientHandle> = HashMap::new();
         // Clipboard-Sequenznummer, die ein Client zuletzt bekommen hat
         let clip_synced: ClipSynced = Arc::new(Mutex::new(HashMap::new()));
+        let mut rules = self.sharing.0.subscribe();
+        state.set_sharing(rules.borrow_and_update().clone());
         let mut screen_poll = tokio::time::interval(Duration::from_secs(2));
         // Zuletzt gemeldetes Festhalten und der Bildschirm dazu
         let mut hold = (Hold::Free, self.config.name.clone());
@@ -357,6 +403,8 @@ impl Server {
                                 self.notify(ServerNotice::ClientConnected { name: name.clone(), addr, screen });
                                 let input = spawn_input_writer(conn.clone(), name.clone());
                                 let quality = self.monitor_quality(&conn, &name);
+                                let sharing = rules.borrow().for_client(&name);
+                                let (sharing_tx, sharing_rx) = watch::channel(sharing);
                                 let handle = ClientHandle {
                                     id: conn.stable_id(),
                                     conn,
@@ -364,11 +412,15 @@ impl Server {
                                     screen,
                                     monitors: Vec::new(),
                                     _quality: quality,
+                                    sharing: sharing_tx,
                                 };
                                 clients.insert(name.clone(), handle);
                                 clip_synced.lock().unwrap().remove(&name);
-                                let _ = reply.send(Ok(self.config.name.clone()));
+                                let _ = reply.send(Ok(Admitted { server_name: self.config.name.clone(), sharing: sharing_rx }));
                                 info!("Client „{name}“ verbunden ({}×{})", screen.width, screen.height);
+                                if sharing != Sharing::ALL {
+                                    info!("Rechte für „{name}“: {}", describe_sharing(sharing));
+                                }
                                 state.handle(ServerEvent::ClientConnected { name, screen })
                             }
                             Err(reason) => {
@@ -464,6 +516,18 @@ impl Server {
                     }
                     _ => Vec::new(),
                 },
+                Ok(()) = rules.changed() => {
+                    let rules = rules.borrow_and_update().clone();
+                    for (name, client) in &clients {
+                        let sharing = rules.for_client(name);
+                        if client.sharing.send_replace(sharing) != sharing {
+                            info!("Rechte für „{name}“ geändert: {}", describe_sharing(sharing));
+                            cancel_forbidden(&transfers, name, sharing);
+                        }
+                    }
+                    state.set_sharing(rules);
+                    Vec::new()
+                }
                 Ok(()) = local_game.changed() => {
                     let game = *local_game.borrow_and_update();
                     debug!("Spielemodus: auf diesem Rechner {}", game::describe(game));
@@ -658,6 +722,12 @@ fn apply(
         Action::MoveBy { to, delta } => send_datagram(clients, &to, Datagram::MouseDelta(delta)),
         Action::SyncClipboard { to } => {
             let Some(client) = clients.get(&to) else { return };
+            let rights = *client.sharing.borrow();
+            let allowed = Allowed { clipboard: rights.clipboard.to_client(), files: rights.files.to_client() };
+            if !allowed.any() {
+                // Gar nicht erst lesen; wird es wieder erlaubt, geht der dann aktuelle Inhalt mit.
+                return debug!("Zwischenablage nicht an „{to}“: nicht erlaubt");
+            }
             let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), client.conn.clone());
             let (limit, notify, transfers) = (files.limit, files.notify.clone(), files.transfers.clone());
             // Lesen und PNG-Kodierung im Clipboard-Thread; die Ereignisschleife läuft weiter.
@@ -665,8 +735,10 @@ fn apply(
                 let known = synced.lock().unwrap().get(&to).copied();
                 let (seq, content) = clipboard.changed_since(known).await;
                 synced.lock().unwrap().insert(to.clone(), seq);
-                if let Some(content) = content {
-                    clipfiles::send(conn, content, limit, to, notify, transfers).await;
+                let Some(content) = content else { return };
+                match rights::content(content, allowed) {
+                    Some(content) => clipfiles::send(conn, content, limit, to, notify, transfers).await,
+                    None => debug!("Zwischenablage nicht an „{to}“: nicht erlaubt"),
                 }
             });
         }
@@ -674,6 +746,10 @@ fn apply(
         Action::CancelLocalDrag => capture.cancel_local_drag(),
         Action::StartFileDrag { to, transfer, files: roots } => {
             if let Some(client) = clients.get(&to) {
+                // Der Kern wechselt ohne Rechte gar nicht erst; nur zur Sicherheit
+                if !client.sharing.borrow().drag.to_client() {
+                    return warn!("Drag & Drop an „{to}“ ist nicht erlaubt");
+                }
                 let (conn, input, transfers) = (client.conn.clone(), client.input.clone(), files.transfers.clone());
                 tokio::spawn(start_file_drag(conn, input, to, transfer, roots, transfers));
             }
@@ -792,13 +868,15 @@ async fn handle_connection(
         tx.send(hello).map_err(|_| anyhow!("Server wurde beendet"))?;
         reply_rx.await.map_err(|_| anyhow!("Server wurde beendet"))?
     };
-    match verdict {
-        Ok(server_name) => {
+    let sharing = match verdict {
+        Ok(Admitted { server_name, sharing }) => {
             debug!("„{name}“ läuft unter {platform:?}");
             // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore
             // und, sobald dort etwas im Vollbild läuft, den Spielemodus.
             let welcome = Control::Welcome { version: SERVER_VERSION, server_name, platform: Platform::current() };
             write_frame(&mut send, &welcome).await?;
+            tokio::spawn(send_sharing(send, sharing.clone(), name.clone()));
+            sharing
         }
         Err(reason) => {
             write_frame(&mut send, &Control::Reject { reason }).await?;
@@ -807,10 +885,10 @@ async fn handle_connection(
             let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
             return Ok(());
         }
-    }
+    };
 
     let id = conn.stable_id();
-    tokio::spawn(receive_client_streams(conn.clone(), name.clone(), id, tx.clone(), stagings));
+    tokio::spawn(receive_client_streams(conn.clone(), name.clone(), id, tx.clone(), stagings, sharing));
     loop {
         match read_frame::<_, Control>(&mut recv).await {
             Ok(Some(Control::ScreenChanged(info))) => {
@@ -832,38 +910,100 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Schickt dem Client seine Rechte: gleich nach dem `Welcome` und nach jeder Änderung. Clients bis
+/// Qross 0.6 lesen den Control-Stream danach nicht mehr; bei ihnen bleibt das ungelesen liegen.
+async fn send_sharing(mut control: SendStream, mut sharing: watch::Receiver<Sharing>, name: String) {
+    loop {
+        let current = *sharing.borrow_and_update();
+        if let Err(e) = write_frame(&mut control, &Control::Sharing(current)).await {
+            return debug!("Rechte an „{name}“ nicht gesendet: {e}");
+        }
+        // Endet, sobald der Client getrennt ist
+        if sharing.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Rechte entzogen: Laufende Übertragungen, die jetzt nicht mehr erlaubt sind, brechen ab, als hätte
+/// man „Abbrechen“ gedrückt. Angekommenes wird dabei aus dem Staging gelöscht.
+fn cancel_forbidden(transfers: &Transfers, name: &str, sharing: Sharing) {
+    let forbidden = [
+        (sharing.files.to_client(), Direction::Sending, Kind::Clipboard),
+        (sharing.files.from_client(), Direction::Receiving, Kind::Clipboard),
+        (sharing.drag.to_client(), Direction::Sending, Kind::Drag),
+        (sharing.drag.from_client(), Direction::Receiving, Kind::Drag),
+    ];
+    for (_, direction, kind) in forbidden.into_iter().filter(|(allowed, ..)| !allowed) {
+        let cancelled = transfers.cancel_with(name, direction, kind);
+        if cancelled > 0 {
+            info!("{cancelled} laufende Übertragung(en) mit „{name}“ abgebrochen: nicht mehr erlaubt");
+        }
+    }
+}
+
+/// Lehnt einen Datei-Stream ab, bevor etwas davon im Staging landet (`STOP_SENDING`; der Sender
+/// hört beim nächsten Schreiben auf).
+fn refuse(stream: &mut RecvStream, what: &str) -> anyhow::Error {
+    let _ = stream.stop(0u32.into());
+    anyhow!("{what} nicht erlaubt")
+}
+
 /// Streams vom Client: Zwischenablage (Inhalte und kopierte Dateien) und Drag & Drop zum Server.
+/// Was der Client nicht abgeben darf, wird hier abgewiesen, auch bei Clients, die ihre Rechte nicht
+/// kennen (bis Qross 0.6) oder sich nicht daran halten.
 async fn receive_client_streams(
     conn: Connection,
     name: String,
     id: usize,
     tx: mpsc::UnboundedSender<NetEvent>,
     stagings: Stagings,
+    sharing: watch::Receiver<Sharing>,
 ) {
     while let Ok(mut stream) = conn.accept_uni().await {
-        let (name, tx, stagings) = (name.clone(), tx.clone(), stagings.clone());
+        let (name, tx, stagings, sharing) = (name.clone(), tx.clone(), stagings.clone(), sharing.clone());
         tokio::spawn(async move {
             let result: Result<()> = async {
                 match read_kind(&mut stream).await? {
-                    StreamKind::Clipboard => match read_frame(&mut stream).await? {
-                        Some(ClipboardMsg::Data(data)) => {
-                            let _ = tx.send(NetEvent::Clipboard { name, id, data });
+                    StreamKind::Clipboard => {
+                        let Some(message) = read_frame::<_, ClipboardMsg>(&mut stream).await? else { return Ok(()) };
+                        let rights = *sharing.borrow();
+                        let allowed = Allowed { clipboard: rights.clipboard.from_client(), files: rights.files.from_client() };
+                        if matches!(message, ClipboardMsg::Files { .. }) && !allowed.files {
+                            info!("kopierte Dateien von „{name}“ abgewiesen: nicht erlaubt");
                         }
-                        Some(ClipboardMsg::Files { transfer, entries, data }) => {
-                            let _ = tx.send(NetEvent::ClipboardFiles { name, id, transfer, entries, data });
+                        match rights::message(message, allowed) {
+                            Some(ClipboardMsg::Data(data)) => {
+                                let _ = tx.send(NetEvent::Clipboard { name, id, data });
+                            }
+                            Some(ClipboardMsg::Files { transfer, entries, data }) => {
+                                let _ = tx.send(NetEvent::ClipboardFiles { name, id, transfer, entries, data });
+                            }
+                            None if !allowed.clipboard => info!("Zwischenablage von „{name}“ abgewiesen: nicht erlaubt"),
+                            None => {}
                         }
-                        None => {}
-                    },
+                    }
                     StreamKind::ClipboardFile => {
+                        if !sharing.borrow().files.from_client() {
+                            return Err(refuse(&mut stream, "kopierte Datei"));
+                        }
                         let outcome = files::receive_file(&mut stream, &stagings.clipboard, &stagings.transfers).await?;
                         let _ = tx.send(NetEvent::ClipboardFile { name, id, outcome });
                     }
                     StreamKind::Drag => {
-                        if let Some(DragMessage::Offer { probe, transfer, entries }) = read_frame(&mut stream).await? {
+                        if let Some(DragMessage::Offer { probe, transfer, mut entries }) = read_frame(&mut stream).await? {
+                            if !entries.is_empty() && !sharing.borrow().drag.from_client() {
+                                // Wie „keine Dateien“: Der Server wechselt nicht und nimmt nichts an.
+                                info!("gezogene Dateien von „{name}“ abgewiesen: nicht erlaubt");
+                                entries.clear();
+                            }
                             let _ = tx.send(NetEvent::DragOffer { name, id, probe, transfer, entries });
                         }
                     }
                     StreamKind::File => {
+                        if !sharing.borrow().drag.from_client() {
+                            return Err(refuse(&mut stream, "gezogene Datei"));
+                        }
                         let outcome = files::receive_file(&mut stream, &stagings.drag, &stagings.transfers).await?;
                         let _ = tx.send(NetEvent::DragFile { name, id, outcome });
                     }

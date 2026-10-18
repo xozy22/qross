@@ -427,6 +427,23 @@ main { overflow: auto; overflow-x: hidden; min-height: 0; }
 .screen .remove .ico { width: 15px; height: 15px; }
 .screen:hover .remove, .screen:focus-within .remove { opacity: 1; }
 .screen .remove:hover { background: var(--coral-soft); color: var(--coral); }
+/* Rechte eingeschränkt: Schild unten rechts, führt zum Eintrag in der Seitenleiste */
+.screen .share-badge {
+  position: absolute;
+  bottom: 4px;
+  right: 5px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--amber);
+  display: grid;
+  place-items: center;
+}
+.screen .share-badge .ico { width: 15px; height: 15px; }
+.screen .share-badge:hover { background: var(--amber-soft); }
 
 @container (max-width: 520px) {
   .screen .sub, .screen .tag, .screen .remove { display: none; }
@@ -529,6 +546,24 @@ details.panel-section > summary { font-size: 14px; }
 .client-list li .here { color: var(--teal); font-size: 12px; font-weight: 500; }
 .client-list .empty { display: block; color: var(--muted); font-size: 13px; }
 
+/* Rechte je Rechner */
+.sharing-lede { margin: -6px 0 10px; }
+.sharing-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.share-entry { margin: 0 -10px; padding: 8px 10px; border-radius: 10px; }
+.share-entry:hover, .share-entry[open] { background: var(--ink-2); }
+.share-entry > summary { font-size: 13px; font-weight: 500; align-items: baseline; }
+.share-head { display: grid; min-width: 0; }
+.share-entry .share-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-entry .share-sum { color: var(--muted); font-size: 12px; font-weight: 400; }
+.share-entry.limited .share-sum { color: var(--amber); }
+.share-entry.default { margin-top: 6px; }
+.share-entry.default .share-name { color: var(--muted); }
+.share-default-hint { margin: 8px 0 0; }
+.share-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; color: var(--text); font-weight: 400; }
+.share-kind { display: grid; flex: 1 1 auto; min-width: 0; }
+.share-kind .hint { margin: 0; font-size: 11.5px; }
+.share-row select { flex: none; }
+
 .pending-list { display: grid; gap: 12px; }
 .pending { display: grid; gap: 10px; }
 .pending + .pending { padding-top: 12px; border-top: 1px solid rgba(255, 182, 72, .25); }
@@ -622,6 +657,7 @@ select {
 .client-hero h1 { font-size: 30px; margin-top: 24px; }
 .client-hero .lede { margin: 8px auto 0; }
 .client-hero[data-phase="error"] h1, .client-hero[data-phase="error"] .lede { color: var(--coral); }
+.share-note { margin: 14px auto 0; max-width: 520px; padding: 9px 14px; border-radius: 12px; background: var(--amber-soft); color: var(--amber); font-size: 13px; }
 
 .link-visual { display: flex; align-items: center; justify-content: center; }
 .machine { display: grid; justify-items: center; gap: 18px; width: 150px; color: var(--muted); font-size: 13px; }

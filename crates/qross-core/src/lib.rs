@@ -7,6 +7,7 @@ pub mod keys;
 pub mod layout;
 mod screen;
 pub mod server;
+pub mod sharing;
 
 pub use input::{CaptureEvent, Inject};
 pub use layout::{Layout, LayoutError, LinkConfig};
