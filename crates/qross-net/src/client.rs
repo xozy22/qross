@@ -14,7 +14,7 @@ use qross_platform::{Clipboard, Injector};
 use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
     FileEntry, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, StreamKind, DEFAULT_PORT,
-    GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION,
+    GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, TEXT_SINCE,
 };
 use quinn::{Connection, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -65,6 +65,8 @@ struct ScreenQuery {
     bounds: Box<dyn Fn() -> Rect + Send + Sync>,
     monitors: Box<dyn Fn() -> Vec<Rect> + Send + Sync>,
     game: watch::Receiver<GameState>,
+    /// Das Einspeisen kann Zeichen eingeben (Zeichenmodus)
+    types_text: bool,
 }
 
 /// Fehler, bei denen eine Wiederverbindung sinnlos ist.
@@ -199,7 +201,8 @@ async fn run_inner(
     transfers: Transfers,
 ) -> Result<()> {
     let ClientPlatform { mut injector, clipboard, screen, monitors, game } = platform;
-    let screen = ScreenQuery { bounds: screen, monitors, game: game::watch(game) };
+    let types_text = injector.types_text();
+    let screen = ScreenQuery { bounds: screen, monitors, game: game::watch(game), types_text };
     let _progress = {
         let notices = notices.cloned();
         transfers.spawn_reporter(move |progress| {
@@ -308,6 +311,11 @@ async fn session(
         Some(Control::Reject { reason }) => bail!("Server hat die Verbindung abgelehnt: {reason}"),
         other => bail!("unerwartete Antwort vom Server: {other:?}"),
     };
+    // Zeichen statt Tastenpositionen kann nur ein Server schicken, der sie kennt; ältere trennen bei
+    // unbekannten Nachrichten. Ohne diese Meldung bleibt es bei Tastenpositionen.
+    if server_version >= TEXT_SINCE && screen.types_text {
+        write_frame(&mut control, &Control::TypesText).await?;
+    }
     // Die einzelnen Monitore nur an Server, die sie kennen: ältere trennen bei unbekannten Nachrichten.
     let report_monitors = server_version >= MONITORS_SINCE;
     let mut monitors = (screen.monitors)();

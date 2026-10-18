@@ -57,6 +57,14 @@ media = "active"
 [keys.remap.laptop]
 AltLeft = "MetaLeft"
 
+# Was je Rechner ankommt (optional): "position" (Standard) – die Taste an derselben Stelle, dort
+# bestimmt das eigene Tastaturlayout das Zeichen (wie eine angeschlossene Tastatur, nötig für Spiele) –
+# oder "chars": das Zeichen, das du hier tippst, auch wenn der Rechner ein anderes Layout hat (z. B.
+# hier Deutsch, dort US). Kürzel wie Strg+Z gehen dann nach dem Zeichen, Pfeile, F-Tasten und Co.
+# bleiben Tasten. Rechner mit älterem Qross oder Wayland bekommen weiter Tastenpositionen.
+# [keys.mode]
+# laptop = "chars"
+
 # Spielemodus (optional)
 [game]
 # Läuft auf dem Rechner mit dem Cursor ein Programm im Vollbild (Spiel, Video, Präsentation),

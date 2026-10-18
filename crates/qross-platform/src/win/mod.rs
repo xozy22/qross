@@ -4,6 +4,7 @@ mod cursor;
 mod dnd;
 mod game;
 mod inject;
+mod layout;
 mod shell;
 
 use std::ptr::{null, null_mut};

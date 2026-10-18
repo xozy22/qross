@@ -8,6 +8,9 @@
 //!
 //! Medientasten gehen unter X11 immer an den aktiven Rechner: Während des Tastatur-Grabs lässt
 //! sich eine einzelne Taste nicht lokal durchreichen.
+//!
+//! Im Remote-Modus meldet die Erfassung zu jeder Zeichentaste, was sie in der Belegung des
+//! X-Servers ergibt (`CaptureEvent::Typed`, für Clients im Zeichenmodus).
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use qross_core::chars::is_typing_key;
 use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions, Mods};
 use qross_core::CaptureEvent;
 use qross_proto::{Edge, KeyCode, MouseButton};
@@ -27,6 +31,7 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::{CURRENT_TIME, NONE};
 
+use super::keymap::Keymap;
 use crate::keymap_linux::{evdev_from_hid, hid_from_evdev, X11_OFFSET};
 use crate::Capture;
 
@@ -215,6 +220,8 @@ fn run(s: &Shared) -> Result<()> {
     let mut size_checked = Instant::now();
     let mut hotkey = HotkeyTracker::new();
     let mut was_remote = false;
+    // Belegung für den Zeichenmodus; ohne sie bleibt es bei Tastenpositionen
+    let mut keymap = Keymap::fetch(&s.conn).map_err(|e| tracing::warn!("Tastaturbelegung nicht lesbar: {e:#}")).ok();
 
     loop {
         let remote = s.remote.load(Ordering::Acquire);
@@ -244,6 +251,10 @@ fn run(s: &Shared) -> Result<()> {
             }
             // Lokal kommen nur die passiv gegriffenen Kürzel an; Reste der Remote-Phase verwerfen.
             while let Some(event) = s.conn.poll_for_event()? {
+                if let Event::MappingNotify(_) = event {
+                    keymap = Keymap::fetch(&s.conn).ok();
+                    continue;
+                }
                 let (Event::KeyPress(e) | Event::KeyRelease(e)) = &event else { continue };
                 let down = matches!(event, Event::KeyPress(_));
                 let grabbed = s.grabbed.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&(code, _)| code == e.detail);
@@ -299,11 +310,18 @@ fn run(s: &Shared) -> Result<()> {
                     match hotkey.on_key(key, down, &options) {
                         HotkeyEvent::Triggered { event, .. } => Some(event),
                         HotkeyEvent::Consumed { .. } => None,
-                        HotkeyEvent::None => Some(CaptureEvent::Key { key, down }),
+                        HotkeyEvent::None => Some(match keymap.as_ref().filter(|_| down && is_typing_key(key)) {
+                            Some(keymap) => CaptureEvent::Typed { key, chars: keymap.chars(e.detail, u16::from(e.state)) },
+                            None => CaptureEvent::Key { key, down },
+                        }),
                     }
                 } else {
                     None
                 }
+            }
+            Event::MappingNotify(_) => {
+                keymap = Keymap::fetch(&s.conn).ok();
+                None
             }
             _ => None,
         };

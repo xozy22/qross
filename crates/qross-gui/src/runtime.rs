@@ -49,6 +49,8 @@ pub struct ClientInfo {
     pub height: u32,
     /// Einzelne Monitore (leer: Client vor Qross 0.5 oder noch nicht gemeldet)
     pub monitors: Vec<Rect>,
+    /// Kann Zeichen eingeben (Zeichenmodus); `false` bei Qross vor 0.7 und unter Wayland
+    pub types_text: bool,
 }
 
 /// Bildschirm dieses Rechners, wenn er Server ist
@@ -410,7 +412,14 @@ impl Runtime {
                 s.clients.retain(|c| c.name != name);
                 s.pending.retain(|p| p.name != name);
                 let (width, height) = (screen.width, screen.height);
-                s.clients.push(ClientInfo { name, addr: addr.to_string(), width, height, monitors: Vec::new() });
+                s.clients.push(ClientInfo {
+                    name,
+                    addr: addr.to_string(),
+                    width,
+                    height,
+                    monitors: Vec::new(),
+                    types_text: false,
+                });
                 s.clients.sort_by(|a, b| a.name.cmp(&b.name));
             }),
             ServerNotice::ClientDisconnected { name } => self.update(|s| {
@@ -469,6 +478,11 @@ impl Runtime {
                 s.cursor_on = Some(screen);
             }),
             ServerNotice::Transfer(progress) => self.on_transfer(progress),
+            ServerNotice::ClientTypesText { name } => self.update(|s| {
+                if let Some(c) = s.clients.iter_mut().find(|c| c.name == name) {
+                    c.types_text = true;
+                }
+            }),
         }
     }
 

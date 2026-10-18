@@ -8,6 +8,22 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [Unreleased]
+
+### Neu
+
+- **Zeichen statt Tastenposition, je Rechner:** Steht ein Rechner unter Einstellungen → Tastatur auf „Zeichen“,
+  kommt dort an, was du auf dem Server tippst, auch wenn er ein anderes Tastaturlayout hat (z. B. Server
+  Deutsch, Mac US): Y und Z, Umlaute, @, €, Klammern, tote Tasten wie ^ und ´ sowie alle AltGr-Zeichen. Kürzel
+  wie Strg+Z gehen nach dem Zeichen und bleiben dort „Rückgängig“, Pfeile, F-Tasten und Co. bleiben Tasten.
+  Standard bleibt „Tastenposition“, wie sie Spiele brauchen. In `qross.toml`: `[keys.mode]`.
+
+### Wichtig
+
+- Zeichen bekommen nur Rechner mit dem neuen Qross unter Windows, macOS oder X11. Ältere Clients und Clients
+  unter Wayland bekommen weiter Tastenpositionen; die Oberfläche zeigt das beim Rechner an. Ein Server unter
+  Wayland schickt immer Tastenpositionen.
+
 ## [0.6.0] - 2026-10-18
 
 ### Neu

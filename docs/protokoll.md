@@ -1,8 +1,8 @@
 # Qross-Protokoll, Version 3
 
 Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischenablage, seit Qross 0.4 um
-Drag & Drop vom Client zum Server, seit Qross 0.5 um die einzelnen Monitore eines Clients und seit Qross 0.6
-um den Spielemodus (siehe unten).
+Drag & Drop vom Client zum Server, seit Qross 0.5 um die einzelnen Monitore eines Clients, seit Qross 0.6
+um den Spielemodus und seit Qross 0.7 um Zeichen statt Tastenpositionen (siehe unten).
 
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
@@ -21,9 +21,9 @@ Implementierung: `crates/qross-proto`.
 
 | Kanal | Richtung | Zuverlässig | Inhalt |
 |---|---|---|---|
-| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game` |
+| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText` |
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
-| Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel` |
+| Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel`, im Zeichenmodus `Text`, `Shortcut` |
 | Datagramm | Server → Client | **nein** | `MouseMove`, im Spielemodus `MouseDelta` |
 | Clipboard (je Übertragung ein eigener Stream, Priorität −10) | ⇄ | ja | `Clipboard::Data { text, html, png }`, `Clipboard::Files { transfer, entries, data }` |
 | Datei für Drag & Drop (je Datei ein eigener Stream, Priorität −10) | Server → Client | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
@@ -52,6 +52,8 @@ große Schwachpunkt von Synergy.
    tauscht der Client Strg und Cmd, damit etwa Strg+C auf dem Mac weiterhin kopiert.
    Meldet das `Welcome` mindestens Version 4, schickt der Client gleich danach `Monitors` (siehe unten).
    Ab Version 5 meldet er außerdem mit `Game`, wenn bei ihm etwas im Vollbild läuft (siehe Spielemodus).
+   Ab Version 6 meldet er mit `TypesText` direkt nach dem `Welcome`, dass er Zeichen eingeben kann (siehe
+   Zeichen statt Tastenposition).
 3. Der Server öffnet den Input-Stream.
 4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`. Danach folgen
    `MouseMove`-Datagramme (im Spielemodus `MouseDelta`) mit dieser `epoch` und steigender `seq`.
@@ -218,6 +220,52 @@ verworfen hat. Ältere Versionen reagieren auf beides wie auf einen Fehler im St
   Protokoll ändert sich dadurch nicht. Ein Wechsel per Kürzel sieht für den Client aus wie ein Wechsel über die
   Kante (`Leave`, `Enter` mit neuer `epoch`); die Taste des Kürzels selbst bekommt er nie.
 
+## Zeichen statt Tastenposition
+
+Seit Qross 0.7, je Client einstellbar (`[keys.mode]` in `qross.toml`, Einstellungen → Tastatur). Standard bleibt
+die Tastenposition: Das Layout des Clients bestimmt das Zeichen, wie bei einer dort angeschlossenen Tastatur.
+Im Zeichenmodus kommt dagegen das Zeichen an, das die Taste auf dem **Server** ergibt, egal welches Layout der
+Client hat.
+
+Übersetzt wird beim Server, denn nur er kennt sein Layout samt aktuellem Zustand (Gruppe, Feststelltaste,
+Layout je Programm unter Windows). Seine Erfassung meldet im Remote-Modus zu jeder Zeichentaste (Buchstaben,
+Ziffern der oberen Reihe, Satzzeichen, Leertaste, ISO-Taste „<>“), was sie ergibt (`CaptureEvent::Typed`):
+
+| System | Wie der Server sein Layout liest | Kürzel statt Text |
+|---|---|---|
+| Windows | `ToUnicodeEx` mit Flag 4 (ab Windows 10 1607) für das Layout des Vordergrundfensters; das Flag lässt den Zustand toter Tasten im System unverändert | Strg, Alt ohne AltGr, Windows-Taste; Strg+Alt wie AltGr, wenn es ein Zeichen ergibt |
+| macOS | `UCKeyTranslate` mit dem `uchr`-Layout der aktuellen Eingabequelle; die Eingabequelle liest Qross auf dem Hauptthread und arbeitet mit einer Kopie | Cmd, Ctrl (Option tippt Zeichen) |
+| Linux (X11) | Kern-Mapping des X-Servers samt Gruppe, Ebene (Umschalt, AltGr = ISO_Level3_Shift), Feststelltaste und toter Tasten (`dead_*`) | Strg, Alt ohne AltGr, Super |
+| Wayland | – (das Layout käme nur über libxkbcommon): Der Server schickt immer Tastenpositionen | |
+
+Daraus macht der Server (`qross_core::chars::Typist`) für einen Client im Zeichenmodus:
+
+- `Input::Text { key, text }`: Der Client gibt `text` ein und hält das letzte Zeichen, bis `Key { key, down:
+  false }` kommt. Eine gehaltene Taste wiederholt `Text`.
+- Tote Tasten (^ ´ ` und weitere) verbindet der Server selbst mit dem nächsten Zeichen (`^` + `e` = `ê`); gibt es
+  die Verbindung nicht, kommen beide Zeichen, nach der Leertaste nur der Akzent. Eine andere Taste verwirft sie.
+- Zusatztasten hält der Server zurück: Für Text gehen Umschalt, AltGr und Option nie zum Client (dort wären sie
+  womöglich Alt und machten aus „@“ ein Kürzel). Vor einem Kürzel, einer anderen Taste oder einem Klick bzw. einer
+  Raddrehung (Umschalt+Klick, Strg+Rad) gehen sie als `Key` raus, allein gedrückt (Windows-Taste fürs Startmenü)
+  beim Loslassen.
+- `Input::Shortcut { key, ch }` für Kürzel wie Strg+Z: Der Client drückt die Taste, die in **seinem** Layout `ch`
+  ergibt, sodass Strg+Z dort „Rückgängig“ bleibt; kennt er das Zeichen nicht, die Taste `key`.
+- Pfeile, F-Tasten, Eingabe, Rücktaste, Tab, Esc, Entf, Pos1/Ende, Ziffernblock und Medientasten bleiben `Key`.
+  Eine umbelegte Taste (`[keys.remap]`) bleibt immer eine Taste. Die Feststelltaste wirkt nur auf das Layout des
+  Servers und geht nicht zum Client.
+
+Der Client gibt Zeichen so ein: Windows `SendInput` mit `KEYEVENTF_UNICODE` (`VK_PACKET`, außerhalb der
+Basisebene als Ersatzzeichenpaar), macOS ein Tastenereignis mit `CGEventKeyboardSetUnicodeString` ohne
+Zusatztasten, X11 über eine Taste, die das Zeichen schon ergibt, sonst über einen freien Keycode, den Qross
+vorübergehend mit dem Zeichen belegt (`ChangeKeyboardMapping`, wie `xdotool type`). Für `Shortcut` sucht er die
+Taste: Windows `VkKeyScanEx`, macOS `UCKeyTranslate` rückwärts, X11 das Kern-Mapping.
+
+**Kompatibilität:** Ein neuer Server meldet im `Welcome` die Version 6. Nur dann sendet der Client `TypesText`,
+und nur, wenn er Zeichen eingeben kann (nicht unter Wayland/libei). Server bis Qross 0.6 bekommen die Nachricht
+nie. `Text` und `Shortcut` schickt der Server nur an Clients, die `TypesText` gesendet haben; ein älterer Client
+könnte sie nicht lesen, und sein ganzer Input-Stream bräche ab. Alle anderen bekommen weiter Tastenpositionen,
+auch wenn sie auf „Zeichen“ stehen; die Oberfläche zeigt das beim Rechner an.
+
 ## Regeln für Robustheit
 
 - **Mausposition absolut**, in Client-Koordinaten (physische Pixel, virtueller Desktop), immer auf einem
@@ -231,7 +279,8 @@ verworfen hat. Ältere Versionen reagieren auf beides wie auf einen Fehler im St
   **Wechselverzögerung**, also wenn eine bestimmte Zeit gegen die Kante gedrückt wird. Das verhindert
   versehentliche Wechsel beim Zielen auf Startmenü oder Schließen-Knopf.
 - Tasten sind **physische Tasten als USB-HID-Usage**. Das Layout des Clients bestimmt das Zeichen.
-  Das ist plattformneutral und funktioniert auch mit unterschiedlichen Tastaturlayouts.
+  Das ist plattformneutral und funktioniert auch mit unterschiedlichen Tastaturlayouts. Wer bei
+  unterschiedlichen Layouts lieber die Zeichen des Servers will, stellt den Client auf „Zeichen“ (siehe oben).
 
 ## Verbindungsqualität
 

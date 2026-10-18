@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use qross_core::keys::KeyConfig;
+use qross_core::keys::{KeyConfig, KeyMode};
 use qross_core::server::{Action, Hold, ServerEvent, ServerState, SwitchOptions};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard};
@@ -106,6 +106,9 @@ pub enum ServerNotice {
     /// Stand einer Dateiübertragung (Drag & Drop, kopierte Dateien) etwa viermal pro Sekunde und
     /// zum Schluss ihr Ergebnis (siehe [`crate::progress`]). Abbrechen über [`Server::transfers`].
     Transfer(Progress),
+    /// Der Client kann Zeichen eingeben (Zeichenmodus, ab Qross 0.7). Kommt kurz nach
+    /// `ClientConnected`; bleibt sie aus, bekommt er nur Tastenpositionen.
+    ClientTypesText { name: String },
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -130,6 +133,7 @@ enum NetEvent {
     ScreenChanged { name: String, id: usize, screen: Rect },
     Monitors { name: String, id: usize, monitors: Vec<Rect> },
     Game { name: String, id: usize, game: GameState },
+    TypesText { name: String, id: usize },
     Clipboard { name: String, id: usize, data: ClipboardData },
     ClipboardFiles { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     ClipboardFile { name: String, id: usize, outcome: FileOutcome },
@@ -158,6 +162,10 @@ struct ClientHandle {
     monitors: Vec<Rect>,
     /// Misst die Verbindungsqualität, solange der Client verbunden ist (nur mit Oberfläche)
     _quality: Option<quality::Monitor>,
+    /// Kann Zeichen eingeben (`Control::TypesText`)
+    types_text: bool,
+    /// Schon ins Log geschrieben, dass er trotz Zeichenmodus Tastenpositionen bekommt
+    told_positions: std::sync::atomic::AtomicBool,
 }
 
 impl Server {
@@ -194,7 +202,8 @@ impl Server {
     }
 
     /// Fang-Taste, Medientasten und Umbelegung je Rechner (Standard: Rollen-Taste,
-    /// Medientasten an den aktiven Rechner, keine Umbelegung) sowie Wechsel-Kürzel (Standard: keine).
+    /// Medientasten an den aktiven Rechner, keine Umbelegung), Wechsel-Kürzel (Standard: keine)
+    /// und Tastenposition oder Zeichen je Rechner (Standard: Tastenposition).
     pub fn with_keys(mut self, keys: KeyConfig) -> Self {
         self.keys = keys;
         self
@@ -296,6 +305,7 @@ impl Server {
         state.set_switch_options(self.switching);
         state.set_game_mode(self.game_mode);
         state.set_key_maps(self.keys.remap.clone());
+        state.set_key_modes(self.keys.modes.clone());
         for (hotkey, target) in &self.keys.options.switch {
             if let qross_core::keys::SwitchTarget::Screen(name) = target {
                 if *name != self.config.name && !self.config.layout.contains(name) {
@@ -364,6 +374,8 @@ impl Server {
                                     screen,
                                     monitors: Vec::new(),
                                     _quality: quality,
+                                    types_text: false,
+                                    told_positions: Default::default(),
                                 };
                                 clients.insert(name.clone(), handle);
                                 clip_synced.lock().unwrap().remove(&name);
@@ -407,6 +419,18 @@ impl Server {
                     NetEvent::Game { name, id, game } if is_current(&clients, &name, id) => {
                         debug!("Spielemodus: „{name}“ meldet {}", game::describe(game));
                         state.handle(ServerEvent::ClientGame { name, game })
+                    }
+                    NetEvent::TypesText { name, id } if is_current(&clients, &name, id) => {
+                        if let Some(client) = clients.get_mut(&name) {
+                            client.types_text = true;
+                        }
+                        if self.keys.modes.get(&name) == Some(&KeyMode::Chars) {
+                            info!("„{name}“ bekommt Zeichen statt Tastenpositionen");
+                        } else {
+                            debug!("„{name}“ kann Zeichen eingeben");
+                        }
+                        self.notify(ServerNotice::ClientTypesText { name: name.clone() });
+                        state.handle(ServerEvent::ClientTypesText { name })
                     }
                     NetEvent::Clipboard { name, id, data } if is_current(&clients, &name, id) => {
                         info!("Zwischenablage von „{name}“: {}", data.summary());
@@ -490,10 +514,27 @@ impl Server {
             };
             for action in actions {
                 self.notify_action(&action);
+                self.explain_key_mode(&action, &clients);
                 let files = FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers };
                 apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops);
             }
             self.report_hold(&state, &mut hold);
+        }
+    }
+
+    /// Steht ein Client auf „Zeichen“, kann sie aber nicht eingeben: einmal je Verbindung ins Log,
+    /// sobald der Cursor ihn betritt.
+    fn explain_key_mode(&self, action: &Action, clients: &HashMap<String, ClientHandle>) {
+        let Action::Send { to, input: Input::Enter { .. } } = action else { return };
+        let Some(client) = clients.get(to) else { return };
+        if self.keys.modes.get(to) == Some(&KeyMode::Chars)
+            && !client.types_text
+            && !client.told_positions.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            info!(
+                "„{to}“ steht auf „Zeichen“, kann sie aber nicht eingeben (Qross vor 0.7 oder Wayland) – \
+                 er bekommt Tastenpositionen"
+            );
         }
     }
 
@@ -795,8 +836,8 @@ async fn handle_connection(
     match verdict {
         Ok(server_name) => {
             debug!("„{name}“ läuft unter {platform:?}");
-            // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore
-            // und, sobald dort etwas im Vollbild läuft, den Spielemodus.
+            // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore,
+            // ob sie Zeichen eingeben können und, sobald dort etwas im Vollbild läuft, den Spielemodus.
             let welcome = Control::Welcome { version: SERVER_VERSION, server_name, platform: Platform::current() };
             write_frame(&mut send, &welcome).await?;
         }
@@ -822,6 +863,9 @@ async fn handle_connection(
             }
             Ok(Some(Control::Game(game))) => {
                 let _ = tx.send(NetEvent::Game { name: name.clone(), id, game });
+            }
+            Ok(Some(Control::TypesText)) => {
+                let _ = tx.send(NetEvent::TypesText { name: name.clone(), id });
             }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht"),
             Ok(None) | Err(_) => break,

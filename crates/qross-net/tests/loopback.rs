@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use qross_core::keys::{parse_switch_keys, HotkeyEvent, HotkeyTracker, KeyConfig, KeyOptions};
+use qross_core::chars::{KeyChars, Produces};
+use qross_core::keys::{parse_switch_keys, HotkeyEvent, HotkeyTracker, KeyConfig, KeyMode, KeyOptions};
 use qross_core::{CaptureEvent, Inject, Layout, LinkConfig};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::progress::{Direction, Kind, Phase, Progress, Transfers};
@@ -949,6 +950,11 @@ async fn an_older_client_stays_connected_and_gets_positions() {
 /// Ein Server wie Qross 0.5 bzw. 0.6 (`welcome_version`). Ein Client mit Vollbildprogramm meldet
 /// sich an; geliefert wird alles, was er danach auf dem Control-Stream schickt (als Rohdaten).
 async fn client_reports_to(welcome_version: u16) -> Vec<Vec<u8>> {
+    client_reports_with(welcome_version, RecordingInjector::default()).await
+}
+
+/// Wie `client_reports_to`, mit eigenem Einspeisen (z. B. einem, das Zeichen eingeben kann)
+async fn client_reports_with(welcome_version: u16, injector: RecordingInjector) -> Vec<Vec<u8>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let server_id = Identity::generate().unwrap();
     let endpoint =
@@ -965,7 +971,7 @@ async fn client_reports_to(welcome_version: u16) -> Vec<Vec<u8>> {
         Identity::generate().unwrap(),
         TrustStore::in_memory(),
         ClientPlatform {
-            injector: Box::new(RecordingInjector::default()),
+            injector: Box::new(injector),
             clipboard: Box::new(SharedClipboard::default()),
             screen: Box::new(|| LAPTOP),
             monitors: Box::new(Vec::new),
@@ -1158,4 +1164,285 @@ async fn copied_files_report_progress_and_the_sender_can_cancel() {
     });
     assert!(!failed, "ein Abbruch ist kein Fehler");
     let _ = std::fs::remove_dir_all(&base);
+}
+
+// --- Zeichen statt Tastenposition ---------------------------------------------------------------
+
+/// Server, auf dem „laptop“ auf `mode` steht, und ein Client mit dem Einspeisen `injected`
+/// (`RecordingInjector::typing()` kann Zeichen eingeben, wie Windows, macOS und X11)
+fn start_typing(mode: KeyMode, injected: RecordingInjector) -> Setup {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let (server_id, client_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let keys = KeyConfig { modes: HashMap::from([("laptop".to_owned(), mode)]), ..KeyConfig::default() };
+    let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server = Server::bind(config, &server_id, trust).unwrap().with_keys(keys).with_notices(notice_tx);
+    let (addr, server_transfers) = (server.local_addr().unwrap(), server.transfers());
+
+    let capture = RecordingCapture::default();
+    let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (server_clip, client_clip) = (SharedClipboard::default(), SharedClipboard::default());
+    let (server_game, client_game) = (Game::default(), Game::default());
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(capture.clone()),
+        events: events_rx,
+        clipboard: Box::new(server_clip.clone()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: detector(&server_game),
+    }));
+    let client_config = ClientConfig {
+        name: "laptop".into(),
+        server: addr.to_string(),
+        server_fingerprint: Some(server_id.fingerprint()),
+        clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+    };
+    let (client_tx, client_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client_transfers = Transfers::new();
+    let client_screen: ClientScreen = Arc::new(Mutex::new((LAPTOP, Vec::new())));
+    let client_task = tokio::spawn(client::run_with_transfers(
+        client_config,
+        client_id,
+        TrustStore::in_memory(),
+        ClientPlatform {
+            injector: Box::new(injected.clone()),
+            clipboard: Box::new(client_clip.clone()),
+            screen: Box::new(|| LAPTOP),
+            monitors: Box::new(Vec::new),
+            game: detector(&client_game),
+        },
+        client_tx,
+        client_transfers.clone(),
+    ));
+    Setup {
+        events,
+        capture,
+        server_clip,
+        injected,
+        client_clip,
+        client_screen,
+        server_game,
+        client_game,
+        notices: collect(notice_rx),
+        client_notices: collect(client_rx),
+        server_transfers,
+        client_transfers,
+        server_task,
+        client_task,
+    }
+}
+
+const KEY_E: KeyCode = KeyCode(0x08);
+const KEY_Q: KeyCode = KeyCode(0x14);
+/// Deutsche Tastatur: Z (US: Y)
+const KEY_Y: KeyCode = KeyCode(0x1C);
+/// Deutsche Tastatur: ^ als tote Taste
+const BACKQUOTE: KeyCode = KeyCode(0x35);
+const ALTGR: KeyCode = KeyCode::RIGHT_ALT;
+
+/// Was der Client an Tasten und Zeichen eingespeist hat (ohne Mausbewegungen)
+fn typed(injected: &RecordingInjector) -> Vec<Inject> {
+    let log = injected.0.lock().unwrap();
+    log.iter().filter(|i| matches!(i, Inject::Key { .. } | Inject::Char { .. } | Inject::Shortcut { .. })).copied().collect()
+}
+
+#[tokio::test]
+async fn characters_reach_a_client_set_to_them() {
+    let s = start_typing(KeyMode::Chars, RecordingInjector::typing());
+    let notices = s.notices.clone();
+    wait_for("Client kann Zeichen eingeben", || {
+        notices.lock().unwrap().iter().any(|n| matches!(n, ServerNotice::ClientTypesText { name } if name == "laptop"))
+    })
+    .await;
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+
+    // Deutscher Server: AltGr+Q = @, Strg+Z (Taste Y), ^ e = ê – egal, welches Layout der Client hat
+    for event in [
+        CaptureEvent::Key { key: ALTGR, down: true },
+        CaptureEvent::Typed { key: KEY_Q, chars: KeyChars::text("@", 'q') },
+        CaptureEvent::Key { key: KEY_Q, down: false },
+        CaptureEvent::Key { key: ALTGR, down: false },
+        CaptureEvent::Key { key: CTRL, down: true },
+        CaptureEvent::Typed { key: KEY_Y, chars: KeyChars { produces: Produces::Nothing, base: Some('z'), shortcut: true } },
+        CaptureEvent::Key { key: KEY_Y, down: false },
+        CaptureEvent::Key { key: CTRL, down: false },
+        CaptureEvent::Typed { key: BACKQUOTE, chars: KeyChars { produces: Produces::Dead('^'), base: Some('^'), shortcut: false } },
+        CaptureEvent::Key { key: BACKQUOTE, down: false },
+        CaptureEvent::Typed { key: KEY_E, chars: KeyChars::text("e", 'e') },
+        CaptureEvent::Key { key: KEY_E, down: false },
+        // Pfeile bleiben Tasten
+        CaptureEvent::Key { key: ARROW_LEFT, down: true },
+        CaptureEvent::Key { key: ARROW_LEFT, down: false },
+    ] {
+        s.events.send(event).unwrap();
+    }
+    let injected = s.injected.clone();
+    wait_for("Pfeil beim Client", || typed(&injected).contains(&Inject::Key { key: ARROW_LEFT, down: false })).await;
+    assert_eq!(
+        typed(&s.injected),
+        vec![
+            Inject::Char { ch: '@', down: true },
+            Inject::Char { ch: '@', down: false },
+            Inject::Key { key: CTRL, down: true },
+            Inject::Shortcut { ch: 'z', key: KEY_Y, down: true },
+            Inject::Shortcut { ch: 'z', key: KEY_Y, down: false },
+            Inject::Key { key: CTRL, down: false },
+            Inject::Char { ch: 'ê', down: true },
+            Inject::Char { ch: 'ê', down: false },
+            Inject::Key { key: ARROW_LEFT, down: true },
+            Inject::Key { key: ARROW_LEFT, down: false },
+        ],
+        "AltGr erreicht den Client nie, die tote Taste wartet auf das e"
+    );
+}
+
+#[tokio::test]
+async fn clients_that_cannot_type_characters_get_positions() {
+    // Kann der Client keine Zeichen eingeben (Wayland), meldet er es nicht – und bekommt Tasten.
+    let s = start_typing(KeyMode::Chars, RecordingInjector::default());
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    for event in [
+        CaptureEvent::Key { key: ALTGR, down: true },
+        CaptureEvent::Typed { key: KEY_Q, chars: KeyChars::text("@", 'q') },
+        CaptureEvent::Key { key: KEY_Q, down: false },
+        CaptureEvent::Key { key: ALTGR, down: false },
+    ] {
+        s.events.send(event).unwrap();
+    }
+    let injected = s.injected.clone();
+    wait_for("Tasten beim Client", || typed(&injected).len() == 4).await;
+    assert_eq!(
+        typed(&s.injected),
+        vec![
+            Inject::Key { key: ALTGR, down: true },
+            Inject::Key { key: KEY_Q, down: true },
+            Inject::Key { key: KEY_Q, down: false },
+            Inject::Key { key: ALTGR, down: false },
+        ]
+    );
+    let notices = s.notices.lock().unwrap();
+    assert!(!notices.iter().any(|n| matches!(n, ServerNotice::ClientTypesText { .. })), "{notices:?}");
+}
+
+/// So sah `Control` in Qross 0.6 aus.
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+enum ControlV06 {
+    Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+    Welcome { version: u16, server_name: String, platform: Platform },
+    Reject { reason: String },
+    ScreenChanged(ScreenInfo),
+    Monitors(Vec<Rect>),
+    Game(GameState),
+}
+
+/// So sah `Input` in Qross 0.6 aus.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+enum InputV06 {
+    Enter { epoch: u16, x: i32, y: i32 },
+    Leave,
+    Key { key: KeyCode, down: bool },
+    Button { button: MouseButton, down: bool, x: i32, y: i32 },
+    Wheel { dx: i16, dy: i16 },
+    DragStart { transfer: u64, entries: Vec<qross_proto::FileEntry> },
+    Drop { transfer: u64, x: i32, y: i32 },
+}
+
+#[tokio::test]
+async fn the_client_announces_typing_only_to_servers_that_know_it() {
+    // Qross 0.6 meldet Version 5 und trennte bei `TypesText`: Er bekommt nur, was er lesen kann.
+    for frame in client_reports_with(5, RecordingInjector::typing()).await {
+        let msg = postcard::from_bytes::<ControlV06>(&frame);
+        assert!(msg.is_ok(), "ein Server aus 0.6 kann {msg:?} nicht lesen");
+    }
+    let frames = client_reports_with(SERVER_VERSION, RecordingInjector::typing()).await;
+    let messages: Vec<Control> = frames.iter().map(|f| postcard::from_bytes(f).unwrap()).collect();
+    assert_eq!(messages, vec![Control::TypesText, Control::Game(FULLSCREEN)]);
+}
+
+#[tokio::test]
+async fn an_older_client_set_to_characters_gets_keys_it_can_read() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let keys = KeyConfig { modes: HashMap::from([("laptop".to_owned(), KeyMode::Chars)]), ..KeyConfig::default() };
+    let server = Server::bind(config, &server_id, trust).unwrap().with_keys(keys);
+    let addr = server.local_addr().unwrap();
+    let capture = RecordingCapture::default();
+    let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(capture.clone()),
+        events: events_rx,
+        clipboard: Box::new(SharedClipboard::default()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+    }));
+
+    // Ein Client wie Qross 0.6: Hello, Welcome, kein `TypesText`
+    let (_endpoint, conn) = connect_raw(addr, &client_id).await;
+    let (mut control, mut control_rx) = conn.open_bi().await.unwrap();
+    let hello = Control::Hello { version: PROTOCOL_VERSION, name: "laptop".into(), screen: ScreenInfo { bounds: LAPTOP }, platform: Platform::MacOs };
+    write_frame(&mut control, &hello).await.unwrap();
+    let welcome = read_frame::<_, ControlV06>(&mut control_rx).await.unwrap();
+    assert!(matches!(welcome, Some(ControlV06::Welcome { version: SERVER_VERSION, .. })), "{welcome:?}");
+
+    let inputs = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let (conn, inputs) = (conn.clone(), inputs.clone());
+        tokio::spawn(async move {
+            let mut stream = conn.accept_uni().await.unwrap();
+            let mut kind = [0u8; 1];
+            stream.read_exact(&mut kind).await.unwrap();
+            assert_eq!(kind[0], 1, "Input-Stream");
+            loop {
+                let input = read_frame::<_, InputV06>(&mut stream).await.map_err(|e| e.to_string());
+                let end = !matches!(input, Ok(Some(_)));
+                inputs.lock().unwrap().push(input);
+                if end {
+                    break;
+                }
+            }
+        })
+    };
+    let calls = capture.clone();
+    wait_for("Wechsel zum alten Client", || {
+        let _ = events.send(edge_hit());
+        calls.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    events.send(CaptureEvent::Typed { key: KEY_Q, chars: KeyChars::text("@", 'q') }).unwrap();
+    events.send(CaptureEvent::Key { key: KEY_Q, down: false }).unwrap();
+    let received = inputs.clone();
+    wait_for("Tasten beim alten Client", || received.lock().unwrap().len() >= 3).await;
+    let log = inputs.lock().unwrap().clone();
+    assert_eq!(
+        log[1..3],
+        [Ok(Some(InputV06::Key { key: KEY_Q, down: true })), Ok(Some(InputV06::Key { key: KEY_Q, down: false }))],
+        "{log:?}"
+    );
+    assert!(matches!(log[0], Ok(Some(InputV06::Enter { .. }))), "{log:?}");
+    assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
+    reader.abort();
+    server_task.abort();
 }

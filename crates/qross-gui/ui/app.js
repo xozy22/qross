@@ -636,6 +636,7 @@ async function renameScreen(oldName) {
   server.screens.find((s) => s.name === oldName).name = name;
   if (server.name === oldName) server.name = name;
   renameSwitchKey(oldName, name);
+  renameKeyMode(oldName, name);
   state.focusName = name;
   await settingsChanged({ immediate: true });
   focusScreen(name);
@@ -1530,6 +1531,7 @@ function renderKeys() {
   $("#lockDefault").disabled = keys.lock === DEFAULT_LOCK;
   $("#lockOff").disabled = !keys.lock;
   renderSwitchKeys();
+  renderKeyModes();
 
   const media = $("#mediaMode");
   media.value = keys.media;
@@ -1728,6 +1730,63 @@ function recordSwitch(target) {
       keysChanged();
     },
   });
+}
+
+// Tastenposition oder Zeichen je Rechner. Ob ein verbundener Rechner Zeichen eingeben kann, meldet
+// der Server (Status `clients[].types_text`); sonst bekommt er trotz Einstellung Tastenpositionen.
+
+function renderKeyModes() {
+  const keys = state.settings.server.keys;
+  keys.modes ??= {};
+  const s = state.status;
+  const clients = s?.role === "server" ? s.clients : [];
+  const focused = document.activeElement?.closest?.("#modeList li")?.dataset.machine;
+  $("#modeHint").textContent =
+    "„Tastenposition“: die Taste an derselben Stelle, dort bestimmt das eigene Tastaturlayout das Zeichen – wie eine angeschlossene Tastatur, nötig für Spiele. " +
+    "„Zeichen“: Dort kommt an, was du hier tippst, auch bei anderem Layout (z. B. hier Deutsch, dort US). Kürzel wie Strg+Z gehen nach dem Zeichen, Pfeile, F-Tasten und Co. bleiben Tasten." +
+    (state.desktop === "wayland" ? " Unter Wayland kann dieser Rechner sein Tastaturlayout nicht lesen und schickt als Server immer Tastenpositionen." : "");
+  const machines = machinesForRemap();
+  $("#modeList").replaceChildren(
+    ...(machines.length
+      ? machines.map((machine) => {
+          const mode = keys.modes[machine] === "chars" ? "chars" : "position";
+          const client = clients.find((c) => c.name === machine);
+          const note =
+            mode === "chars" && client && !client.types_text
+              ? `„${machine}“ kann keine Zeichen eingeben (Qross vor 0.7 oder Wayland) und bekommt Tastenpositionen.`
+              : null;
+          const select = el(
+            "select",
+            { "aria-label": `Tasten senden an ${machine}`, onchange: (e) => setKeyMode(machine, e.target.value) },
+            el("option", { value: "position", text: "Tastenposition" }),
+            el("option", { value: "chars", text: "Zeichen" }),
+          );
+          select.value = mode;
+          return el(
+            "li",
+            { "data-machine": machine },
+            el("span", { class: "switch-target" }, icon("screen"), el("span", { class: "name", text: machine, title: machine })),
+            select,
+            note ? el("span", { class: "hint mode-note", text: note }) : null,
+          );
+        })
+      : [el("li", { class: "empty", text: "Füge im Layout einen Rechner hinzu, um das einzustellen." })]),
+  );
+  if (focused) [...$$("#modeList li")].find((li) => li.dataset.machine === focused)?.querySelector("select")?.focus();
+}
+
+function setKeyMode(machine, mode) {
+  const modes = state.settings.server.keys.modes;
+  if (mode === "chars") modes[machine] = "chars";
+  else delete modes[machine];
+  keysChanged();
+}
+
+/** Die Einstellung eines umbenannten Rechners wandert mit. */
+function renameKeyMode(oldName, name) {
+  const modes = (state.settings.server.keys.modes ??= {});
+  if (oldName in modes) modes[name] = modes[oldName];
+  delete modes[oldName];
 }
 
 /** Das Kürzel eines umbenannten Rechners wandert mit. */
@@ -2347,6 +2406,8 @@ function render() {
   renderServer();
   renderClients();
   renderClient();
+  // Verbundene Rechner melden, ob sie Zeichen eingeben können
+  if ($("#settings").open && state.settings) renderKeyModes();
 }
 
 async function init() {

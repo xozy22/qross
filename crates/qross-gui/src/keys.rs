@@ -1,11 +1,11 @@
-//! Tastatur-Einstellungen der Oberfläche: Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung je
-//! Rechner.
+//! Tastatur-Einstellungen der Oberfläche: Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung und
+//! Tastenposition oder Zeichen je Rechner.
 //! Sie wirken auf dem Server (dort läuft die Erfassung) und werden zu `qross_core::keys::KeyConfig`.
 //! Tasten heißen wie `KeyboardEvent.code` („ScrollLock“, „AltLeft“), wie in `qross.toml`.
 
 use std::collections::{BTreeMap, HashMap};
 
-use qross_core::keys::{key_from_name, Hotkey, KeyConfig, KeyMap, KeyOptions, MediaKeys, SwitchTarget};
+use qross_core::keys::{key_from_name, Hotkey, KeyConfig, KeyMap, KeyMode, KeyOptions, MediaKeys, SwitchTarget};
 use qross_proto::Edge;
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,8 @@ pub struct KeySettings {
     /// Rechner → Regeln in der eingegebenen Reihenfolge
     pub remap: BTreeMap<String, Vec<KeyRule>>,
     pub switch: SwitchKeys,
+    /// Rechner → Tastenposition (Standard, fehlt dann meist) oder Zeichen
+    pub modes: BTreeMap<String, KeyMode>,
 }
 
 /// Wechsel-Kürzel: je Richtung und je Rechner höchstens eines, wie „Ctrl+Alt+ArrowLeft“
@@ -69,6 +71,7 @@ impl Default for KeySettings {
             media: MediaKeys::Active,
             remap: BTreeMap::new(),
             switch: SwitchKeys::default(),
+            modes: BTreeMap::new(),
         }
     }
 }
@@ -99,7 +102,8 @@ impl KeySettings {
             }
         }
         let switch = self.switch.entries()?;
-        Ok(KeyConfig { options: KeyOptions { lock, media: self.media, switch }, remap })
+        let modes = self.modes.iter().map(|(machine, mode)| (machine.clone(), *mode)).collect();
+        Ok(KeyConfig { options: KeyOptions { lock, media: self.media, switch }, remap, modes })
     }
 
     /// Abschnitt `[keys]` für `qross.toml` (gleiches Format wie `qross.example.toml`)
@@ -126,6 +130,14 @@ impl KeySettings {
         }
         if !lines.is_empty() {
             out += &format!("\n[keys.switch]\n{lines}");
+        }
+        // Nur Abweichungen vom Standard (Tastenposition)
+        let chars: Vec<&String> = self.modes.iter().filter(|(_, mode)| **mode == KeyMode::Chars).map(|(m, _)| m).collect();
+        if !chars.is_empty() {
+            out += "\n[keys.mode]\n";
+            for machine in chars {
+                out += &format!("{} = \"chars\"\n", crate::quote(machine));
+            }
         }
         out
     }
@@ -210,6 +222,23 @@ mod tests {
         let bad = KeySettings { switch: switch_keys(&[("links", "Ctrl+KeyA")], &[]), ..KeySettings::default() };
         assert!(bad.config().unwrap_err().contains("Richtung „links“"));
         assert!(!bad.to_toml().contains("[keys.switch]"), "Vorschau bleibt lesbar");
+    }
+
+    #[test]
+    fn key_modes_become_config_and_toml() {
+        let mut keys = KeySettings::default();
+        assert!(!keys.to_toml().contains("[keys.mode]"), "Standard: nichts exportieren");
+        keys.modes.insert("mac".into(), KeyMode::Chars);
+        keys.modes.insert("pc 2".into(), KeyMode::Position);
+        let modes = keys.config().unwrap().modes;
+        assert_eq!((modes["mac"], modes["pc 2"]), (KeyMode::Chars, KeyMode::Position));
+        let toml = keys.to_toml();
+        assert!(toml.ends_with("\n[keys.mode]\n\"mac\" = \"chars\"\n"), "{toml}");
+        // gui.json ohne Feld (ältere Version): alles Tastenposition
+        let old: KeySettings = serde_json::from_str(r#"{"lock":"ScrollLock"}"#).unwrap();
+        assert!(old.modes.is_empty());
+        let saved: KeySettings = serde_json::from_str(r#"{"modes":{"mac":"chars"}}"#).unwrap();
+        assert_eq!(saved.modes["mac"], KeyMode::Chars);
     }
 
     #[test]

@@ -7,6 +7,9 @@
 //!
 //! Die Entscheidung „verschlucken oder nicht“ muss synchron im Hook fallen, deshalb lebt
 //! der Modus als Atomic hier und nicht im asynchronen Server-Kern.
+//!
+//! Im Remote-Modus liest der Hook zu jeder Zeichentaste, was sie im Tastaturlayout des
+//! Vordergrundfensters ergibt (`CaptureEvent::Typed`, für Clients im Zeichenmodus).
 
 use std::cell::RefCell;
 use std::ptr::{null, null_mut};
@@ -16,6 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use anyhow::{anyhow, bail, Context};
+use qross_core::chars::is_typing_key;
 use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions, MediaKeys};
 use qross_core::CaptureEvent;
 use qross_proto::{Edge, KeyCode, MouseButton};
@@ -29,8 +33,8 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MBUTTON, VK_RBUTTON,
-    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_XBUTTON1, VK_XBUTTON2,
+    GetAsyncKeyState, GetKeyState, VK_CAPITAL, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+    VK_MBUTTON, VK_RBUTTON, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_XBUTTON1, VK_XBUTTON2,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, PostThreadMessageW, SetCursorPos,
@@ -39,8 +43,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
 };
 
-use super::{cursor, dnd, inject, primary_center, INJECT_MAGIC};
-use crate::keymap_windows::hid_from_windows;
+use super::{cursor, dnd, inject, layout, primary_center, INJECT_MAGIC};
+use crate::keymap_windows::{hid_from_windows, WinModifiers};
 use crate::Capture;
 
 struct Shared {
@@ -65,6 +69,12 @@ struct HookState {
     buttons_down: [bool; 5],
     /// Erkennt Fang-Taste und Wechsel-Kürzel
     hotkey: HotkeyTracker,
+    /// Das künstliche Strg links von AltGr ist gedrückt
+    altgr: bool,
+    /// Feststelltaste im Remote-Modus: Dort schaltet sie das System nicht um (verschluckt), das
+    /// Layout des Servers soll sie für den Zeichenmodus aber berücksichtigen.
+    caps: bool,
+    was_remote: bool,
 }
 
 thread_local! {
@@ -74,6 +84,9 @@ thread_local! {
             local_down: [false; 256],
             buttons_down: [false; 5],
             hotkey: HotkeyTracker::new(),
+            altgr: false,
+            caps: false,
+            was_remote: false,
         })
     };
 }
@@ -91,6 +104,18 @@ impl HookState {
     /// wenn dazwischen keine andere Taste ankam.
     fn menu_modifiers(&self) -> bool {
         self.any(VK_LMENU, VK_RMENU) || self.any(VK_LWIN, VK_RWIN)
+    }
+
+    /// Zusatztasten für den Zeichenmodus. Das künstliche Strg von AltGr zählt nicht als Strg.
+    fn modifiers(&self) -> WinModifiers {
+        WinModifiers {
+            shift: self.any(VK_LSHIFT, VK_RSHIFT),
+            ctrl: self.pressed[VK_RCONTROL as usize] || (self.pressed[VK_LCONTROL as usize] && !self.altgr),
+            alt: self.any(VK_LMENU, VK_RMENU),
+            altgr: self.altgr && self.pressed[VK_RMENU as usize],
+            win: self.any(VK_LWIN, VK_RWIN),
+            caps: self.caps,
+        }
     }
 }
 
@@ -309,8 +334,16 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
     let key = if fake_ctrl { None } else { hid_from_windows(info.scanCode, extended, info.vkCode) };
     let options = shared.keys.lock().unwrap_or_else(|e| e.into_inner());
     STATE.with_borrow_mut(|st| {
-        st.pressed[vk] = !up;
+        let was_down = std::mem::replace(&mut st.pressed[vk], !up);
+        if fake_ctrl {
+            st.altgr = !up;
+        }
         let remote = shared.remote.load(Ordering::Acquire);
+        if remote && !st.was_remote {
+            // Stand der Feststelltaste beim Wechsel; danach zählt der Hook selbst mit.
+            st.caps = unsafe { GetKeyState(i32::from(VK_CAPITAL)) } & 1 != 0;
+        }
+        st.was_remote = remote;
         if let Some(key) = key {
             // Fang-Taste (Standard: Rollen) und Wechsel-Kürzel
             let hotkey = st.hotkey.on_key(key, !up, &options);
@@ -352,11 +385,19 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
             // Künstliches LCtrl von AltGr – der Client erzeugt es selbst.
             return true;
         }
+        if vk == VK_CAPITAL as usize && !up && !was_down {
+            st.caps = !st.caps;
+        }
         if options.media == MediaKeys::Local && key.is_some_and(KeyCode::is_media) {
             // Medientasten wirken auf Wunsch immer hier (z. B. Lautsprecher am Server)
             return false;
         }
         match key {
+            Some(key) if !up && is_typing_key(key) => {
+                // Zeichenmodus: was die Taste im Layout des Vordergrundfensters ergibt
+                let chars = layout::key_chars(info.vkCode, info.scanCode & 0xFF, st.modifiers(), layout::foreground_layout());
+                let _ = shared.events.send(CaptureEvent::Typed { key, chars });
+            }
             Some(key) => {
                 let _ = shared.events.send(CaptureEvent::Key { key, down: !up });
             }

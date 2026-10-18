@@ -1033,6 +1033,9 @@ dialog.settings { width: min(780px, calc(100vw - 32px)); height: min(640px, calc
 .switch-target .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .switch-target .server-tag { flex: none; padding: 1px 6px; border-radius: 6px; background: var(--ink-3); color: var(--muted); font-size: 11px; }
 .switch-key { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.key-modes { display: grid; gap: 10px; padding: 6px 0 12px; }
+.mode-list select { padding: 6px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--ink-2); font-size: 13px; }
+.mode-list .mode-note { grid-column: 1 / -1; margin: 0; color: var(--amber); }
 .switch-key .keycap.conflict { border-color: var(--coral); color: var(--coral); }
 .switch-key .remove-key { margin-left: -2px; }
 .switch-problem { grid-column: 1 / -1; margin: 0; color: var(--coral); font-size: 12.5px; }

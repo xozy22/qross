@@ -119,10 +119,62 @@ pub fn windows_from_hid(key: KeyCode) -> Option<WinKey> {
     Some(WinKey { scan: code & 0xFF, extended: code & EXT != 0, vk: None })
 }
 
+/// Gedrückte Zusatztasten, wenn unter Windows eine Zeichentaste kommt (Zeichenmodus)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WinModifiers {
+    pub shift: bool,
+    /// Echtes Strg, nicht das künstliche von AltGr
+    pub ctrl: bool,
+    pub alt: bool,
+    /// Alt Gr eines Layouts mit AltGr (Windows meldet es als künstliches Strg links und Alt rechts)
+    pub altgr: bool,
+    pub win: bool,
+    /// Feststelltaste eingerastet
+    pub caps: bool,
+}
+
+/// Wie Windows eine Zeichentaste auswertet
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WinTyping {
+    /// Ein Kürzel: Strg, Alt ohne AltGr oder die Windows-Taste
+    Shortcut,
+    /// Tippen; `ctrl_alt`: mit AltGr bzw. Strg+Alt, das Windows wie AltGr behandelt. Ergibt die
+    /// Taste dann kein Zeichen (z. B. Strg+Alt+Entf), ist es doch ein Kürzel.
+    Type { shift: bool, caps: bool, ctrl_alt: bool },
+}
+
+pub fn windows_typing(mods: WinModifiers) -> WinTyping {
+    let ctrl_alt = mods.altgr || (mods.ctrl && mods.alt);
+    if mods.win || (!ctrl_alt && (mods.ctrl || mods.alt)) {
+        return WinTyping::Shortcut;
+    }
+    WinTyping::Type { shift: mods.shift, caps: mods.caps, ctrl_alt }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn modifiers_decide_between_typing_and_shortcuts() {
+        let typing = |shift, ctrl_alt| WinTyping::Type { shift, caps: false, ctrl_alt };
+        assert_eq!(windows_typing(WinModifiers::default()), typing(false, false));
+        assert_eq!(windows_typing(WinModifiers { shift: true, ..Default::default() }), typing(true, false));
+        assert_eq!(windows_typing(WinModifiers { altgr: true, alt: true, ..Default::default() }), typing(false, true), "AltGr+Q = @");
+        assert_eq!(windows_typing(WinModifiers { ctrl: true, alt: true, ..Default::default() }), typing(false, true), "Strg+Alt wie AltGr");
+        let caps = windows_typing(WinModifiers { caps: true, ..Default::default() });
+        assert_eq!(caps, WinTyping::Type { shift: false, caps: true, ctrl_alt: false });
+        for mods in [
+            WinModifiers { ctrl: true, ..Default::default() },
+            WinModifiers { ctrl: true, shift: true, ..Default::default() },
+            WinModifiers { alt: true, ..Default::default() },
+            WinModifiers { win: true, ..Default::default() },
+            WinModifiers { win: true, altgr: true, alt: true, ..Default::default() },
+        ] {
+            assert_eq!(windows_typing(mods), WinTyping::Shortcut, "{mods:?}");
+        }
+    }
 
     #[test]
     fn table_is_unique_in_both_directions() {

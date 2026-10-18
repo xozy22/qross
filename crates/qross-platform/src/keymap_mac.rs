@@ -56,6 +56,12 @@ pub fn is_modifier(code: u16) -> bool {
     matches!(code, 0x36..=0x3E)
 }
 
+/// Zusatztasten für `UCKeyTranslate` (Carbon-Modifier `shiftKey`, `alphaLock`, `optionKey`, um
+/// 8 Bit nach rechts verschoben)
+pub fn uc_modifiers(shift: bool, caps: bool, option: bool) -> u32 {
+    (u32::from(shift) << 1) | (u32::from(caps) << 2) | (u32::from(option) << 3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +94,15 @@ mod tests {
             assert!(is_modifier(mac_from_hid(KeyCode(hid)).unwrap()), "HID {hid:#04x}");
         }
         assert!(!is_modifier(mac_from_hid(KeyCode::A).unwrap()));
+    }
+
+    #[test]
+    fn modifiers_for_uckeytranslate() {
+        // Events.h: shiftKey = 0x0200, alphaLock = 0x0400, optionKey = 0x0800
+        assert_eq!(uc_modifiers(true, false, false), 0x0200 >> 8);
+        assert_eq!(uc_modifiers(false, true, false), 0x0400 >> 8);
+        assert_eq!(uc_modifiers(false, false, true), 0x0800 >> 8);
+        assert_eq!(uc_modifiers(true, true, true), 0x0E00 >> 8);
+        assert_eq!(uc_modifiers(false, false, false), 0);
     }
 }

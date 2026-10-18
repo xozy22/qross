@@ -70,6 +70,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Drag & Drop **vom Client** zum Server ziehen | ✔ Explorer | – | – | ✔ Finder¹ |
 | Gezogene Dateien **ablegen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | Client: in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
 | Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | Fang-Taste nur, solange der Cursor auf einem Client ist | ✔¹ ² |
+| Zeichen statt Tastenposition je Rechner: anderes Tastaturlayout, tote Tasten, AltGr | ✔ | ✔ | – (bleibt Tastenposition) | ✔¹ |
 | Mehrere Monitore je Rechner: Skizze im Layout, Cursor nur auf Monitorflächen | ✔ | ✔ | ✔ in logischen Pixeln | ✔¹ |
 | Verbindungsqualität: Latenz, Jitter, Verlust, Durchsatz | ✔ | ✔ | ✔ | ✔¹ |
 | Spielemodus: bei Vollbild festhalten, relative Mausbewegung für Spiele | ✔ Vollbild, eingefangener Zeiger | ✔ Vollbild | – | ✔ Vollbild¹ |
@@ -94,7 +95,10 @@ einer X11-Sitzung. Details, Grenzen und Testanleitung: [Wayland](docs/wayland.md
   (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, kopierte
   Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, Fortschritt und Abbrechen von Sender und
   Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5,
-  Wechsel per Tastenkürzel, Ablehnung unbekannter Clients, LAN-Suche).
+  Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Ablehnung unbekannter
+  Clients, LAN-Suche).
+- Windows-Tastaturlayouts: echter Test mit dem deutschen und dem US-Layout (AltGr, tote Tasten, Kürzel), soweit
+  sie auf dem Rechner eingerichtet sind.
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
   die der Explorer anschließend selbst einfügt.
 - Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
@@ -117,6 +121,11 @@ einer X11-Sitzung. Details, Grenzen und Testanleitung: [Wayland](docs/wayland.md
   gegenüberliegenden Kante. Sie wirken auf jedem Rechner und erreichen keine Programme; hält die Fang-Taste den
   Cursor fest, wechselt er nicht. Unter X11 wirkt ein Kürzel, das der Desktop schon belegt (etwa Strg+Alt+Pfeil
   für Arbeitsflächen), nur, solange der Cursor auf einem anderen Rechner ist.
+- **Zeichen statt Tastenposition** (je Rechner, Einstellungen → Tastatur bzw. `[keys.mode]`): Standard ist die
+  Tastenposition, dort bestimmt das eigene Layout das Zeichen. Auf „Zeichen“ kommt an, was du auf dem Server
+  tippst, auch bei anderem Layout (z. B. Server Deutsch, Mac US): Y und Z, Umlaute, @, €, Klammern, ^ und ´.
+  Kürzel wie Strg+Z gehen nach dem Zeichen, Pfeile, F-Tasten und Co. bleiben Tasten. Für Spiele die
+  Tastenposition lassen. Clients mit älterem Qross oder unter Wayland bekommen weiter Tastenpositionen.
 
 ## Download
 
@@ -220,7 +229,8 @@ Hinweise:
 - `[keys]` in `qross.toml`: `lock` (Fang-Taste, z. B. `"Ctrl+Alt+KeyL"`, leer = aus), `[keys.switch]` (Kürzel
   zum Wechseln: `"Ctrl+Alt+Digit2" = "laptop"` springt in die Mitte des Laptops, `"Ctrl+Alt+ArrowLeft" = "left"`
   zum linken Nachbarn; Richtungen `left`, `right`, `up`, `down`), `media` (`"active"` oder
-  `"local"`) und `[keys.remap.<rechner>]` zum Umbelegen. Tastennamen wie `KeyboardEvent.code` im Browser.
+  `"local"`), `[keys.remap.<rechner>]` zum Umbelegen und `[keys.mode]` (`laptop = "chars"`: Zeichen statt
+  Tastenposition). Tastennamen wie `KeyboardEvent.code` im Browser.
 - `[game] enabled` in `qross.toml` (Standard `true`) schaltet den Spielemodus; `qross client --no-game-mode`
   meldet dem Server nie, dass auf dem Client etwas im Vollbild läuft.
 - `[clipboard] max_file_mb` in `qross.toml` bzw. `qross client --clipboard-max-mb`: kopierte Dateien bis zu

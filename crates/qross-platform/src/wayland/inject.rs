@@ -357,6 +357,10 @@ impl Sender {
                 keyboard.key(u32::from(code), state);
                 self.frame(device);
             }
+            // libei kennt nur Tasten. Der Client meldet dem Server deshalb keinen Zeichenmodus
+            // (`types_text`), und das kommt nicht vor; ein Kürzel ginge notfalls als Taste.
+            Inject::Char { ch, .. } => tracing::debug!(?ch, "libei kann keine Zeichen eingeben"),
+            Inject::Shortcut { key, down, .. } => self.inject(&Inject::Key { key, down }),
         }
     }
 

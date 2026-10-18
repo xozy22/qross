@@ -68,6 +68,12 @@ pub trait Capture: Send + Sync {
 
 pub trait Injector: Send {
     fn inject(&mut self, event: &Inject);
+    /// Kann dieser Rechner Zeichen eingeben, egal welches Tastaturlayout er hat (`Inject::Char`,
+    /// `Inject::Shortcut`)? Nur dann meldet der Client das dem Server, und der schickt ihm im
+    /// Zeichenmodus Zeichen statt Tastenpositionen. Unter Wayland (libei) geht das nicht.
+    fn types_text(&self) -> bool {
+        false
+    }
     /// Ordner, in dem an (x, y) abgelegte Dateien landen sollen – z. B. das Explorer-Fenster oder
     /// der Desktop unter dem Cursor. `None`: keine passende Ablage, die Laufzeit nimmt „Downloads“.
     fn drop_folder(&mut self, _x: i32, _y: i32) -> Option<PathBuf> {
