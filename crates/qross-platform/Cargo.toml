@@ -17,7 +17,8 @@ tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.14", features = ["randr", "xkb", "xtest"] }
+# xfixes: Besitzwechsel von XdndSelection (laufendes Drag & Drop) mitbekommen
+x11rb = { version = "0.14", features = ["randr", "xfixes", "xkb", "xtest"] }
 # wayland-data-control: Zwischenablage ohne Fenster unter KDE, Sway, Hyprland; sonst über XWayland
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 # Markierungen der Passwortmanager unter Wayland lesen (dieselbe Version, die arboard mitbringt)
@@ -26,13 +27,12 @@ wl-clipboard-rs = "0.9"
 # „screencast“ braucht ashpd intern für remote_desktop; Qross nutzt keine Bildschirmübertragung.
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "remote_desktop", "input_capture", "screencast"] }
 reis = { version = "0.7", features = ["tokio"] }
-dirs.workspace = true
 futures-util = "0.3"
 # Monotone Uhr für die Zeitstempel von libei
 rustix = { version = "1", features = ["time"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-x11rb = { version = "0.14", features = ["xtest"] }
+x11rb = { version = "0.14", features = ["xfixes", "xtest"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arboard = { version = "3", default-features = false, features = ["image-data"] }
@@ -42,11 +42,13 @@ core-graphics = { version = "0.25", features = ["highsierra"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "NSPasteboard", "NSPasteboardItem", "objc2-core-graphics"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventTypes"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSString", "NSURL", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSFileManager", "NSGeometry", "NSString", "NSURL", "objc2-core-foundation"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # Netzwerk für Profile je Ort: eigene Adresse und Präfix je Karte
 if-addrs.workspace = true
+# Schreibtisch-Ordner beim Ablegen, Datenverzeichnis unter Wayland
+dirs.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # IpHelper: Netzwerkkarten, Gateway und dessen MAC für Profile je Ort

@@ -7,6 +7,7 @@
 
 mod capture;
 mod drag;
+mod finder;
 mod game;
 mod inject;
 mod layout;
@@ -26,6 +27,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::arboard_clipboard::ArboardClipboard;
 use crate::{Capture, Clipboard, Injector, Permission};
 
+pub use drag::DragWatch;
 pub use game::game_state;
 pub(crate) use pasteboard::concealed;
 pub use permissions::{granted as has_permission, request as request_permission};

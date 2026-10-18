@@ -7,6 +7,10 @@
 //!
 //! Im Remote-Modus meldet der Tap zu jeder Zeichentaste, was sie im Tastaturlayout der aktuellen
 //! Eingabequelle ergibt (`CaptureEvent::Typed`, für Clients im Zeichenmodus).
+//!
+//! Drag & Drop zum Client: Erreicht der Cursor mit gedrückter Taste die Kante, prüft der Server, ob
+//! seit dem Drücken ein Drag mit Dateien begonnen hat (Drag-Zwischenablage, siehe `drag`). Dann bricht
+//! ein eingespeistes Esc den Drag im Finder ab, und die Dateien gehen an den Client.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -23,6 +27,7 @@ use core_graphics::event::{
     CallbackResult, CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
     EventField,
 };
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 use qross_core::chars::is_typing_key;
 use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions};
@@ -30,6 +35,7 @@ use qross_core::CaptureEvent;
 use qross_proto::{Edge, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::drag::DragWatch;
 use super::layout;
 use crate::keymap_mac::{hid_from_mac, is_modifier};
 use crate::Capture;
@@ -39,6 +45,8 @@ const KVK_CAPS_LOCK: u16 = 0x39;
 const CONTROL: [u16; 2] = [0x3B, 0x3E];
 const OPTION: [u16; 2] = [0x3A, 0x3D];
 const SHIFT: [u16; 2] = [0x38, 0x3C];
+/// Kennung selbst eingespeister Ereignisse im Feld „Source User Data“: Der Tap lässt sie durch.
+const OWN_EVENT: i64 = 0x5152_4F53;
 
 struct Shared {
     remote: AtomicBool,
@@ -47,6 +55,8 @@ struct Shared {
     keys: Mutex<KeyOptions>,
     /// Dateien vom Client warten: das nächste Loslassen meldet `LocalDrop`
     await_drop: AtomicBool,
+    /// Erkennt einen Drag, der nach dem Drücken der linken Maustaste begonnen hat
+    drag: Mutex<DragWatch>,
 }
 
 #[derive(Default)]
@@ -67,6 +77,7 @@ pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> 
         events,
         keys: Mutex::new(KeyOptions::default()),
         await_drop: AtomicBool::new(false),
+        drag: Mutex::new(DragWatch::new()),
     });
     // Tastaturlayout für den Zeichenmodus
     layout::refresh(Duration::ZERO);
@@ -134,6 +145,10 @@ fn handle(s: &Shared, state: &RefCell<TapState>, kind: CGEventType, event: &CGEv
         s.tap_disabled.store(true, Ordering::Release);
         return CallbackResult::Keep;
     }
+    if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == OWN_EVENT {
+        // Esc zum Abbrechen eines Drags, der zum Client wandert: gilt immer lokal
+        return CallbackResult::Keep;
+    }
     let remote = s.remote.load(Ordering::Acquire);
     let mut st = state.borrow_mut();
     let send = |e| {
@@ -141,6 +156,15 @@ fn handle(s: &Shared, state: &RefCell<TapState>, kind: CGEventType, event: &CGEv
     };
 
     if let Some((button, down)) = button_of(kind, event) {
+        if button == MouseButton::Left {
+            // Ein Drag im Finder beginnt erst nach dem Drücken; hier den Stand der Drag-Zwischenablage merken.
+            let mut drag = s.drag.lock().unwrap_or_else(|e| e.into_inner());
+            if !down {
+                drag.release();
+            } else if !remote {
+                drag.press();
+            }
+        }
         let slot = button as usize;
         if !remote {
             st.local_buttons[slot] = down;
@@ -323,6 +347,29 @@ impl Capture for MacCapture {
 
     fn await_local_drop(&self) {
         self.0.await_drop.store(true, Ordering::Release);
+    }
+
+    fn probe_drag(&self, _x: i32, _y: i32) {
+        let files = self.0.drag.lock().unwrap_or_else(|e| e.into_inner()).probe();
+        if !files.is_empty() {
+            tracing::info!("{} Datei(en) werden über die Kante gezogen", files.len());
+        }
+        let _ = self.0.events.send(CaptureEvent::DragProbeResult { files });
+    }
+
+    fn cancel_local_drag(&self) {
+        // Esc bricht den Drag im Finder ab; die Taste bleibt gedrückt, ihr Loslassen legt dann beim Client ab.
+        let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else { return };
+        for down in [true, false] {
+            if let Ok(event) = CGEvent::new_keyboard_event(source.clone(), KVK_ESCAPE, down) {
+                event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, OWN_EVENT);
+                event.post(CGEventTapLocation::HID);
+            }
+        }
+    }
+
+    fn drop_folder(&self, x: i32, y: i32) -> Option<std::path::PathBuf> {
+        super::finder::folder_at(x, y)
     }
 
     fn capture_remote(&self) {
