@@ -13,12 +13,17 @@
 mod frame;
 mod geometry;
 mod input;
+mod latency;
 
 use serde::{Deserialize, Serialize};
 
 pub use frame::{decode_datagram, encode_datagram, read_frame, write_frame, FrameError, MAX_FRAME_LEN};
 pub use geometry::{Edge, Rect};
 pub use input::{KeyCode, MouseButton};
+pub use latency::{
+    is_sampled_input, is_sampled_move, Chain, Latency, LatencyReport, LatencySample, LatencySummary, SampleId, Spread,
+    MAX_REPORT_SAMPLES, MOUSE_SAMPLE_EVERY,
+};
 
 /// Version im `Hello`. Bleibt 3, solange das Protokoll nur abwärtskompatibel wächst, denn Server
 /// bis Qross 0.3 lehnen jede andere ab.
@@ -31,7 +36,8 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// - 6: `Control::TypesText`, `Input::Text` und `Input::Shortcut`: Zeichen statt Tastenposition
 ///   (seit Qross 0.7)
 /// - 7: `Control::Sharing`, Rechte je Rechner (seit Qross 0.7)
-pub const SERVER_VERSION: u16 = 7;
+/// - 13: `Control::Latency`, Verzögerung der Eingabekette
+pub const SERVER_VERSION: u16 = 13;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
 /// die Verbindung bei unbekannten Control-Nachrichten.
 pub const MONITORS_SINCE: u16 = 4;
@@ -44,6 +50,9 @@ pub const TEXT_SINCE: u16 = 6;
 /// Ab dieser `Welcome`-Version schickt der Server `Control::Sharing`: nach dem `Welcome` und bei
 /// jeder Änderung der Rechte.
 pub const SHARING_SINCE: u16 = 7;
+/// Ab dieser `Welcome`-Version meldet der Client mit `Control::Latency` die Zeiten der Stichproben,
+/// und der Server schickt ihm dann das Ergebnis zurück.
+pub const LATENCY_SINCE: u16 = 13;
 /// Höchstzahl Monitore, die der Server aus `Control::Monitors` übernimmt
 pub const MAX_MONITORS: usize = 16;
 /// ALPN-Kennung im TLS-Handshake
@@ -119,6 +128,10 @@ pub enum Control {
     /// und versucht Verbotenes gar nicht erst; durchgesetzt wird es ohnehin auf dem Server, auch
     /// gegenüber älteren Clients, die die Nachricht nie lesen.
     Sharing(Sharing),
+    /// Verzögerung der Eingabekette (ab `LATENCY_SINCE`): Client → Server `Latency::Report` mit den
+    /// Zeiten der Stichproben, nur an Server ab dieser Version; Server → Client `Latency::Summary` mit
+    /// dem Ergebnis, nur an Clients, die schon etwas gemeldet haben.
+    Latency(Latency),
 }
 
 /// Rechte je Rechner: In welche Richtung eine Art von Inhalten zwischen Server und Client wandern
@@ -565,5 +578,45 @@ mod tests {
         }
         let emoji = Input::Text { key: KeyCode(0x08), text: "é😀".into() };
         assert_eq!(postcard::from_bytes::<Input>(&postcard::to_stdvec(&emoji).unwrap()).unwrap(), emoji);
+    }
+
+    /// So sah `Control` in Qross 0.7 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ControlV07 {
+        Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+        Welcome { version: u16, server_name: String, platform: Platform },
+        Reject { reason: String },
+        ScreenChanged(ScreenInfo),
+        Monitors(Vec<Rect>),
+        Game(GameState),
+        TypesText,
+        Sharing(Sharing),
+    }
+
+    #[test]
+    fn latency_reaches_only_peers_that_understand_it() {
+        // Ein Server aus 0.7 meldet Version 7 und bekommt keine Rückmeldung, die er nicht lesen könnte
+        // (er würde trennen). Ein Client aus 0.7 überspringt das Ergebnis, bekommt es aber ohnehin
+        // nicht, denn er meldet nie etwas.
+        const { assert!(SHARING_SINCE < LATENCY_SINCE && LATENCY_SINCE <= SERVER_VERSION) };
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV07>(&bytes).unwrap(), ControlV07::Welcome { version: SERVER_VERSION, .. }));
+
+        let report = Control::Latency(Latency::Report(LatencyReport {
+            sent_us: 1_234_567,
+            samples: vec![LatencySample { id: SampleId::Input { index: 42 }, age_us: 120_000, client_us: 300 }],
+        }));
+        let summary = Control::Latency(Latency::Summary(LatencySummary::default()));
+        for msg in [report, summary] {
+            let bytes = postcard::to_stdvec(&msg).unwrap();
+            assert!(postcard::from_bytes::<ControlV07>(&bytes).is_err(), "Qross 0.7 kann {msg:?} nicht lesen");
+            assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), msg);
+        }
+
+        // Kein Byte mehr auf dem Eingabeweg: Maus-Datagramme bleiben so klein wie bisher.
+        let mv = Datagram::MouseMove(MouseMove { epoch: 1, seq: MOUSE_SAMPLE_EVERY * 1000, x: 2559, y: 1439 });
+        assert!(is_sampled_move(MOUSE_SAMPLE_EVERY * 1000));
+        assert!(crate::encode_datagram(&mv).len() <= 12);
     }
 }

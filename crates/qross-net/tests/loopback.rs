@@ -18,7 +18,8 @@ use qross_platform::dryrun::{CaptureCall, RecordingCapture, RecordingInjector, S
 use qross_platform::Clipboard;
 use qross_proto::{
     read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, DragMessage, Edge, FileEntry, GameState,
-    KeyCode, MouseButton, MouseMove, Platform, Rect, ScreenInfo, StreamKind, PROTOCOL_VERSION, SERVER_VERSION,
+    KeyCode, Latency, LatencySummary, MouseButton, MouseMove, Platform, Rect, ScreenInfo, StreamKind, LATENCY_SINCE,
+    PROTOCOL_VERSION, SERVER_VERSION,
 };
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -1031,6 +1032,21 @@ async fn client_reports_to(welcome_version: u16) -> Vec<Vec<u8>> {
 
 /// Wie `client_reports_to`, mit eigenem Einspeisen (z. B. einem, das Zeichen eingeben kann)
 async fn client_reports_with(welcome_version: u16, injector: RecordingInjector) -> Vec<Vec<u8>> {
+    let mut frames = client_sends(welcome_version, injector).await;
+    // Ab `LATENCY_SINCE` meldet der Client gleich, dass er die Eingabekette mitmisst; das prüft
+    // `the_client_measures_the_input_chain_only_with_servers_that_know_it`.
+    if welcome_version >= LATENCY_SINCE {
+        frames.retain(|f| !is_latency_announcement(f));
+    }
+    frames
+}
+
+fn is_latency_announcement(frame: &[u8]) -> bool {
+    matches!(postcard::from_bytes(frame), Ok(Control::Latency(Latency::Report(r))) if r.samples.is_empty())
+}
+
+/// Alles, was der Client nach dem `Welcome` mit `welcome_version` auf dem Control-Stream schickt
+async fn client_sends(welcome_version: u16, injector: RecordingInjector) -> Vec<Vec<u8>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let server_id = Identity::generate().unwrap();
     let endpoint =
@@ -1848,4 +1864,187 @@ async fn an_older_client_set_to_characters_gets_keys_it_can_read() {
     assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
     reader.abort();
     server_task.abort();
+}
+
+// ---------------------------------------------------------------- Verzögerung der Eingabekette
+
+fn latency_at_server(s: &Setup) -> Option<(LatencySummary, bool)> {
+    s.notices.lock().unwrap().iter().rev().find_map(|n| match n {
+        ServerNotice::Latency { name, summary, client_reports } if name == "laptop" => Some((*summary, *client_reports)),
+        _ => None,
+    })
+}
+
+fn latency_at_client(s: &Setup) -> Option<LatencySummary> {
+    s.client_notices.lock().unwrap().iter().rev().find_map(|n| match n {
+        ClientNotice::Latency(summary) => Some(*summary),
+        _ => None,
+    })
+}
+
+/// Mit Mausbewegungen und mindestens `keys` Tasten vollständig gemessen?
+fn measured_both(summary: &LatencySummary, keys: u32) -> bool {
+    summary.mouse.is_some_and(|m| m.reported > 0) && summary.keys.is_some_and(|k| k.reported >= keys)
+}
+
+/// Bewegungen einzeln senden: Nach jeder kommt der Server dran, sodass er keine zusammenfasst und jede
+/// ein eigenes Datagramm wird.
+async fn wiggle(events: &UnboundedSender<CaptureEvent>, moves: usize) {
+    for i in 0..moves {
+        let dx = if i.is_multiple_of(2) { 3 } else { -3 };
+        events.send(CaptureEvent::MouseDelta { dx, dy: 0 }).unwrap();
+        tokio::task::yield_now().await;
+    }
+}
+
+fn press_keys(events: &UnboundedSender<CaptureEvent>, count: usize) {
+    for _ in 0..count {
+        events.send(CaptureEvent::Key { key: KeyCode::A, down: true }).unwrap();
+        events.send(CaptureEvent::Key { key: KeyCode::A, down: false }).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn the_input_chain_is_measured_in_three_parts_on_both_sides() {
+    let s = start(true, None);
+    enter_laptop(&s).await;
+    wiggle(&s.events, 300).await;
+    press_keys(&s.events, 6);
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: true }).unwrap();
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+
+    let at_server = || latency_at_server(&s).filter(|(summary, _)| measured_both(summary, 7));
+    wait_for("Ergebnis beim Server", || at_server().is_some()).await;
+    let (summary, client_reports) = at_server().unwrap();
+    assert!(client_reports, "ein neuer Client meldet seine Zeiten");
+    println!("Loopback: {}", qross_net::latency::describe(&summary));
+
+    // 300 Bewegungen: jedes 32. Datagramm ist eine Stichprobe; Tasten und Klicks zählen beim Drücken.
+    let (mouse, keys) = (summary.mouse.unwrap(), summary.keys.unwrap());
+    assert!((5..=12).contains(&mouse.samples), "{mouse:?}");
+    assert_eq!((keys.samples, keys.reported), (7, 7), "6 Tasten und ein Klick, Loslassen zählt nicht: {keys:?}");
+    for chain in [mouse, keys] {
+        let (network, client, total) = (chain.network.unwrap(), chain.client.unwrap(), chain.total.unwrap());
+        for part in [chain.server, network, client, total] {
+            assert!(part.p50_us <= part.p95_us, "{chain:?}");
+        }
+        // Je Stichprobe ist die Summe mindestens so groß wie jeder Teil, also auch ihr Median.
+        assert!(total.p50_us >= network.p50_us && total.p50_us >= client.p50_us, "{chain:?}");
+        assert!(total.p95_us < 1_000_000, "auf Loopback weit unter einer Sekunde: {chain:?}");
+    }
+    let uncertainty = summary.uncertainty_us.expect("mit Rückmeldungen ist der Versatz geschätzt");
+    assert!(uncertainty < 1_000_000, "{uncertainty}");
+
+    // Der Client bekommt dasselbe Ergebnis zur Anzeige.
+    wait_for("Ergebnis beim Client", || latency_at_client(&s).is_some_and(|summary| measured_both(&summary, 7))).await;
+}
+
+/// So sah `Control` in Qross 0.7 aus.
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+enum ControlV07 {
+    Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+    Welcome { version: u16, server_name: String, platform: Platform },
+    Reject { reason: String },
+    ScreenChanged(ScreenInfo),
+    Monitors(Vec<Rect>),
+    Game(GameState),
+    TypesText,
+    Sharing(Sharing),
+}
+
+#[tokio::test]
+async fn an_older_client_leaves_only_the_server_part_and_gets_nothing_it_cannot_read() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
+    let notices = collect(notice_rx);
+    let server = Server::bind(config, &server_id, trust).unwrap().with_notices(notice_tx);
+    let addr = server.local_addr().unwrap();
+    let capture = RecordingCapture::default();
+    let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(capture.clone()),
+        events: events_rx,
+        clipboard: Box::new(SharedClipboard::default()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+    }));
+
+    // Ein Client wie Qross 0.7: liest nach dem `Welcome` den Control-Stream, meldet aber nie Zeiten.
+    let (_endpoint, conn) = connect_raw(addr, &client_id).await;
+    let (mut control, mut control_rx) = conn.open_bi().await.unwrap();
+    let screen = ScreenInfo { bounds: LAPTOP };
+    let hello = Control::Hello { version: PROTOCOL_VERSION, name: "laptop".into(), screen, platform: Platform::Linux };
+    write_frame(&mut control, &hello).await.unwrap();
+    let welcome = read_frame::<_, ControlV07>(&mut control_rx).await.unwrap();
+    assert!(matches!(welcome, Some(ControlV07::Welcome { version: SERVER_VERSION, .. })), "{welcome:?}");
+    let controls = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let controls = controls.clone();
+        tokio::spawn(async move {
+            loop {
+                let frame = read_frame::<_, ControlV07>(&mut control_rx).await;
+                let end = !matches!(frame, Ok(Some(_)));
+                controls.lock().unwrap().push(frame.map(|f| format!("{f:?}")).map_err(|e| e.to_string()));
+                if end {
+                    break;
+                }
+            }
+        })
+    };
+
+    let calls = capture.clone();
+    wait_for("Wechsel zum alten Client", || {
+        let _ = events.send(edge_hit());
+        calls.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    wiggle(&events, 100).await;
+    press_keys(&events, 3);
+    let at_server = || {
+        notices.lock().unwrap().iter().rev().find_map(|n| match n {
+            ServerNotice::Latency { summary, client_reports, .. } if summary.keys.is_some_and(|k| k.samples == 3) => {
+                Some((*summary, *client_reports))
+            }
+            _ => None,
+        })
+    };
+    wait_for("Server-Anteil beim Server", || at_server().is_some()).await;
+    let (summary, client_reports) = at_server().unwrap();
+    assert!(!client_reports, "ein Client aus 0.7 meldet nichts");
+    for chain in [summary.mouse.unwrap(), summary.keys.unwrap()] {
+        assert!(chain.samples > 0 && chain.reported == 0, "{chain:?}");
+        assert_eq!((chain.network, chain.client, chain.total), (None, None, None), "nur der Server-Anteil: {chain:?}");
+        assert!(chain.server.p95_us < 1_000_000, "{chain:?}");
+    }
+    assert_eq!(summary.uncertainty_us, None);
+
+    // Noch einen Takt abwarten: Auch dann kommt beim alten Client nichts an, was er nicht lesen kann.
+    tokio::time::sleep(qross_net::latency::SUMMARY_EVERY + Duration::from_millis(300)).await;
+    let log = controls.lock().unwrap().clone();
+    assert!(!log.is_empty(), "die Rechte kommen immer");
+    assert!(log.iter().all(|c| c.as_ref().is_ok_and(|c| c.starts_with("Some(Sharing("))), "{log:?}");
+    assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
+    reader.abort();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn the_client_measures_the_input_chain_only_with_servers_that_know_it() {
+    // Ein Server aus 0.7 trennte bei `Latency`: Er bekommt nur, was er lesen kann.
+    for frame in client_sends(7, RecordingInjector::default()).await {
+        let msg = postcard::from_bytes::<ControlV07>(&frame);
+        assert!(msg.is_ok(), "ein Server aus 0.7 kann {msg:?} nicht lesen");
+    }
+    // Ein neuer Server erfährt gleich nach dem `Welcome`, dass der Client mitmisst.
+    let frames = client_sends(LATENCY_SINCE, RecordingInjector::default()).await;
+    assert_eq!(frames.iter().filter(|f| is_latency_announcement(f)).count(), 1, "{frames:?}");
 }

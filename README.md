@@ -73,7 +73,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | Fang-Taste nur, solange der Cursor auf einem Client ist | ✔¹ ² |
 | Zeichen statt Tastenposition je Rechner: anderes Tastaturlayout, tote Tasten, AltGr | ✔ | ✔ | – (bleibt Tastenposition) | ✔¹ |
 | Mehrere Monitore je Rechner: Skizze im Layout, Cursor nur auf Monitorflächen | ✔ | ✔ | ✔ in logischen Pixeln | ✔¹ |
-| Verbindungsqualität: Latenz, Jitter, Verlust, Durchsatz | ✔ | ✔ | ✔ | ✔¹ |
+| Verbindungsqualität: Latenz, Jitter, Verlust, Durchsatz, Verzögerung der Eingabe (Server, Netz, Client) | ✔ | ✔ | ✔ | ✔¹ |
 | Spielemodus: bei Vollbild festhalten, relative Mausbewegung für Spiele | ✔ Vollbild, eingefangener Zeiger | ✔ Vollbild | – | ✔ Vollbild¹ |
 | Dateiübertragungen: Fortschritt, Rate und Restzeit, Abbrechen auf beiden Seiten | ✔ | ✔ | ✔ | ✔¹ |
 | Rechte je Rechner: Zwischenablage, kopierte Dateien, Drag & Drop je Richtung erlauben oder sperren | ✔ | ✔ | ✔ | ✔¹ |
@@ -107,7 +107,8 @@ systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autost
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
   (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, kopierte
   Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, Fortschritt und Abbrechen von Sender und
-  Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5,
+  Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Verzögerung der Eingabekette samt
+  Uhrenversatz und Gegenstellen aus 0.7, Spielemodus samt Gegenstellen aus 0.5,
   Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Rechte je Rechner für jede
   Art und Richtung samt sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene
   vertrauliche Inhalte, Ablehnung unbekannter Clients, LAN-Suche).
@@ -130,6 +131,10 @@ systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autost
   einer echten Maus, auch wenn sie den Zeiger einfangen. Die Fang-Taste gibt den Cursor frei; abschaltbar in
   den Einstellungen bzw. mit `[game] enabled = false`.
 - **Strg+Alt+Shift+Esc** holt Maus und Tastatur sofort zurück (macOS: Strg+Option+Shift+Esc).
+- **Verbindungsqualität** (Klick auf die Plakette mit den Millisekunden): Latenz, Jitter, Verlust und Durchsatz,
+  darunter die Verzögerung der Eingabe vom Server bis zum Einspeisen am Client, für Maus und Tasten getrennt und
+  aufgeteilt in Server, Netz und Client. So siehst du, ob eine Verzögerung am Netz oder an einem der Rechner
+  liegt. Wie gemessen wird und wie genau: [Protokoll](docs/protokoll.md#verzögerung-der-eingabekette).
 - **Profile je Ort** (Einstellungen → Profile): z. B. „Büro“ als Client und „Zuhause“ als Server mit eigener
   Anordnung. Ein Profil umfasst alles aus dem Hauptfenster: Rolle, Anordnung, Name und Port, Wechsel und die
   Server-Adresse. Umschalten in der Kopfzeile oder im Tray-Menü. Mit „Aktuelles Netzwerk übernehmen“ wählt
