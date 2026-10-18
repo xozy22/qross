@@ -172,6 +172,21 @@ fn x11_capture_wakes_on_events_only() {
         None => "  Thread nach drop() beendet: nein, läuft weiter\n".to_owned(),
     };
     let _ = std::io::stderr().write_all(report.as_bytes());
+
+    // Im Leerlauf schläft die Schleife (früher: einige hundert Mal je Sekunde wach)
+    assert!(idle_local.wakeups < 5.0, "lokal {:.1}/s", idle_local.wakeups);
+    assert!(idle_remote.wakeups < 5.0, "remote {:.1}/s", idle_remote.wakeups);
+    // Großzügig, die CI ist ein geteilter Rechner. Mit dem früheren 4-ms-Takt lag der Median lokal
+    // bei 1,5–1,8 ms, im Remote-Modus (1 ms Pause) bei 0,7 ms.
+    let fast = Duration::from_millis(1);
+    for (name, samples) in [("Kante", &edge), ("Kürzel", &hotkey), ("Bewegung", &motion), ("Taste", &key)] {
+        assert!(samples.median() < fast, "{name}: {}", samples.describe());
+    }
+    // Steuerbefehle wirken, ohne dass eine Eingabe die Schleife weckt
+    for (name, samples) in [("release", &release), ("await_local_drop", &drop_here)] {
+        assert!(samples.median() < fast && samples.max() < Duration::from_millis(50), "{name}: {}", samples.describe());
+    }
+    assert!(ended.is_some(), "Erfassungs-Thread läuft nach drop() weiter");
 }
 
 /// Gemessene Zeiten eines Falls

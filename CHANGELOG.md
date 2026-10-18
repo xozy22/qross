@@ -24,6 +24,11 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 - **Rückfrage beim Wechsel der Rolle:** Läuft der Server und du wechselst zum Client – über den Schalter, ein
   Profil oder das Tray-Menü –, fragt Qross erst nach, denn der Server schaltet sich dabei aus und verbundene
   Rechner verlieren Maus und Tastatur. Ebenso, wenn ein verbundener Client zum Server werden soll.
+- **Linux-Server unter X11 ohne festen Takt:** Die Erfassung fragt nicht mehr alle 4 ms nach dem Zeiger,
+  sondern wartet auf den X-Server; von Mausbewegungen erfährt sie über XInput 2. Kanten und Kürzel greifen
+  dadurch bis zu 4 ms früher, und im Leerlauf schläft sie, statt rund 500-mal je Sekunde (Cursor auf einem
+  Client: 940-mal) aufzuwachen. Wie unter Windows und macOS zählt für die Wechselverzögerung jetzt nur
+  Drücken gegen die Kante, nicht schon das Stehenbleiben dort. Ohne XInput 2.1 bleibt es beim Takt.
 
 ### Behoben
 
