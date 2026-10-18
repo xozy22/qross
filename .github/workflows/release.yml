@@ -169,15 +169,19 @@ jobs:
       # Tauri signiert das DMG mit, sobald die Identität nicht „-“ ist. Ein signiertes, aber nicht
       # beglaubigtes DMG sperrt Gatekeeper aber schon beim Öffnen, vor der App darin
       # (https://github.com/tauri-apps/tauri/issues/12288). Ohne Signatur fragt macOS nur einmal, bei der App.
-      - name: DMG-Signatur entfernen (macOS)
+      # `codesign --remove-signature` kann das bei DMGs nicht; ein neu geschriebenes Abbild trägt keine
+      # Signatur und behält Inhalt und Fensterlayout. Tauris DMG-Schritt ohne Identität ginge nicht: Er
+      # baut dann das App-Paket neu und signiert es nur ad hoc.
+      - name: DMG ohne Signatur neu schreiben (macOS)
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           for dmg in target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
-            if codesign --display "$dmg" > /dev/null 2>&1; then
-              codesign --remove-signature "$dmg"
-              echo "Signatur entfernt: $dmg"
-            fi
+            codesign --display "$dmg" > /dev/null 2>&1 || continue
+            hdiutil convert "$dmg" -format UDZO -imagekey zlib-level=9 -o "${dmg%.dmg}-neu.dmg" -quiet
+            mv -f "${dmg%.dmg}-neu.dmg" "$dmg"
+            echo "Ohne Signatur neu geschrieben: $dmg"
+            hdiutil imageinfo "$dmg" | grep -E "^(Format|Software License Agreement):" || true
           done
 
       # Ohne gültige Signatur des ganzen App-Pakets meldet macOS nach dem Download „beschädigt“
@@ -301,7 +305,8 @@ jobs:
       # und die Rechteprüfung läuft auf echtem macOS.
       - name: Startprobe
         run: |
-          set -uo pipefail
+          # Der Runner startet Skripte mit bash -e; `wait` auf den beendeten Prozess liefert 143.
+          set +e
           QROSS_DATA_DIR="$(mktemp -d)" check/Qross.app/Contents/MacOS/qross-gui > start.log 2>&1 &
           pid=$!
           sleep 15
@@ -321,7 +326,8 @@ jobs:
       # bisherige Ad-hoc-Signatur (0.3.1 bis 0.5.0) und ein absichtlich beschädigtes Paket.
       - name: Gatekeeper-Vergleich
         run: |
-          set -uo pipefail
+          # Nur Diagnose: Ablehnungen sind hier das erwartete Ergebnis, nicht ein Fehler des Schritts.
+          set +e
           spctl --status
           for variant in zertifikat adhoc beschaedigt; do
             ditto check/Qross.app "gatekeeper/${variant}/Qross.app"
