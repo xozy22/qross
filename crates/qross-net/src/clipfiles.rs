@@ -9,6 +9,8 @@
 //! Programmende übersteht, denn eingefügt wird oft erst später. In die Zwischenablage kommen sie
 //! erst, wenn alle geprüft angekommen sind. Ein neuerer Inhalt verwirft laufende Übertragungen,
 //! damit nie Älteres über Neueres geschrieben wird.
+//!
+//! Beide Seiten melden den Fortschritt und können abbrechen (siehe `progress`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -23,6 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::clipboard::Content;
 use crate::files::{self, human_size, sanitize, FileOutcome, Staging};
+use crate::progress::{self, Direction, Info, Kind, Phase, Transfers};
 use crate::streams::{send_clipboard, send_clipboard_message};
 
 /// Standardgrenze für die automatische Übertragung kopierter Dateien (Summe aller Dateien)
@@ -38,10 +41,11 @@ pub enum FilesNotice {
     Sending { peer: String, names: Vec<String>, bytes: u64 },
     /// Zu groß für die automatische Übertragung (größer als `limit`): besser per Drag & Drop.
     TooLarge { peer: String, names: Vec<String>, limit: u64 },
-    /// Kopierte Dateien von `peer` kommen an.
+    /// Kopierte Dateien von `peer` kommen an (den Fortschritt meldet `progress`).
     Receiving { peer: String, names: Vec<String>, bytes: u64 },
     /// Angekommen und in der Zwischenablage: jetzt einfügbar.
     Ready { peer: String, names: Vec<String>, bytes: u64 },
+    /// Fehlgeschlagen (ein Abbruch erscheint nur als Ende im Fortschritt)
     Failed { peer: String, reason: String },
 }
 
@@ -74,8 +78,9 @@ pub fn new_transfer_id() -> u64 {
 }
 
 /// Überträgt den Inhalt der lokalen Zwischenablage an `peer`. Dateien nur bis `limit` Bytes
-/// (0 = nie); sonst geht nur mit, was außer den Dateien in der Zwischenablage liegt.
-pub async fn send(conn: Connection, content: Content, limit: u64, peer: String, notify: Notify) {
+/// (0 = nie); sonst geht nur mit, was außer den Dateien in der Zwischenablage liegt. Die Dateien
+/// erscheinen in `transfers`.
+pub async fn send(conn: Connection, content: Content, limit: u64, peer: String, notify: Notify, transfers: Transfers) {
     let (paths, data) = match content {
         Content::Data(data) => {
             info!("Zwischenablage → „{peer}“: {}", data.summary());
@@ -128,7 +133,7 @@ pub async fn send(conn: Connection, content: Content, limit: u64, peer: String, 
         return;
     }
     let started = std::time::Instant::now();
-    match files::send_files(conn, StreamKind::ClipboardFile, transfer, entries).await {
+    match files::send_tracked(conn, StreamKind::ClipboardFile, transfer, entries, &peer, &transfers).await {
         Ok(()) => debug!("kopierte Dateien an „{peer}“ gesendet in {:.1} s", started.elapsed().as_secs_f64()),
         // Neuerer Inhalt beim Empfänger, Verbindung weg oder eine Qross-Version ohne Dateien in der Zwischenablage
         Err(e) => info!("Übertragung kopierter Dateien an „{peer}“ beendet: {e:#}"),
@@ -169,11 +174,13 @@ struct Pending {
 pub struct Incoming {
     staging: Arc<Staging>,
     pending: HashMap<u64, Pending>,
+    /// Fortschritt für die Oberfläche; „Abbrechen“ verwirft über das Staging.
+    progress: Transfers,
 }
 
 impl Incoming {
-    pub fn new(staging: Arc<Staging>) -> Self {
-        Self { staging, pending: HashMap::new() }
+    pub fn new(staging: Arc<Staging>, progress: Transfers) -> Self {
+        Self { staging, pending: HashMap::new(), progress }
     }
 
     pub fn staging(&self) -> Arc<Staging> {
@@ -185,14 +192,17 @@ impl Incoming {
         let older: Vec<u64> =
             self.pending.iter().filter(|(id, p)| **id != transfer && p.announced.is_some()).map(|(id, _)| *id).collect();
         for id in older {
-            self.drop_transfer(id, "überholt");
+            self.drop_transfer(id, "überholt", Phase::Cancelled { by_peer: true });
         }
         if let Err(e) = entries.iter().try_for_each(|e| sanitize(&e.path).map(drop)) {
-            self.drop_transfer(transfer, "ungültige Liste");
+            self.drop_transfer(transfer, "ungültige Liste", Phase::Failed(format!("{e:#}")));
             bail!("{e:#}");
         }
         let (names, bytes) = summary(&entries);
         info!("kopierte Dateien von „{peer}“: {} ({})", names.join(", "), human_size(bytes));
+        let staging = self.staging.clone();
+        let info = Info { kind: Kind::Clipboard, peer: peer.clone(), names, total: bytes };
+        self.progress.begin(Direction::Receiving, transfer, info, move || staging.discard(transfer));
         self.pending.entry(transfer).or_default().announced = Some(Announced { peer, entries, data });
         Ok(self.try_finish(transfer))
     }
@@ -200,8 +210,8 @@ impl Incoming {
     pub fn on_file(&mut self, outcome: FileOutcome) -> Result<Option<Ready>, Failed> {
         let id = outcome.transfer;
         if self.staging.is_cancelled(id) {
-            // Kam nach dem Verwerfen noch an: wieder wegräumen
-            self.staging.discard(id);
+            // Kam nach dem Verwerfen (oder Abbrechen) noch an: wieder wegräumen
+            self.drop_transfer(id, "abgebrochen", Phase::Cancelled { by_peer: false });
             return Ok(None);
         }
         match outcome.result {
@@ -210,8 +220,12 @@ impl Incoming {
                 Ok(self.try_finish(id))
             }
             Err(e) => {
+                if let Some(cancelled) = progress::cancelled(&e) {
+                    self.drop_transfer(id, "vom Sender abgebrochen", Phase::Cancelled { by_peer: cancelled.by_peer });
+                    return Ok(None);
+                }
                 let peer = self.pending.get(&id).and_then(|p| p.announced.as_ref()).map(|a| a.peer.clone());
-                self.drop_transfer(id, "fehlgeschlagen");
+                self.drop_transfer(id, "fehlgeschlagen", Phase::Failed(format!("{e:#}")));
                 warn!("kopierte Datei nicht übernommen: {e:#}");
                 Err(Failed { peer: peer.unwrap_or_default(), reason: format!("{e:#}") })
             }
@@ -222,14 +236,15 @@ impl Incoming {
     pub fn supersede(&mut self) {
         let ids: Vec<u64> = self.pending.keys().copied().collect();
         for id in ids {
-            self.drop_transfer(id, "überholt");
+            self.drop_transfer(id, "überholt", Phase::Cancelled { by_peer: true });
         }
     }
 
-    fn drop_transfer(&mut self, id: u64, why: &str) {
+    fn drop_transfer(&mut self, id: u64, why: &str, phase: Phase) {
         debug!("kopierte Dateien {id} verworfen ({why})");
         self.pending.remove(&id);
         self.staging.discard(id);
+        self.progress.end(Direction::Receiving, id, phase);
     }
 
     fn try_finish(&mut self, id: u64) -> Option<Ready> {
@@ -256,6 +271,7 @@ impl Incoming {
             }
         }
         self.staging.prune(KEEP_PREVIOUS, id);
+        self.progress.end(Direction::Receiving, id, Phase::Done);
         let (names, bytes) = summary(&entries);
         Some(Ready { peer, paths, data, names, bytes })
     }
@@ -276,7 +292,7 @@ mod tests {
     fn incoming(name: &str) -> (Incoming, PathBuf) {
         let base = std::env::temp_dir().join(format!("qross-clipfiles-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        (Incoming::new(Staging::persistent(&base).unwrap()), base)
+        (Incoming::new(Staging::persistent(&base).unwrap(), Transfers::new()), base)
     }
 
     #[test]
@@ -326,6 +342,18 @@ mod tests {
         let failed = rx.on_file(FileOutcome { transfer: 4, index: 0, result: Err(anyhow::anyhow!("Prüfsumme stimmt nicht")) });
         assert_eq!(failed, Err(Failed { peer: "laptop".into(), reason: "Prüfsumme stimmt nicht".into() }));
         assert!(rx.announce("laptop".into(), 5, vec![entry("../boot.ini", 1, false)], ClipboardData::default()).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_cancel_is_cleaned_up_but_not_reported_as_failure() {
+        let (mut rx, base) = incoming("abbruch");
+        rx.announce("pc".into(), 6, vec![entry("a.txt", 3, false)], ClipboardData::default()).unwrap();
+        std::fs::create_dir_all(base.join("6")).unwrap();
+        let reset = FileOutcome { transfer: 6, index: 0, result: Err(progress::Cancelled { by_peer: true }.into()) };
+        assert_eq!(rx.on_file(reset), Ok(None), "kein Fehlerhinweis");
+        assert!(!base.join("6").exists(), "Angekommenes ist weg");
+        assert_eq!(rx.on_file(ok(6, 0)), Ok(None), "Nachzügler zählen nicht");
         let _ = std::fs::remove_dir_all(&base);
     }
 

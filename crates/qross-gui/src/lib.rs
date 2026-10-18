@@ -7,6 +7,7 @@ pub mod changelog;
 pub mod clipboard_files;
 pub mod keys;
 pub mod lifecycle;
+pub mod transfers;
 
 use std::collections::HashSet;
 use std::fs;

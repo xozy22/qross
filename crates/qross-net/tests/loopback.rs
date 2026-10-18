@@ -1,13 +1,14 @@
 //! Ende-zu-Ende über echtes QUIC auf Loopback, mit Test-Doubles statt Betriebssystem.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qross_core::{CaptureEvent, Inject, Layout, LinkConfig};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
-use qross_net::clipfiles;
+use qross_net::progress::{Direction, Kind, Phase, Progress, Transfers};
 use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform};
+use qross_net::{clipfiles, files};
 use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, RecordingCapture, RecordingInjector, SharedClipboard};
 use qross_platform::Clipboard;
@@ -35,6 +36,9 @@ struct Setup {
     client_clip: SharedClipboard,
     client_screen: ClientScreen,
     notices: Arc<Mutex<Vec<ServerNotice>>>,
+    client_notices: Arc<Mutex<Vec<ClientNotice>>>,
+    server_transfers: Transfers,
+    client_transfers: Transfers,
     server_task: JoinHandle<anyhow::Result<()>>,
     client_task: JoinHandle<anyhow::Result<()>>,
 }
@@ -53,6 +57,18 @@ fn start(trust_client: bool, pin: Option<qross_net::Fingerprint>) -> Setup {
 /// `file_limit`: Grenze für kopierte Dateien auf beiden Seiten
 fn start_with(trust_client: bool, pin: Option<qross_net::Fingerprint>, file_limit: u64) -> Setup {
     start_client_screen(trust_client, pin, file_limit, LAPTOP, Vec::new())
+}
+
+/// Sammelt alle Meldungen eines Kanals.
+fn collect<N: Send + 'static>(mut rx: tokio::sync::mpsc::UnboundedReceiver<N>) -> Arc<Mutex<Vec<N>>> {
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let collected = notices.clone();
+    tokio::spawn(async move {
+        while let Some(notice) = rx.recv().await {
+            collected.lock().unwrap().push(notice);
+        }
+    });
+    notices
 }
 
 /// Wie `start_with`, mit eigener Bildschirmfläche und Monitoren des Clients (leer: keine Liste)
@@ -74,19 +90,14 @@ fn start_client_screen(
     let layout =
         Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
     let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
-    let (notice_tx, mut notice_rx) = tokio::sync::mpsc::unbounded_channel();
-    let notices = Arc::new(Mutex::new(Vec::new()));
-    let collected = notices.clone();
-    tokio::spawn(async move {
-        while let Some(notice) = notice_rx.recv().await {
-            collected.lock().unwrap().push(notice);
-        }
-    });
+    let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
+    let notices = collect(notice_rx);
     let server = Server::bind(config, &server_id, trust)
         .unwrap()
         .with_clipboard_file_limit(file_limit)
         .with_notices(notice_tx);
     let addr = server.local_addr().unwrap();
+    let server_transfers = server.transfers();
 
     let capture = RecordingCapture::default();
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -109,7 +120,10 @@ fn start_client_screen(
         server_fingerprint: Some(pin.unwrap_or_else(|| server_id.fingerprint())),
         clipboard_file_limit: file_limit,
     };
-    let client_task = tokio::spawn(client::run(
+    let (client_tx, client_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client_notices = collect(client_rx);
+    let client_transfers = Transfers::new();
+    let client_task = tokio::spawn(client::run_with_transfers(
         client_config,
         client_id,
         TrustStore::in_memory(),
@@ -119,9 +133,24 @@ fn start_client_screen(
             screen: Box::new(move || screen.lock().unwrap().0),
             monitors: Box::new(move || monitors.lock().unwrap().1.clone()),
         },
+        client_tx,
+        client_transfers.clone(),
     ));
 
-    Setup { events, capture, server_clip, injected, client_clip, client_screen, notices, server_task, client_task }
+    Setup {
+        events,
+        capture,
+        server_clip,
+        injected,
+        client_clip,
+        client_screen,
+        notices,
+        client_notices,
+        server_transfers,
+        client_transfers,
+        server_task,
+        client_task,
+    }
 }
 
 async fn wait_for(what: &str, condition: impl FnMut() -> bool) {
@@ -630,4 +659,149 @@ async fn connection_quality_is_measured_on_both_sides() {
     assert!(second.rx_bytes_per_s + third.rx_bytes_per_s > 0, "{second:?} {third:?}");
     server_task.abort();
     client_task.abort();
+}
+
+/// So groß, dass die Übertragung auch im Release-Build lange genug läuft, um sie abzubrechen
+const BIG: u64 = 256 * 1024 * 1024;
+
+/// Große Datei aus Nullen (sofort angelegt) mit eindeutigem Namen
+fn big_file(dir: &Path, name: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(name);
+    std::fs::File::create(&path).unwrap().set_len(BIG).unwrap();
+    path
+}
+
+fn server_progress(s: &Setup) -> Vec<Progress> {
+    let notices = s.notices.lock().unwrap();
+    notices.iter().filter_map(|n| if let ServerNotice::Transfer(p) = n { Some(p.clone()) } else { None }).collect()
+}
+
+fn client_progress(s: &Setup) -> Vec<Progress> {
+    let notices = s.client_notices.lock().unwrap();
+    notices.iter().filter_map(|n| if let ClientNotice::Transfer(p) = n { Some(p.clone()) } else { None }).collect()
+}
+
+/// Wartet auf eine Fortschrittsmeldung, die `pick` erfüllt.
+async fn wait_for_progress(
+    what: &str,
+    progress: impl Fn() -> Vec<Progress>,
+    pick: impl Fn(&Progress) -> bool,
+) -> Progress {
+    for _ in 0..20_000 / 25 {
+        if let Some(found) = progress().into_iter().find(&pick) {
+            return found;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("Zeitüberschreitung beim Warten auf: {what}");
+}
+
+fn running(direction: Direction) -> impl Fn(&Progress) -> bool {
+    move |p| p.direction == direction && p.phase == Phase::Running && p.bytes > 0
+}
+
+fn ended(transfer: u64, phase: Phase) -> impl Fn(&Progress) -> bool {
+    move |p| p.transfer == transfer && p.phase == phase
+}
+
+/// Teile von `name` im Drag-Staging irgendeines Laufs (jeder Server und Client hat dort einen eigenen
+/// Ordner; die Übertragungsnummern beginnen je Server bei 1)
+fn drag_leftovers(transfer: u64, name: &str) -> Vec<PathBuf> {
+    let Ok(runs) = std::fs::read_dir(files::drag_staging_base()) else { return Vec::new() };
+    runs.flatten()
+        .flat_map(|run| {
+            let dir = run.path().join(transfer.to_string());
+            [dir.join(name), dir.join(format!("{name}.part"))]
+        })
+        .filter(|p| p.exists())
+        .collect()
+}
+
+#[tokio::test]
+async fn dragged_files_report_progress_and_the_receiver_can_cancel() {
+    let s = start(true, None);
+    let base = std::env::temp_dir().join(format!("qross-abbruch-drag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let name = "abbrechen-gezogen.bin";
+    let source = big_file(&base.join("quelle"), name);
+    let target = base.join("ziel");
+    std::fs::create_dir_all(&target).unwrap();
+    *s.injected.1.lock().unwrap() = Some(target.clone());
+
+    let held = CaptureEvent::EdgeHit { edge: Edge::Right, x: 1919, y: 540, buttons_down: true };
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Drag-Prüfung", || {
+        let _ = events.send(held.clone());
+        capture.0.lock().unwrap().contains(&CaptureCall::ProbeDrag { x: 1919, y: 540 })
+    })
+    .await;
+    s.events.send(CaptureEvent::DragProbeResult { files: vec![source] }).unwrap();
+
+    // Beide Seiten melden Stand, Gesamtgröße und Namen.
+    let sending = wait_for_progress("Fortschritt beim Server", || server_progress(&s), running(Direction::Sending)).await;
+    assert_eq!((sending.kind, sending.peer.as_str(), sending.total), (Kind::Drag, "laptop", BIG));
+    assert_eq!(sending.names, [name]);
+    assert!(sending.bytes < BIG, "läuft noch: {sending:?}");
+    let id = sending.transfer;
+    let receiving = wait_for_progress("Fortschritt beim Client", || client_progress(&s), |p| {
+        p.transfer == id && running(Direction::Receiving)(p)
+    })
+    .await;
+    assert_eq!((receiving.kind, receiving.peer.as_str(), receiving.total), (Kind::Drag, "pc", BIG));
+
+    // Der Empfänger bricht ab, der Sender erfährt es über den angehaltenen Stream.
+    assert!(s.client_transfers.cancel(Direction::Receiving, id));
+    let cancelled = Phase::Cancelled { by_peer: false };
+    wait_for_progress("Abbruch beim Client", || client_progress(&s), ended(id, cancelled)).await;
+    let by_peer = Phase::Cancelled { by_peer: true };
+    wait_for_progress("Abbruch beim Server", || server_progress(&s), ended(id, by_peer)).await;
+    assert!(!s.client_transfers.cancel(Direction::Receiving, id), "läuft nicht mehr");
+
+    // Loslassen legt nichts mehr ab, und im Staging bleibt nichts liegen.
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+    wait_for("aufgeräumtes Staging", || drag_leftovers(id, name).is_empty()).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "Zielordner bleibt leer");
+    assert!(drag_leftovers(id, name).is_empty(), "{:?}", drag_leftovers(id, name));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn copied_files_report_progress_and_the_sender_can_cancel() {
+    let mut s = start(true, None);
+    let base = std::env::temp_dir().join(format!("qross-abbruch-kopiert-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let name = "abbrechen-kopiert.bin";
+    let source = big_file(&base, name);
+    s.server_clip.write_files(&[source], &ClipboardData::from_text(name)).unwrap();
+
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    let sending = wait_for_progress("Fortschritt beim Server", || server_progress(&s), running(Direction::Sending)).await;
+    assert_eq!((sending.kind, sending.peer.as_str(), sending.total), (Kind::Clipboard, "laptop", BIG));
+    let id = sending.transfer;
+    let receiving = wait_for_progress("Fortschritt beim Client", || client_progress(&s), |p| {
+        p.transfer == id && running(Direction::Receiving)(p)
+    })
+    .await;
+    assert_eq!((receiving.kind, receiving.peer.as_str(), receiving.names.clone()), (Kind::Clipboard, "pc", vec![name.to_owned()]));
+
+    // Der Sender bricht ab, der Empfänger erfährt es über den zurückgesetzten Stream.
+    assert!(s.server_transfers.cancel(Direction::Sending, id));
+    wait_for_progress("Abbruch beim Server", || server_progress(&s), ended(id, Phase::Cancelled { by_peer: false })).await;
+    wait_for_progress("Abbruch beim Client", || client_progress(&s), ended(id, Phase::Cancelled { by_peer: true })).await;
+
+    let store = clipfiles::default_store().join(id.to_string());
+    wait_for("aufgeräumte Ablage", || !store.exists()).await;
+    assert!(s.client_clip.files().is_empty(), "nichts in der Zwischenablage");
+    let failed = s.client_notices.lock().unwrap().iter().any(|n| {
+        matches!(n, ClientNotice::ClipboardFiles(clipfiles::FilesNotice::Failed { .. }))
+    });
+    assert!(!failed, "ein Abbruch ist kein Fehler");
+    let _ = std::fs::remove_dir_all(&base);
 }

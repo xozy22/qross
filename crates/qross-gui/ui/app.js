@@ -60,6 +60,8 @@ const ICONS = {
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>',
   cursor: '<path d="M5 3l14 7.5-6.2 1.7L10 19z" fill="currentColor" stroke="none"/>',
   lock: '<rect x="5" y="11" width="14" height="9" rx="2" fill="currentColor" stroke="none"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
 };
 
 function icon(name) {
@@ -993,6 +995,139 @@ function setupClipboardFiles() {
       saveSoon();
     });
   }
+}
+
+// ------------------------------------------------------------------ Dateiübertragungen
+
+/** Erst ab dieser Laufzeit erscheint eine Zeile; kürzere Übertragungen würden nur aufblitzen. */
+const TRANSFER_SHOW_AFTER_MS = 500;
+/** So lange bleibt eine beendete Zeile stehen */
+const TRANSFER_LINGER_MS = { done: 5000, cancelled: 4000, failed: 9000 };
+/** Angezeigte Übertragungen: id → { data, node, parts, final, timer }. Die Knoten bleiben bestehen
+ *  und werden nur aktualisiert, damit bei vier Meldungen pro Sekunde nichts flackert. */
+const transfers = new Map();
+
+function transferRow(t) {
+  const parts = {
+    name: el("strong", { class: "tname" }),
+    route: el("span", { class: "troute" }),
+    pct: el("span", { class: "tpct" }),
+    fill: el("span", { class: "tfill" }),
+    outcome: el("span", { class: "toutcome" }),
+    size: el("span", { class: "tsize" }),
+    speed: el("span", { class: "tspeed" }),
+  };
+  parts.bar = el("div", { class: "tbar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100" }, parts.fill);
+  parts.cancel = el("button", {
+    type: "button",
+    class: "btn ghost small tcancel",
+    text: "Abbrechen",
+    "aria-label": `Übertragung von ${t.name} abbrechen`,
+    onclick: () => cancelTransfer(t.id),
+  });
+  const node = el(
+    "div",
+    { class: "transfer", "data-direction": t.direction, "data-state": "running" },
+    icon(t.direction === "sending" ? "up" : "down"),
+    el(
+      "div",
+      { class: "tmain" },
+      el("div", { class: "tline" }, parts.name, parts.route, parts.pct),
+      parts.bar,
+      el("div", { class: "tmeta" }, parts.outcome, parts.size, parts.speed),
+    ),
+    parts.cancel,
+  );
+  return { node, parts, final: false, timer: null };
+}
+
+function showPercent(entry, percent) {
+  const whole = Math.floor(percent);
+  entry.parts.pct.textContent = `${whole}${NBSP}%`;
+  entry.parts.fill.style.width = `${percent}%`;
+  entry.parts.bar.setAttribute("aria-valuenow", whole);
+}
+
+/** Meldung aus dem Backend (etwa 4×/s je Übertragung, zum Schluss mit Ergebnis) */
+function onTransfer(t) {
+  let entry = transfers.get(t.id);
+  if (!entry) {
+    // Kurze Übertragungen bekommen keine Zeile, ein Ende ohne Zeile braucht keine.
+    if (t.state !== "running" || t.elapsed_ms < TRANSFER_SHOW_AFTER_MS) return;
+    entry = transferRow(t);
+    transfers.set(t.id, entry);
+    $("#transfers").append(entry.node);
+    $("#transfers").hidden = false;
+  }
+  // Schon beendet, etwa durch „Kopierte Dateien sind bereit“
+  if (entry.final) return;
+  entry.data = t;
+  const { parts } = entry;
+  parts.name.textContent = t.name;
+  parts.name.title = t.name;
+  parts.route.textContent = t.route;
+  parts.size.textContent = t.size;
+  parts.speed.textContent = t.speed;
+  showPercent(entry, t.percent);
+  if (t.state !== "running") finishTransfer(entry, t.outcome, t.state);
+}
+
+/** Ergebnis in die Zeile schreiben; sie verschwindet nach ein paar Sekunden. */
+function finishTransfer(entry, text, state) {
+  entry.final = true;
+  entry.node.dataset.state = state;
+  entry.parts.outcome.textContent = text || "";
+  entry.parts.cancel.disabled = true;
+  if (state === "done") showPercent(entry, 100);
+  clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => removeTransfer(entry), TRANSFER_LINGER_MS[state] ?? 4000);
+}
+
+function removeTransfer(entry) {
+  entry.node.classList.add("leaving");
+  setTimeout(() => {
+    if (transfers.get(entry.data.id) === entry) transfers.delete(entry.data.id);
+    entry.node.remove();
+    $("#transfers").hidden = transfers.size === 0;
+  }, 200);
+}
+
+/** Gestoppt oder neu gestartet: Meldungen der alten Instanz kommen nicht mehr. */
+function clearTransfers() {
+  if (!transfers.size) return;
+  for (const entry of transfers.values()) {
+    clearTimeout(entry.timer);
+    entry.node.remove();
+  }
+  transfers.clear();
+  $("#transfers").hidden = true;
+}
+
+async function cancelTransfer(id) {
+  const entry = transfers.get(id);
+  if (entry) entry.parts.cancel.disabled = true;
+  try {
+    // Das Ende kommt als Meldung, auch wenn die Übertragung gerade von selbst fertig wurde.
+    await invoke("cancel_transfer", { id });
+  } catch (e) {
+    toast(String(e), "error");
+    if (entry && !entry.final) entry.parts.cancel.disabled = false;
+  }
+}
+
+/** Zeile für kopierte Dateien, die gerade von `peer` ankommen (oder eben angekommen sind) */
+function clipboardRow(peer) {
+  return [...transfers.values()]
+    .reverse()
+    .find((e) => e.data.kind === "clipboard" && e.data.direction === "receiving" && e.data.peer === peer);
+}
+
+/** Hinweis zu kopierten Dateien: „bereit“ und Fehler landen in deren Zeile, sonst als Toast. */
+function onClipboardFiles(message) {
+  if (!message.text) return;
+  const row = (message.event === "ready" || message.event === "failed") && clipboardRow(message.peer);
+  if (row) finishTransfer(row, message.text, message.event === "ready" ? "done" : "failed");
+  else toast(message.text, TOAST_KIND[message.tone] ?? "");
 }
 
 // ------------------------------------------------------------------ Neuigkeiten
@@ -1941,10 +2076,12 @@ async function init() {
 
   await listen("status", (e) => {
     state.status = e.payload;
+    if (!running() || state.status.phase === "starting") clearTransfers();
     render();
   });
   await listen("log", (e) => appendLogs([e.payload]));
   await listen("quality", (e) => onQuality(e.payload));
+  await listen("transfer", (e) => onTransfer(e.payload));
   await listen("start-from-tray", () => {
     if (!running()) startFlow();
   });
@@ -1962,9 +2099,7 @@ async function init() {
   });
   setupSettings();
   // Kopierte Dateien: dezente Hinweise im Fenster (Texte kommen fertig aus dem Backend)
-  await listen("clipboard-files", (e) => {
-    if (e.payload.text) toast(e.payload.text, TOAST_KIND[e.payload.tone] ?? "");
-  });
+  await listen("clipboard-files", (e) => onClipboardFiles(e.payload));
   setupClipboardFiles();
   setupNews();
 

@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Notify, Ready};
 use crate::files::{FileOutcome, Receiver, Staging};
+use crate::progress::{Progress, Transfers};
 use crate::quality::{self, Quality};
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
@@ -58,6 +59,8 @@ pub struct Server {
     /// Fang-Taste, Medientasten, Umbelegung je Rechner
     keys: KeyConfig,
     fingerprint: Fingerprint,
+    /// Laufende Dateiübertragungen (Fortschritt, Abbrechen)
+    transfers: Transfers,
 }
 
 /// Bricht eine Hintergrundaufgabe ab, sobald der Server (bzw. `run`) beendet wird.
@@ -91,6 +94,9 @@ pub enum ServerNotice {
     LocalScreenChanged { screen: Rect, monitors: Vec<Rect> },
     /// Verbindungsqualität zu einem Client, etwa jede Sekunde (siehe [`quality`]).
     Quality { name: String, quality: Quality },
+    /// Stand einer Dateiübertragung (Drag & Drop, kopierte Dateien) etwa viermal pro Sekunde und
+    /// zum Schluss ihr Ergebnis (siehe [`crate::progress`]). Abbrechen über [`Server::transfers`].
+    Transfer(Progress),
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -128,6 +134,8 @@ enum NetEvent {
 struct Stagings {
     clipboard: Arc<Staging>,
     drag: Arc<Staging>,
+    /// Zählt die ankommenden Bytes
+    transfers: Transfers,
 }
 
 struct ClientHandle {
@@ -157,7 +165,13 @@ impl Server {
             clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
             keys: KeyConfig::default(),
             fingerprint: identity.fingerprint(),
+            transfers: Transfers::new(),
         })
+    }
+
+    /// Laufende Dateiübertragungen, etwa zum Abbrechen aus der Oberfläche
+    pub fn transfers(&self) -> Transfers {
+        self.transfers.clone()
     }
 
     /// Fang-Taste, Medientasten und Umbelegung je Rechner (Standard: Rollen-Taste,
@@ -225,10 +239,19 @@ impl Server {
 
     pub async fn run(mut self, platform: ServerPlatform) -> Result<()> {
         // Kopierte Dateien aller Clients landen hier, bis sie in die Zwischenablage kommen.
-        let mut incoming = clipfiles::Incoming::new(Staging::persistent(&clipfiles::default_store())?);
+        let transfers = self.transfers.clone();
+        let mut incoming = clipfiles::Incoming::new(Staging::persistent(&clipfiles::default_store())?, transfers.clone());
         // Vom Client gezogene Dateien warten hier, bis sie auf dem Server abgelegt werden.
-        let mut drops = Receiver::new(Staging::create(&files::drag_staging_base())?);
-        let stagings = Stagings { clipboard: incoming.staging(), drag: drops.staging() };
+        let mut drops = Receiver::new(Staging::create(&files::drag_staging_base())?, transfers.clone());
+        let stagings = Stagings { clipboard: incoming.staging(), drag: drops.staging(), transfers: transfers.clone() };
+        let _progress = {
+            let notices = self.notices.clone();
+            transfers.spawn_reporter(move |progress| {
+                if let Some(tx) = &notices {
+                    let _ = tx.send(ServerNotice::Transfer(progress));
+                }
+            })
+        };
         let (net_tx, mut net_rx) = mpsc::unbounded_channel();
         tokio::spawn(accept_loop(self.endpoint.clone(), net_tx, stagings));
 
@@ -386,7 +409,7 @@ impl Server {
                     NetEvent::DragOffer { name, id, probe, transfer, entries } if is_current(&clients, &name, id) => {
                         let has_files = !entries.is_empty();
                         if has_files {
-                            drops.on_drag_start(transfer, entries);
+                            drops.on_drag_start(&name, transfer, entries);
                         }
                         state.handle(ServerEvent::RemoteDragOffer { client: name, probe, transfer, has_files })
                     }
@@ -397,6 +420,7 @@ impl Server {
                     NetEvent::Closed { name, id } if is_current(&clients, &name, id) => {
                         clients.remove(&name);
                         info!("Client „{name}“ getrennt");
+                        transfers.abort_receiving(Some(&name), "Verbindung getrennt");
                         self.notify(ServerNotice::ClientDisconnected { name: name.clone() });
                         state.handle(ServerEvent::ClientDisconnected { name })
                     }
@@ -423,7 +447,7 @@ impl Server {
             };
             for action in actions {
                 self.notify_action(&action);
-                let files = (self.clipboard_file_limit, &files_notify);
+                let files = FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers };
                 apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops);
             }
         }
@@ -497,6 +521,13 @@ fn describe_monitors(monitors: &[Rect]) -> String {
 /// Je Client die zuletzt übertragene Clipboard-Sequenznummer
 type ClipSynced = Arc<Mutex<HashMap<String, u64>>>;
 
+/// Für ausgehende Dateien: Grenze für kopierte Dateien (0 = nie), Meldungen, Fortschritt
+struct FileSide<'a> {
+    limit: u64,
+    notify: &'a Notify,
+    transfers: &'a Transfers,
+}
+
 /// Fertig übertragene Dateien eines Clients in die Zwischenablage legen.
 fn deliver_files(ready: Ready, clipboard: &ClipboardHub, clip_synced: &ClipSynced, notify: &Notify) {
     let (clipboard, synced, notify) = (clipboard.clone(), clip_synced.clone(), notify.clone());
@@ -523,7 +554,7 @@ fn apply(
     clipboard: &ClipboardHub,
     clients: &HashMap<String, ClientHandle>,
     clip_synced: &ClipSynced,
-    (file_limit, files_notify): (u64, &Notify),
+    files: FileSide<'_>,
     drops: &mut Receiver,
 ) {
     match action {
@@ -551,22 +582,23 @@ fn apply(
         Action::SyncClipboard { to } => {
             let Some(client) = clients.get(&to) else { return };
             let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), client.conn.clone());
-            let notify = files_notify.clone();
+            let (limit, notify, transfers) = (files.limit, files.notify.clone(), files.transfers.clone());
             // Lesen und PNG-Kodierung im Clipboard-Thread; die Ereignisschleife läuft weiter.
             tokio::spawn(async move {
                 let known = synced.lock().unwrap().get(&to).copied();
                 let (seq, content) = clipboard.changed_since(known).await;
                 synced.lock().unwrap().insert(to.clone(), seq);
                 if let Some(content) = content {
-                    clipfiles::send(conn, content, file_limit, to, notify).await;
+                    clipfiles::send(conn, content, limit, to, notify, transfers).await;
                 }
             });
         }
         Action::ProbeDrag { x, y } => capture.probe_drag(x, y),
         Action::CancelLocalDrag => capture.cancel_local_drag(),
-        Action::StartFileDrag { to, transfer, files } => {
+        Action::StartFileDrag { to, transfer, files: roots } => {
             if let Some(client) = clients.get(&to) {
-                tokio::spawn(start_file_drag(client.conn.clone(), client.input.clone(), to, transfer, files));
+                let (conn, input, transfers) = (client.conn.clone(), client.input.clone(), files.transfers.clone());
+                tokio::spawn(start_file_drag(conn, input, to, transfer, roots, transfers));
             }
         }
         Action::QueryRemoteDrag { to, probe } => {
@@ -601,6 +633,7 @@ async fn start_file_drag(
     to: String,
     transfer: u64,
     roots: Vec<PathBuf>,
+    transfers: Transfers,
 ) {
     let entries = match tokio::task::spawn_blocking(move || files::collect(&roots)).await {
         Ok(Ok(entries)) => entries,
@@ -611,7 +644,7 @@ async fn start_file_drag(
     info!("übertrage {} Einträge ({}) an „{to}“", entries.len(), files::human_size(total));
     let _ = input.send(Input::DragStart { transfer, entries: entries.iter().map(|e| e.entry.clone()).collect() });
     let started = std::time::Instant::now();
-    match files::send_files(conn, StreamKind::File, transfer, entries).await {
+    match files::send_tracked(conn, StreamKind::File, transfer, entries, &to, &transfers).await {
         Ok(()) => {
             let secs = started.elapsed().as_secs_f64().max(0.001);
             info!(
@@ -733,7 +766,7 @@ async fn receive_client_streams(
                         None => {}
                     },
                     StreamKind::ClipboardFile => {
-                        let outcome = files::receive_file(&mut stream, &stagings.clipboard).await?;
+                        let outcome = files::receive_file(&mut stream, &stagings.clipboard, &stagings.transfers).await?;
                         let _ = tx.send(NetEvent::ClipboardFile { name, id, outcome });
                     }
                     StreamKind::Drag => {
@@ -742,7 +775,7 @@ async fn receive_client_streams(
                         }
                     }
                     StreamKind::File => {
-                        let outcome = files::receive_file(&mut stream, &stagings.drag).await?;
+                        let outcome = files::receive_file(&mut stream, &stagings.drag, &stagings.transfers).await?;
                         let _ = tx.send(NetEvent::DragFile { name, id, outcome });
                     }
                     other => bail!("Client darf keine Streams vom Typ {other:?} öffnen"),

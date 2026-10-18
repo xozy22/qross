@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Incoming, Notify, Ready};
 use crate::files::{self, FileOutcome, Receiver, Staging};
+use crate::progress::{Progress, Transfers};
 use crate::quality::{self, Quality};
 use crate::streams::{read_kind, send_drag_message};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
@@ -88,6 +89,8 @@ struct ClipboardSide {
     hub: ClipboardHub,
     incoming: Incoming,
     notify: Notify,
+    /// Fortschritt und Abbrechen aller Dateiübertragungen (auch Drag & Drop)
+    transfers: Transfers,
 }
 
 /// Aufträge an den Einspeise-Thread. Die Ablageordner-Abfrage läuft dort, damit sie nach den
@@ -118,6 +121,9 @@ pub enum ClientNotice {
     ClipboardFiles(FilesNotice),
     /// Verbindungsqualität zum Server, etwa jede Sekunde (siehe [`quality`]).
     Quality(Quality),
+    /// Stand einer Dateiübertragung etwa viermal pro Sekunde und zum Schluss ihr Ergebnis
+    /// (siehe [`crate::progress`]). Abbrechen über die `Transfers` aus [`run_with_transfers`].
+    Transfer(Progress),
 }
 
 type Notices<'a> = Option<&'a mpsc::UnboundedSender<ClientNotice>>;
@@ -130,7 +136,7 @@ fn notify(notices: Notices<'_>, notice: ClientNotice) {
 
 /// Läuft, bis ein nicht behebbarer Fehler auftritt (z. B. falscher Server-Fingerprint).
 pub async fn run(config: ClientConfig, identity: Identity, trust: TrustStore, platform: ClientPlatform) -> Result<()> {
-    run_inner(config, identity, trust, platform, None).await
+    run_inner(config, identity, trust, platform, None, Transfers::new()).await
 }
 
 /// Wie [`run`], meldet den Verbindungszustand zusätzlich über `notices`.
@@ -141,7 +147,19 @@ pub async fn run_with_notices(
     platform: ClientPlatform,
     notices: mpsc::UnboundedSender<ClientNotice>,
 ) -> Result<()> {
-    run_inner(config, identity, trust, platform, Some(&notices)).await
+    run_inner(config, identity, trust, platform, Some(&notices), Transfers::new()).await
+}
+
+/// Wie [`run_with_notices`]; laufende Dateiübertragungen lassen sich über `transfers` abbrechen.
+pub async fn run_with_transfers(
+    config: ClientConfig,
+    identity: Identity,
+    trust: TrustStore,
+    platform: ClientPlatform,
+    notices: mpsc::UnboundedSender<ClientNotice>,
+    transfers: Transfers,
+) -> Result<()> {
+    run_inner(config, identity, trust, platform, Some(&notices), transfers).await
 }
 
 /// Baut nur den TLS-Handshake auf und liefert den Fingerprint des Servers, ohne sich anzumelden
@@ -170,12 +188,22 @@ async fn run_inner(
     mut trust: TrustStore,
     platform: ClientPlatform,
     notices: Notices<'_>,
+    transfers: Transfers,
 ) -> Result<()> {
     let ClientPlatform { mut injector, clipboard, screen, monitors } = platform;
     let screen = ScreenQuery { bounds: screen, monitors };
+    let _progress = {
+        let notices = notices.cloned();
+        transfers.spawn_reporter(move |progress| {
+            if let Some(tx) = &notices {
+                let _ = tx.send(ClientNotice::Transfer(progress));
+            }
+        })
+    };
     let mut clipboard = ClipboardSide {
         hub: ClipboardHub::spawn(clipboard),
-        incoming: Incoming::new(Staging::persistent(&clipfiles::default_store())?),
+        incoming: Incoming::new(Staging::persistent(&clipfiles::default_store())?, transfers.clone()),
+        transfers,
         notify: {
             let notices = notices.cloned();
             Arc::new(move |notice| {
@@ -286,11 +314,12 @@ async fn session(
         })
     });
 
-    let mut receiver = Receiver::new(Staging::create(&files::drag_staging_base())?);
+    let mut receiver = Receiver::new(Staging::create(&files::drag_staging_base())?, clip.transfers.clone());
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(receive_datagrams(conn.clone(), tx.clone()));
-    tokio::spawn(receive_streams(conn.clone(), tx, receiver.staging(), clip.incoming.staging()));
+    let stagings = (receiver.staging(), clip.incoming.staging(), clip.transfers.clone());
+    tokio::spawn(receive_streams(conn.clone(), tx, stagings));
     // Übertragungen der vorigen Verbindung kommen nie mehr vollständig an.
     clip.incoming.supersede();
 
@@ -326,7 +355,7 @@ async fn session(
                                 None
                             }
                             Input::DragStart { transfer, entries } => {
-                                receiver.on_drag_start(*transfer, entries.clone());
+                                receiver.on_drag_start(&server_name, *transfer, entries.clone());
                                 None
                             }
                             Input::Drop { transfer, x, y } => Some((*transfer, *x, *y)),
@@ -355,12 +384,13 @@ async fn session(
                                 // Beim Verlassen das eigene Clipboard mitgeben, falls es sich geändert hat.
                                 let (hub, synced, conn) = (clip.hub.clone(), clip_synced.clone(), conn.clone());
                                 let (limit, peer, notify) = (config.clipboard_file_limit, server_name.clone(), clip.notify.clone());
+                                let transfers = clip.transfers.clone();
                                 tokio::spawn(async move {
                                     let known = *synced.lock().unwrap();
                                     let (seq, content) = hub.changed_since(Some(known)).await;
                                     *synced.lock().unwrap() = seq;
                                     if let Some(content) = content {
-                                        clipfiles::send(conn, content, limit, peer, notify).await;
+                                        clipfiles::send(conn, content, limit, peer, notify, transfers).await;
                                     }
                                 });
                             }
@@ -394,7 +424,8 @@ async fn session(
                     FromServer::DragQuery { probe } => {
                         let (reply, dragged) = oneshot::channel();
                         let _ = inject.send(ToInjector::TakeDragged { x: last_pos.0, y: last_pos.1, reply });
-                        tokio::spawn(offer_dragged_files(conn.clone(), probe, dragged));
+                        let (peer, transfers) = (server_name.clone(), clip.transfers.clone());
+                        tokio::spawn(offer_dragged_files(conn.clone(), probe, dragged, peer, transfers));
                     }
                     FromServer::ClipboardFile(outcome) => match clip.incoming.on_file(outcome) {
                         Ok(Some(ready)) => deliver_files(ready, clip, &clip_synced),
@@ -426,6 +457,8 @@ async fn session(
     // Nichts gedrückt lassen, wenn die Verbindung mitten in einer Eingabe abreißt.
     inject_all(inject, state.release_all());
     receiver.cancel_undropped();
+    // Was noch ankam, wird nie vollständig.
+    clip.transfers.abort_receiving(None, "Verbindung getrennt");
     outcome
 }
 
@@ -514,7 +547,13 @@ async fn receive_datagrams(conn: Connection, tx: mpsc::UnboundedSender<FromServe
 }
 
 /// Antwort auf die Drag-Nachfrage des Servers: Werden hier Dateien gezogen, gehen sie zum Server.
-async fn offer_dragged_files(conn: Connection, probe: u32, dragged: oneshot::Receiver<Vec<PathBuf>>) {
+async fn offer_dragged_files(
+    conn: Connection,
+    probe: u32,
+    dragged: oneshot::Receiver<Vec<PathBuf>>,
+    server_name: String,
+    transfers: Transfers,
+) {
     let paths = dragged.await.unwrap_or_default();
     let entries = if paths.is_empty() {
         Vec::new()
@@ -538,21 +577,19 @@ async fn offer_dragged_files(conn: Connection, probe: u32, dragged: oneshot::Rec
     }
     let total: u64 = entries.iter().map(|e| e.entry.size).sum();
     info!("übertrage {} gezogene Einträge ({}) zum Server", entries.len(), files::human_size(total));
-    if let Err(e) = files::send_files(conn, StreamKind::File, transfer, entries).await {
+    if let Err(e) = files::send_tracked(conn, StreamKind::File, transfer, entries, &server_name, &transfers).await {
         warn!("Übertragung zum Server abgebrochen: {e:#}");
     }
 }
 
-async fn receive_streams(
-    conn: Connection,
-    tx: mpsc::UnboundedSender<FromServer>,
-    drag: Arc<Staging>,
-    clipboard: Arc<Staging>,
-) {
+/// Zwischenordner für gezogene und kopierte Dateien, Fortschritt
+type Stagings = (Arc<Staging>, Arc<Staging>, Transfers);
+
+async fn receive_streams(conn: Connection, tx: mpsc::UnboundedSender<FromServer>, stagings: Stagings) {
     while let Ok(mut stream) = conn.accept_uni().await {
-        let (tx, drag, clipboard) = (tx.clone(), drag.clone(), clipboard.clone());
+        let (tx, stagings) = (tx.clone(), stagings.clone());
         tokio::spawn(async move {
-            if let Err(e) = read_server_stream(&mut stream, &tx, &drag, &clipboard).await {
+            if let Err(e) = read_server_stream(&mut stream, &tx, &stagings).await {
                 debug!("Stream vom Server beendet: {e:#}");
             }
         });
@@ -562,8 +599,7 @@ async fn receive_streams(
 async fn read_server_stream(
     stream: &mut RecvStream,
     tx: &mpsc::UnboundedSender<FromServer>,
-    drag: &Staging,
-    clipboard: &Staging,
+    (drag, clipboard, transfers): &Stagings,
 ) -> Result<()> {
     match read_kind(stream).await? {
         StreamKind::Input => {
@@ -581,11 +617,11 @@ async fn read_server_stream(
             None => {}
         },
         StreamKind::File => {
-            let outcome = files::receive_file(stream, drag).await?;
+            let outcome = files::receive_file(stream, drag, transfers).await?;
             let _ = tx.send(FromServer::File(outcome));
         }
         StreamKind::ClipboardFile => {
-            let outcome = files::receive_file(stream, clipboard).await?;
+            let outcome = files::receive_file(stream, clipboard, transfers).await?;
             let _ = tx.send(FromServer::ClipboardFile(outcome));
         }
         StreamKind::Drag => {

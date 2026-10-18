@@ -6,7 +6,7 @@
 //! Verzeichnis (`*.part`, nach erfolgreicher Prüfung umbenannt) und verschiebt alles erst
 //! in den Zielordner, wenn die Dateien vollständig sind **und** abgelegt wurde.
 //! Eingaben bleiben dabei flüssig, weil sie auf eigenen Streams/Datagrammen mit höherer
-//! Priorität laufen.
+//! Priorität laufen. Fortschritt und Abbrechen: siehe `progress`.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -17,12 +17,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use qross_proto::{read_frame, write_frame, FileEntry, FileHeader, FileTrailer, StreamKind};
-use quinn::{Connection, RecvStream};
+use qross_proto::{read_frame, write_frame, FileEntry, FileHeader, FileTrailer, FrameError, StreamKind};
+use quinn::{Connection, ReadError, ReadExactError, RecvStream, SendStream, WriteError};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
+use crate::clipfiles::summary;
+use crate::progress::{self, Cancelled, Direction, Info, Kind, Outgoing, Phase, Transfers};
 use crate::streams::BULK_PRIORITY;
 
 const CHUNK: usize = 256 * 1024;
@@ -83,38 +85,117 @@ fn walk(path: &Path, rel: String, out: &mut Vec<LocalEntry>, total: &mut u64, ma
 }
 
 /// Sendet alle Dateien einer Übertragung nacheinander auf je einem eigenen Stream
-/// (`kind`: `File` für Drag & Drop, `ClipboardFile` für die Zwischenablage).
-pub async fn send_files(conn: Connection, kind: StreamKind, transfer: u64, entries: Vec<LocalEntry>) -> Result<()> {
+/// (`kind`: `File` für Drag & Drop, `ClipboardFile` für die Zwischenablage). Zählt die Bytes in
+/// `job`; bei „Abbrechen“ wird der laufende Stream zurückgesetzt und keiner mehr geöffnet.
+pub async fn send_files(
+    conn: Connection,
+    kind: StreamKind,
+    transfer: u64,
+    entries: Vec<LocalEntry>,
+    job: &Outgoing,
+) -> Result<()> {
     let mut buf = vec![0u8; CHUNK];
     for (index, local) in entries.iter().enumerate() {
         if local.entry.is_dir {
             continue;
         }
+        if job.is_cancelled() {
+            bail!(Cancelled { by_peer: false });
+        }
         let mut stream = conn.open_uni().await?;
         stream.set_priority(BULK_PRIORITY)?;
-        stream.write_all(&[kind as u8]).await?;
+        stream.write_all(&[kind as u8]).await.map_err(write_error)?;
         let header = FileHeader { transfer, index: index as u32, path: local.entry.path.clone(), size: local.entry.size };
-        write_frame(&mut stream, &header).await?;
-
-        let mut file = tokio::fs::File::open(&local.source)
-            .await
-            .with_context(|| format!("{} öffnen", local.source.display()))?;
-        let mut hasher = Sha256::new();
-        let mut remaining = local.entry.size;
-        while remaining > 0 {
-            let want = remaining.min(CHUNK as u64) as usize;
-            let n = file.read(&mut buf[..want]).await?;
-            if n == 0 {
-                bail!("{} wurde während der Übertragung kürzer", local.source.display());
-            }
-            hasher.update(&buf[..n]);
-            stream.write_all(&buf[..n]).await?;
-            remaining -= n as u64;
-        }
-        write_frame(&mut stream, &FileTrailer { sha256: hasher.finalize().into() }).await?;
-        stream.finish()?;
+        write_frame(&mut stream, &header).await.map_err(frame_write_error)?;
+        send_body(&mut stream, local, &mut buf, job).await?;
     }
     Ok(())
+}
+
+async fn send_body(stream: &mut SendStream, local: &LocalEntry, buf: &mut [u8], job: &Outgoing) -> Result<()> {
+    let mut file = tokio::fs::File::open(&local.source)
+        .await
+        .with_context(|| format!("{} öffnen", local.source.display()))?;
+    let mut hasher = Sha256::new();
+    let mut remaining = local.entry.size;
+    while remaining > 0 {
+        let want = remaining.min(CHUNK as u64) as usize;
+        let n = file.read(&mut buf[..want]).await?;
+        if n == 0 {
+            bail!("{} wurde während der Übertragung kürzer", local.source.display());
+        }
+        hasher.update(&buf[..n]);
+        // Schreiben wartet auf die Gegenstelle (Flusskontrolle); „Abbrechen“ soll trotzdem sofort wirken.
+        let cancelled = tokio::select! {
+            biased;
+            () = job.cancelled() => true,
+            written = stream.write_all(&buf[..n]) => {
+                written.map_err(write_error)?;
+                false
+            }
+        };
+        if cancelled {
+            let _ = stream.reset(0u32.into());
+            bail!(Cancelled { by_peer: false });
+        }
+        job.add(n as u64);
+        remaining -= n as u64;
+    }
+    write_frame(stream, &FileTrailer { sha256: hasher.finalize().into() }).await.map_err(frame_write_error)?;
+    stream.finish()?;
+    Ok(())
+}
+
+/// Wie [`send_files`], meldet die Übertragung dabei in `transfers` an (`peer`: Empfänger), sodass sie
+/// dort gemeldet und abgebrochen werden kann.
+pub async fn send_tracked(
+    conn: Connection,
+    kind: StreamKind,
+    transfer: u64,
+    entries: Vec<LocalEntry>,
+    peer: &str,
+    transfers: &Transfers,
+) -> Result<()> {
+    let list: Vec<FileEntry> = entries.iter().map(|e| e.entry.clone()).collect();
+    let (names, total) = summary(&list);
+    let job = transfers.begin_sending(transfer, Info { kind: Kind::of(kind), peer: peer.to_owned(), names, total });
+    let result = send_files(conn, kind, transfer, entries, &job).await;
+    transfers.end(Direction::Sending, transfer, Phase::of(&result));
+    result
+}
+
+/// Hält der Empfänger den Stream an (`STOP_SENDING`), hat er die Übertragung abgebrochen oder verworfen.
+fn write_error(e: WriteError) -> anyhow::Error {
+    match e {
+        WriteError::Stopped(_) => Cancelled { by_peer: true }.into(),
+        e => e.into(),
+    }
+}
+
+fn frame_write_error(e: FrameError) -> anyhow::Error {
+    if let FrameError::Io(io) = &e {
+        if let Some(WriteError::Stopped(_)) = io.get_ref().and_then(|inner| inner.downcast_ref::<WriteError>()) {
+            return Cancelled { by_peer: true }.into();
+        }
+    }
+    e.into()
+}
+
+/// Setzt der Sender den Stream zurück (`RESET_STREAM`), hat er die Übertragung abgebrochen.
+fn read_error(e: ReadExactError) -> anyhow::Error {
+    match e {
+        ReadExactError::ReadError(ReadError::Reset(_)) => Cancelled { by_peer: true }.into(),
+        e => e.into(),
+    }
+}
+
+fn frame_read_error(e: FrameError) -> anyhow::Error {
+    if let FrameError::Io(io) = &e {
+        if let Some(ReadError::Reset(_)) = io.get_ref().and_then(|inner| inner.downcast_ref::<ReadError>()) {
+            return Cancelled { by_peer: true }.into();
+        }
+    }
+    e.into()
 }
 
 /// Macht aus einem relativen Protokollpfad einen sicheren lokalen Pfad: keine absoluten Pfade,
@@ -233,14 +314,25 @@ pub struct FileOutcome {
     pub result: Result<()>,
 }
 
-/// Empfängt eine Datei (das `StreamKind`-Byte ist bereits gelesen).
-pub async fn receive_file(stream: &mut RecvStream, staging: &Staging) -> Result<FileOutcome> {
+/// Empfängt eine Datei (das `StreamKind`-Byte ist bereits gelesen) und zählt die Bytes in `transfers`.
+pub async fn receive_file(stream: &mut RecvStream, staging: &Staging, transfers: &Transfers) -> Result<FileOutcome> {
     let header: FileHeader = read_frame(stream).await?.context("Datei-Stream ohne Header")?;
-    let result = receive_body(stream, staging, &header).await;
+    let bytes = transfers.counter(Direction::Receiving, header.transfer);
+    let result = receive_body(stream, staging, &header, &bytes).await;
     Ok(FileOutcome { transfer: header.transfer, index: header.index, result })
 }
 
-async fn receive_body(stream: &mut RecvStream, staging: &Staging, header: &FileHeader) -> Result<()> {
+/// Bricht den Stream ab, weil die Übertragung hier verworfen wurde.
+fn stop(stream: &mut RecvStream) -> anyhow::Error {
+    let _ = stream.stop(0u32.into());
+    Cancelled { by_peer: false }.into()
+}
+
+async fn receive_body(stream: &mut RecvStream, staging: &Staging, header: &FileHeader, bytes: &AtomicU64) -> Result<()> {
+    // Schon verworfen: nichts mehr anlegen
+    if staging.is_cancelled(header.transfer) {
+        return Err(stop(stream));
+    }
     let dest = staging.transfer_dir(header.transfer).join(sanitize(&header.path)?);
     let mut part = OsString::from(dest.as_os_str());
     part.push(".part");
@@ -256,18 +348,18 @@ async fn receive_body(stream: &mut RecvStream, staging: &Staging, header: &FileH
         let mut remaining = header.size;
         while remaining > 0 {
             if staging.is_cancelled(header.transfer) {
-                let _ = stream.stop(0u32.into());
-                bail!("abgebrochen");
+                return Err(stop(stream));
             }
             let n = remaining.min(CHUNK as u64) as usize;
-            stream.read_exact(&mut buf[..n]).await?;
+            stream.read_exact(&mut buf[..n]).await.map_err(read_error)?;
             hasher.update(&buf[..n]);
             file.write_all(&buf[..n]).await?;
+            bytes.fetch_add(n as u64, Ordering::Relaxed);
             remaining -= n as u64;
         }
         file.flush().await?;
         drop(file);
-        let trailer: FileTrailer = read_frame(stream).await?.context("Prüfsumme fehlt")?;
+        let trailer: FileTrailer = read_frame(stream).await.map_err(frame_read_error)?.context("Prüfsumme fehlt")?;
         if trailer.sha256 != <[u8; 32]>::from(hasher.finalize()) {
             bail!("Prüfsumme stimmt nicht");
         }
@@ -286,7 +378,11 @@ struct Transfer {
     entries: Option<Vec<FileEntry>>,
     done: HashSet<u32>,
     failed: Vec<String>,
+    /// Abgebrochen statt fehlgeschlagen (`true`: vom Sender)
+    cancelled_by_peer: Option<bool>,
     target: Option<PathBuf>,
+    /// Alle Dateien sind da und als fertig gemeldet; es fehlt höchstens noch das Ablegen.
+    arrived: bool,
 }
 
 impl Transfer {
@@ -297,44 +393,62 @@ impl Transfer {
     }
 }
 
-/// Buchführung des Clients über laufende Übertragungen. `DragStart`, `Drop` und die Datei-
+/// Buchführung des Empfängers über gezogene Dateien. `DragStart`, `Drop` und die Datei-
 /// Streams dürfen in beliebiger Reihenfolge eintreffen.
 pub struct Receiver {
     staging: Arc<Staging>,
     transfers: HashMap<u64, Transfer>,
+    /// Fortschritt für die Oberfläche; „Abbrechen“ verwirft über das Staging.
+    progress: Transfers,
 }
 
 impl Receiver {
-    pub fn new(staging: Arc<Staging>) -> Self {
-        Self { staging, transfers: HashMap::new() }
+    pub fn new(staging: Arc<Staging>, progress: Transfers) -> Self {
+        Self { staging, transfers: HashMap::new(), progress }
     }
 
     pub fn staging(&self) -> Arc<Staging> {
         self.staging.clone()
     }
 
-    pub fn on_drag_start(&mut self, transfer: u64, entries: Vec<FileEntry>) {
-        let total: u64 = entries.iter().map(|e| e.size).sum();
+    /// Gezogene Dateien von `peer` sind angekündigt.
+    pub fn on_drag_start(&mut self, peer: &str, transfer: u64, entries: Vec<FileEntry>) {
+        let (names, total) = summary(&entries);
         info!("empfange {} Einträge ({})", entries.len(), human_size(total));
+        let staging = self.staging.clone();
+        let info = Info { kind: Kind::Drag, peer: peer.to_owned(), names, total };
+        self.progress.begin(Direction::Receiving, transfer, info, move || staging.discard(transfer));
         self.transfers.entry(transfer).or_default().entries = Some(entries);
         self.try_finish(transfer);
     }
 
     pub fn on_drop(&mut self, transfer: u64, target: PathBuf) {
+        if self.staging.is_cancelled(transfer) {
+            return info!("Übertragung {transfer} ist abgebrochen – nichts abzulegen");
+        }
         info!("abgelegt in {}", target.display());
         self.transfers.entry(transfer).or_default().target = Some(target);
         self.try_finish(transfer);
     }
 
     pub fn on_file(&mut self, outcome: FileOutcome) {
-        let transfer = self.transfers.entry(outcome.transfer).or_default();
+        let id = outcome.transfer;
+        if self.staging.is_cancelled(id) {
+            // Abgebrochen oder schon verworfen: Was danach noch ankam, wieder wegräumen.
+            self.discard(id, Phase::Cancelled { by_peer: false });
+            return;
+        }
+        let transfer = self.transfers.entry(id).or_default();
         match outcome.result {
             Ok(()) => {
                 transfer.done.insert(outcome.index);
             }
-            Err(e) => transfer.failed.push(format!("Datei {}: {e:#}", outcome.index)),
+            Err(e) => match progress::cancelled(&e) {
+                Some(c) => transfer.cancelled_by_peer = Some(c.by_peer),
+                None => transfer.failed.push(format!("Datei {}: {e:#}", outcome.index)),
+            },
         }
-        self.try_finish(outcome.transfer);
+        self.try_finish(id);
     }
 
     /// Der Cursor hat den Rechner verlassen: Übertragungen ohne Drop verwerfen.
@@ -342,20 +456,35 @@ impl Receiver {
         let undropped: Vec<u64> = self.transfers.iter().filter(|(_, t)| t.target.is_none()).map(|(id, _)| *id).collect();
         for id in undropped {
             debug!("Übertragung {id} verworfen (nicht abgelegt)");
-            self.staging.discard(id);
-            self.transfers.remove(&id);
+            self.discard(id, Phase::Cancelled { by_peer: false });
         }
     }
 
+    fn discard(&mut self, id: u64, phase: Phase) {
+        self.staging.discard(id);
+        self.transfers.remove(&id);
+        self.progress.end(Direction::Receiving, id, phase);
+    }
+
     fn try_finish(&mut self, id: u64) {
-        let Some(transfer) = self.transfers.get(&id) else { return };
+        let Some(transfer) = self.transfers.get_mut(&id) else { return };
+        if let Some(by_peer) = transfer.cancelled_by_peer {
+            info!("Übertragung {id} wurde {}", if by_peer { "vom Sender abgebrochen" } else { "abgebrochen" });
+            return self.discard(id, Phase::Cancelled { by_peer });
+        }
         if !transfer.failed.is_empty() {
-            warn!("Übertragung fehlgeschlagen: {}", transfer.failed.join("; "));
-            self.staging.discard(id);
-            self.transfers.remove(&id);
+            let reason = transfer.failed.join("; ");
+            warn!("Übertragung fehlgeschlagen: {reason}");
+            return self.discard(id, Phase::Failed(reason));
+        }
+        if !transfer.complete() {
             return;
         }
-        if transfer.target.is_none() || !transfer.complete() {
+        if !transfer.arrived {
+            transfer.arrived = true;
+            self.progress.end(Direction::Receiving, id, Phase::Done);
+        }
+        if transfer.target.is_none() {
             return;
         }
         let transfer = self.transfers.remove(&id).expect("eben geprüft");

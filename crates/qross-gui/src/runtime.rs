@@ -8,11 +8,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use qross_core::CaptureEvent;
-use qross_gui::clipboard_files;
 use qross_gui::lifecycle::AppState;
-use qross_gui::{Role, Settings};
+use qross_gui::transfers::{self, LONG_TRANSFER};
+use qross_gui::{clipboard_files, Role, Settings};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::clipfiles::FilesNotice;
+use qross_net::progress::{Progress, Transfers};
 use qross_net::quality::Quality;
 use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, StopHandle};
 use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
@@ -171,12 +172,11 @@ pub struct Runtime {
     dismissed: Mutex<Vec<(String, String)>>,
     /// Seit wann kopierte Dateien von einem Rechner ankommen (für die Systembenachrichtigung)
     receiving_since: Mutex<HashMap<String, Instant>>,
+    /// Dateiübertragungen der laufenden Instanz (zum Abbrechen)
+    transfers: Mutex<Option<Transfers>>,
     /// Was über einen Programmlauf hinaus gilt (laufende Rolle, letzte Update-Prüfung …)
     app_state: Mutex<AppState>,
 }
-
-/// Ab dieser Dauer meldet sich „Dateien sind bereit“ auch als Systembenachrichtigung.
-const SLOW_TRANSFER: Duration = Duration::from_secs(2);
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -193,6 +193,7 @@ impl Runtime {
             generation: AtomicU64::new(0),
             dismissed: Mutex::new(Vec::new()),
             receiving_since: Mutex::new(HashMap::new()),
+            transfers: Mutex::new(None),
             app_state: Mutex::new(AppState::load(&data_dir)),
             data_dir,
         }
@@ -288,6 +289,7 @@ impl Runtime {
     }
 
     async fn shutdown(&self, running: Running) {
+        *self.transfers.lock().unwrap() = None;
         match running {
             Running::Server { task, stop, name } => {
                 let _ = tokio::time::timeout(Duration::from_secs(2), stop.stop()).await;
@@ -365,6 +367,7 @@ impl Runtime {
             .with_clipboard_file_limit(settings.clipboard_file_limit())
             .with_keys(keys);
         let stop = server.stop_handle();
+        *self.transfers.lock().unwrap() = Some(server.transfers());
         let platform = ServerPlatform {
             capture,
             events,
@@ -456,6 +459,7 @@ impl Runtime {
                 s.local_screen = Some(LocalScreen { width: screen.width, height: screen.height, monitors });
             }),
             ServerNotice::Quality { name, quality } => self.emit_quality(Some(name), quality),
+            ServerNotice::Transfer(progress) => self.on_transfer(progress),
         }
     }
 
@@ -589,9 +593,11 @@ impl Runtime {
                 rt.on_client_notice(notice);
             }
         });
+        let transfers = Transfers::new();
+        *self.transfers.lock().unwrap() = Some(transfers.clone());
         let rt = self.clone();
         let task = async_runtime::spawn(async move {
-            let result = client::run_with_notices(config, identity, trust, platform, notice_tx).await;
+            let result = client::run_with_transfers(config, identity, trust, platform, notice_tx, transfers).await;
             rt.finished(generation, result);
         });
         Ok(Running::Client { task })
@@ -618,6 +624,7 @@ impl Runtime {
             ClientNotice::CursorLeft => self.update(|s| s.cursor_here = false),
             ClientNotice::ClipboardFiles(notice) => self.on_files_notice(notice),
             ClientNotice::Quality(quality) => self.emit_quality(None, quality),
+            ClientNotice::Transfer(progress) => self.on_transfer(progress),
         }
     }
 
@@ -627,6 +634,25 @@ impl Runtime {
     /// nicht über den Status, der jedes Mal auch das Tray neu zeichnet).
     fn emit_quality(&self, peer: Option<String>, quality: Quality) {
         let _ = self.app.emit("quality", QualityEvent { peer, label: quality.level.label(), quality });
+    }
+
+    /// Stand einer Dateiübertragung direkt ans Fenster (etwa 4×/s, deshalb nicht über den Status).
+    /// Am Ende einer längeren Übertragung zusätzlich eine Systembenachrichtigung, wenn das Fenster
+    /// im Hintergrund ist.
+    pub fn on_transfer(&self, progress: Progress) {
+        if let Some((title, body)) = transfers::end_notice(&progress) {
+            if !crate::window_in_front(&self.app) {
+                crate::notify(&self.app, &title, &body);
+            }
+        }
+        let _ = self.app.emit("transfer", transfers::view(&progress));
+    }
+
+    /// „Abbrechen“ in der Fortschrittsanzeige. `false`, wenn die Übertragung schon zu Ende ist.
+    pub fn cancel_transfer(&self, id: &str) -> Result<bool> {
+        let (direction, transfer) = transfers::parse_id(id).with_context(|| format!("unbekannte Übertragung {id}"))?;
+        let running = self.transfers.lock().unwrap().clone();
+        Ok(running.is_some_and(|t| t.cancel(direction, transfer)))
     }
 
     /// Kopierte Dateien: Hinweis im Fenster und, wenn es im Hintergrund ist, eine
@@ -641,7 +667,7 @@ impl Runtime {
                     since.insert(peer.clone(), Instant::now());
                     false
                 }
-                FilesNotice::Ready { peer, .. } => since.remove(peer).is_some_and(|t| t.elapsed() >= SLOW_TRANSFER),
+                FilesNotice::Ready { peer, .. } => since.remove(peer).is_some_and(|t| t.elapsed() >= LONG_TRANSFER),
                 FilesNotice::TooLarge { .. } => true,
                 FilesNotice::Failed { peer, .. } => {
                     since.remove(peer);

@@ -1,5 +1,7 @@
 //! Texte zu kopierten Dateien (Strg+C auf Dateien, drüben Strg+V) für Hinweise in der App und
-//! Systembenachrichtigungen. Das Protokoll schreibt `qross_net` selbst.
+//! Systembenachrichtigungen. Das Protokoll schreibt `qross_net` selbst. Während der Übertragung
+//! zeigt die Fortschrittsanzeige (`transfers`) den Stand; „bereit“ und Fehler landen dann in deren
+//! Zeile statt in einem zweiten Hinweis.
 
 use qross_net::clipfiles::FilesNotice;
 use serde::Serialize;
@@ -14,28 +16,57 @@ pub enum Tone {
     Error,
 }
 
+/// Welche Meldung es war
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Event {
+    Sending,
+    Receiving,
+    Ready,
+    TooLarge,
+    Failed,
+}
+
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct FilesMessage {
+    pub event: Event,
+    /// Der andere Rechner (findet die passende Zeile der Fortschrittsanzeige)
+    pub peer: String,
     pub tone: Tone,
     /// Überschrift einer Systembenachrichtigung
     pub title: String,
-    /// Text des Hinweises; `None` = kein Hinweis (beim Senden, das wäre zu laut)
+    /// Text des Hinweises; `None` = kein Hinweis (Senden und Ankommen zeigt die Fortschrittsanzeige)
     pub text: Option<String>,
 }
 
 /// Beschreibt eine Meldung in Worten. `mac` wählt Cmd statt Strg.
 pub fn describe(notice: &FilesNotice, mac: bool) -> FilesMessage {
     let paste = if mac { "Cmd+V" } else { "Strg+V" };
+    let peer = match notice {
+        FilesNotice::Sending { peer, .. }
+        | FilesNotice::TooLarge { peer, .. }
+        | FilesNotice::Receiving { peer, .. }
+        | FilesNotice::Ready { peer, .. }
+        | FilesNotice::Failed { peer, .. } => peer.clone(),
+    };
     match notice {
-        FilesNotice::Sending { .. } => {
-            FilesMessage { tone: Tone::Info, title: "Kopierte Dateien werden gesendet".into(), text: None }
-        }
-        FilesNotice::Receiving { peer, names, bytes } => FilesMessage {
+        FilesNotice::Sending { .. } => FilesMessage {
+            event: Event::Sending,
+            peer,
+            tone: Tone::Info,
+            title: "Kopierte Dateien werden gesendet".into(),
+            text: None,
+        },
+        FilesNotice::Receiving { .. } => FilesMessage {
+            event: Event::Receiving,
+            peer,
             tone: Tone::Info,
             title: "Kopierte Dateien kommen an".into(),
-            text: Some(format!("Dateien von „{peer}“ kommen an: {} ({})", names_text(names), size_text(*bytes))),
+            text: None,
         },
         FilesNotice::Ready { names, .. } => FilesMessage {
+            event: Event::Ready,
+            peer,
             tone: Tone::Success,
             title: "Kopierte Dateien sind bereit".into(),
             text: Some(format!(
@@ -45,14 +76,18 @@ pub fn describe(notice: &FilesNotice, mac: bool) -> FilesMessage {
             )),
         },
         FilesNotice::TooLarge { limit, .. } => FilesMessage {
+            event: Event::TooLarge,
+            peer,
             tone: Tone::Warn,
             title: "Kopierte Dateien zu groß".into(),
             text: Some(format!("Kopierte Dateien sind größer als {} – bitte per Drag & Drop ziehen", size_text(*limit))),
         },
-        FilesNotice::Failed { peer, reason } => FilesMessage {
+        FilesNotice::Failed { reason, .. } => FilesMessage {
+            event: Event::Failed,
             tone: Tone::Error,
             title: "Kopierte Dateien nicht übertragen".into(),
             text: Some(format!("Kopierte Dateien mit „{peer}“ nicht übertragen: {reason}")),
+            peer,
         },
     }
 }
@@ -124,8 +159,10 @@ mod tests {
         let many = FilesNotice::Ready { peer: "pc".into(), names: names(&["a", "b", "c", "d"]), bytes: 1 };
         assert_eq!(describe(&many, false).text.as_deref(), Some("„a“ und 3 weitere sind bereit – mit Strg+V einfügen"));
 
+        assert_eq!((describe(&ready, false).event, describe(&ready, false).peer.as_str()), (Event::Ready, "pc"));
+
         let receiving = FilesNotice::Receiving { peer: "pc".into(), names: names(&["Bericht.pdf"]), bytes: 3_141_592 };
-        assert_eq!(describe(&receiving, false).text.as_deref(), Some("Dateien von „pc“ kommen an: Bericht.pdf (3,1 MB)"));
+        assert_eq!(describe(&receiving, false).text, None, "das zeigt die Fortschrittsanzeige");
 
         let large = FilesNotice::TooLarge { peer: "pc".into(), names: names(&["Film.mkv"]), limit: 1_000_000_000 };
         let message = describe(&large, false);

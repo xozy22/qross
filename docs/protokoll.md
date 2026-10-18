@@ -147,6 +147,26 @@ Zeichen und reservierte Namen werden ersetzt.
 
 Ein älterer Client antwortet nie auf die Nachfrage. Mit gedrückter Taste bleibt der Cursor dann auf ihm.
 
+## Fortschritt und Abbrechen
+
+Für Drag & Drop in beide Richtungen und kopierte Dateien zählen Sender und Empfänger die gesendeten bzw.
+empfangenen Bytes je Übertragung (`transfer`). Etwa viermal pro Sekunde geht an die Oberfläche eine Meldung
+mit Gesamtgröße, Stand, Rate (gemittelt über drei Sekunden) und geschätzter Restzeit, zum Schluss eine mit
+dem Ergebnis: fertig, abgebrochen (hier oder von der Gegenseite) oder fehlgeschlagen.
+
+Abbrechen geht auf beiden Seiten und braucht keine neue Nachricht:
+
+- **Der Sender** setzt den laufenden Datei-Stream zurück (`RESET_STREAM`, Code 0) und öffnet keine
+  weiteren. Der Empfänger bekommt beim Lesen den Reset und verwirft die Übertragung samt Staging.
+- **Der Empfänger** verwirft das Staging und hält den Stream an (`STOP_SENDING`, Code 0), wie schon beim
+  Verwerfen nicht abgelegter oder überholter Übertragungen. Der Sender bekommt beim nächsten Schreiben
+  `Stopped` und hört auf.
+
+Ein `Stopped` gilt beim Sender deshalb immer als Abbruch durch die Gegenseite, auch wenn diese nur
+verworfen hat. Ältere Versionen reagieren auf beides wie auf einen Fehler im Stream: Sie verwerfen die
+Übertragung bzw. hören auf zu senden und bleiben verbunden. Bricht die Verbindung ab, enden alle
+Übertragungen mit diesem Rechner als fehlgeschlagen; was schon im Staging lag, wird gelöscht.
+
 ## Tasten
 
 - Medientasten der HID-Consumer-Page (Wiedergabe/Pause, Weiter, Zurück, Stopp) werden als `0xC000 | Usage`

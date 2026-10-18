@@ -11,6 +11,12 @@ cargo run -p qross-gui
   Bildschirme ergeben die `links`; die Oberfläche schreibt sie zusätzlich als `qross.toml` ins Datenverzeichnis.
   Unbekannte Clients erscheinen mit Fingerprint zur Freigabe (ersetzt `qross trust`).
 - **Client:** Server-Adresse eingeben; beim ersten Kontakt wird der Fingerprint des Servers zur Bestätigung angezeigt.
+- **Dateiübertragungen:** Laufen Dateien per Drag & Drop oder über die Zwischenablage länger als eine halbe
+  Sekunde, erscheint über dem Protokoll je Übertragung eine Zeile mit Namen, Prozent, Rate, Restzeit und
+  „Abbrechen“; das geht auf beiden Seiten. Am Ende steht kurz das Ergebnis da, bei kopierten Dateien der
+  Hinweis zum Einfügen. Läuft eine Übertragung länger als drei Sekunden und ist das Fenster im Hintergrund,
+  meldet sich ihr Ende als Systembenachrichtigung. Ausprobieren ohne zweiten Rechner: Oberfläche als Client
+  mit `127.0.0.1:24990` (Testmodus), dann `cargo run -p qross-net --example scripted_server -- drag <Name> <Datei>`.
 - **Tray:** Farbiger Punkt zeigt den Zustand. Fenster schließen versteckt es nur, beendet wird über das Tray-Menü.
   Zeigt das System kein Tray an (Linux ohne StatusNotifier-Host, z. B. GNOME ohne AppIndicator-Erweiterung),
   beendet Schließen die App, damit sie nicht unerreichbar im Hintergrund weiterläuft.

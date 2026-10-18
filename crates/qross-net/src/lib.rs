@@ -12,6 +12,7 @@ pub mod clipfiles;
 pub mod discovery;
 pub mod files;
 mod identity;
+pub mod progress;
 pub mod quality;
 pub mod server;
 mod streams;
