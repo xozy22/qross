@@ -79,6 +79,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Rechte je Rechner: Zwischenablage, kopierte Dateien, Drag & Drop je Richtung erlauben oder sperren | ✔ | ✔ | ✔ | ✔¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
 | Profile je Ort, automatisch nach Netzwerk (Gateway, ohne Zusatzrechte)⁴ | ✔ mit Netzwerkname | ✔, Name über NetworkManager | ✔ wie X11 | ✔ ohne WLAN-Namen¹ |
+| [Autostart](docs/autostart.md) bei der Anmeldung, unsichtbar im Tray⁵ | ✔ `HKCU\…\Run` | ✔ XDG-Autostart | ✔ XDG-Autostart | ✔ LaunchAgent¹ |
 
 ¹ macOS wird in der CI auf Apple Silicon gebaut und getestet, auch mit der echten Zwischenablage. Erfassung und
 Einspeisung sind auf einem echten Mac noch nicht geprüft. Qross braucht dort die Rechte „Bedienungshilfen“ und
@@ -97,6 +98,10 @@ einer X11-Sitzung. Details, Grenzen und Testanleitung: [Wayland](docs/wayland.md
 WLAN-Namen gibt macOS ab Version 14 nur mit Ortungsdiensten heraus; Qross fragt nicht danach. Unter Windows
 echt geprüft; Linux und macOS lesen Routen und ARP-Cache aus `/proc/net` bzw. `netstat`, dort nur mit Testdaten
 geprüft.
+⁵ Für den angemeldeten Nutzer, ohne Administratorrechte; der Eintrag folgt dem Programm, wenn es verschoben
+wird. Die CI schreibt, prüft und entfernt auf allen drei Systemen einen echten Eintrag, unter Windows auch
+lokal geprüft; den Start bei der Anmeldung selbst prüft kein Test. Ohne Oberfläche: `qross` als
+systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autostart.md).
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
@@ -208,7 +213,15 @@ Signiert mit dem Qross-Zertifikat nennt die Ausgabe `certificate root = H"12208c
 Was sich in jeder Version geändert hat, steht im [Changelog](CHANGELOG.md) und in der App unter „Neuigkeiten“.
 Ab Version 0.4.0 aktualisiert sich die App selbst: Sie prüft beim Start und täglich, lädt Updates im
 Hintergrund, prüft ihre Signatur und installiert sie, wenn gerade niemand Maus und Tastatur braucht
-(abschaltbar unter Einstellungen → Updates). Mit „Mit dem System starten“ läuft Qross nach der Anmeldung im Tray.
+(abschaltbar unter Einstellungen → Updates).
+
+### Mit dem System starten
+
+Beim ersten Start trägt sich Qross in den Autostart ein und läuft danach bei jeder Anmeldung unsichtbar im
+Tray, mit Server oder Client wie zuletzt. Ein- und ausschalten unter Einstellungen → Allgemein → „Mit dem
+System starten“; darunter steht, wo das System den Eintrag zeigt. Unter macOS erst, wenn Qross im Ordner
+„Programme“ liegt, nicht direkt aus dem DMG. Alles Weitere, auch für `qross` ohne Oberfläche:
+[Autostart](docs/autostart.md).
 
 ## Einrichten
 

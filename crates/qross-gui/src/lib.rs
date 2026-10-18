@@ -3,6 +3,7 @@
 //! Der Layout-Editor ordnet Bildschirme in einem Raster an. Liegen zwei Bildschirme direkt
 //! nebeneinander oder übereinander, entsteht daraus ein Link wie in `qross.example.toml`.
 
+pub mod autostart;
 pub mod changelog;
 pub mod clipboard_files;
 pub mod keys;

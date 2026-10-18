@@ -1618,9 +1618,9 @@ function renderSettings() {
   autostart.checked = prefs.autostart;
   autostart.disabled = !prefs.autostart_editable;
   autostart.closest(".setting").classList.toggle("disabled", !prefs.autostart_editable);
-  $("#autostartHint").textContent = prefs.autostart_editable
-    ? "Qross startet bei der Anmeldung unsichtbar im Tray."
-    : "Im Entwicklungsbuild trägt sich Qross nicht in den Autostart ein.";
+  // Grund, falls Qross sich nicht eintragen kann (Entwicklungsbuild, macOS-DMG, …), sonst wo der Eintrag liegt
+  $("#autostartHint").textContent =
+    prefs.autostart_note ?? `Qross startet bei der Anmeldung unsichtbar im Tray. Eintrag unter ${prefs.autostart_place}.`;
   $("#prefResume").checked = state.settings.resume_role;
   $("#prefAutoUpdate").checked = state.settings.auto_update;
   $("#prefGameMode").checked = state.settings.game_mode;

@@ -11,6 +11,7 @@ mod updates;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use qross_gui::autostart::{self, Autostart};
 use qross_gui::changelog::{self, Release};
 use qross_gui::lifecycle;
 use qross_gui::profiles::{NetworkMark, ProfileEdit, Profiles};
@@ -18,7 +19,6 @@ use qross_gui::{Role, Settings, GRID_COLS, GRID_ROWS};
 use qross_platform::{Desktop, Permission, PortalProblem};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WindowEvent};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_opener::OpenerExt;
 use tracing::{info, warn};
 
@@ -29,8 +29,8 @@ use crate::updates::{UpdateStatus, Updates};
 type Rt<'a> = State<'a, Arc<Runtime>>;
 
 /// Mit diesem Argument startet das System Qross bei der Anmeldung (unsichtbar im Tray).
-const AUTOSTART_ARG: &str = "--autostart";
 const PROJECT_URL: &str = "https://github.com/xozy22/qross";
+const DEV_AUTOSTART: &str = "Im Entwicklungsbuild trägt sich Qross nicht in den Autostart ein.";
 
 /// Rechnername in Kleinbuchstaben (Windows liefert ihn in Großbuchstaben).
 pub fn hostname() -> String {
@@ -130,17 +130,30 @@ fn get_state(rt: Rt<'_>, logs: State<'_, Arc<LogBuffer>>) -> Result<Snapshot, St
 struct Prefs {
     /// Echter Zustand des Autostarts im System
     autostart: bool,
-    /// Nur Release-Builds tragen sich in den Autostart ein
+    /// Nur Release-Builds tragen sich in den Autostart ein, und nur von einem festen Ort aus
+    /// (ausschalten geht immer)
     autostart_editable: bool,
+    /// Warum sich Qross nicht eintragen kann (Entwicklungsbuild, macOS-DMG, …)
+    autostart_note: Option<String>,
+    /// Wo man den Eintrag im System findet
+    autostart_place: &'static str,
     update: UpdateStatus,
     data_dir: String,
 }
 
 #[tauri::command]
-fn get_prefs(app: AppHandle, rt: Rt<'_>) -> Prefs {
+fn get_prefs(app: AppHandle, rt: Rt<'_>, autostart: State<'_, Autostart>) -> Prefs {
+    let enabled = autostart.is_enabled();
+    let note = if cfg!(debug_assertions) {
+        Some(DEV_AUTOSTART.to_owned())
+    } else {
+        autostart.unsuitable().map(str::to_owned)
+    };
     Prefs {
-        autostart: app.autolaunch().is_enabled().unwrap_or(false),
-        autostart_editable: !cfg!(debug_assertions),
+        autostart: enabled,
+        autostart_editable: !cfg!(debug_assertions) && (note.is_none() || enabled),
+        autostart_note: note,
+        autostart_place: autostart.place(),
         update: app.state::<Arc<Updates>>().status(),
         data_dir: rt.data_dir.display().to_string(),
     }
@@ -148,15 +161,14 @@ fn get_prefs(app: AppHandle, rt: Rt<'_>) -> Prefs {
 
 /// „Mit dem System starten“; liefert den Zustand danach.
 #[tauri::command]
-fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
+fn set_autostart(rt: Rt<'_>, autostart: State<'_, Autostart>, enabled: bool) -> Result<bool, String> {
     if cfg!(debug_assertions) {
-        return Err("Im Entwicklungsbuild trägt sich Qross nicht in den Autostart ein.".into());
+        return Err(DEV_AUTOSTART.into());
     }
-    let autolaunch = app.autolaunch();
-    let result = if enabled { autolaunch.enable() } else { autolaunch.disable() };
-    result.map_err(|e| format!("Autostart nicht geändert: {e}"))?;
-    info!("Autostart {}", if enabled { "eingeschaltet" } else { "ausgeschaltet" });
-    autolaunch.is_enabled().map_err(|e| e.to_string())
+    autostart.set(enabled).map_err(|e| format!("Autostart nicht geändert: {e:#}"))?;
+    // Ab jetzt entscheidet der Nutzer; der erste Start schaltet nichts mehr ein
+    rt.update_app_state(|s| s.autostart_configured = true);
+    Ok(autostart.is_enabled())
 }
 
 /// „Jetzt nach Updates suchen“; das Ergebnis kommt als Ereignis `update-status`.
@@ -446,23 +458,23 @@ fn local_ip() -> Option<String> {
     (!ip.is_unspecified() && !ip.is_loopback()).then(|| ip.to_string())
 }
 
-/// Beim allerersten Start (nur Release-Builds) Autostart einschalten; danach entscheidet der Nutzer.
-fn configure_autostart(app: &AppHandle, rt: &Runtime) {
-    if cfg!(debug_assertions) || rt.app_state().autostart_configured {
+/// Nur Release-Builds: Beim ersten Start von einem festen Ort den Autostart einschalten, danach
+/// entscheidet der Nutzer. Ein vorhandener Eintrag folgt dem Programm, wenn es verschoben wurde.
+fn configure_autostart(autostart: &Autostart, rt: &Runtime) {
+    if cfg!(debug_assertions) {
         return;
     }
-    match app.autolaunch().enable() {
-        Ok(()) => info!("Autostart eingerichtet: Qross startet bei der Anmeldung"),
-        Err(e) => warn!("Autostart nicht eingerichtet: {e}"),
+    let configured = rt.app_state().autostart_configured;
+    if autostart.sync(configured) && !configured {
+        rt.update_app_state(|s| s.autostart_configured = true);
     }
-    rt.update_app_state(|s| s.autostart_configured = true);
 }
 
 /// Das Fenster startet unsichtbar (tauri.conf.json). Normal zeigen; beim Autostart im Tray
 /// bleiben, ohne Tray minimiert zeigen.
 fn show_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else { return };
-    let autostarted = std::env::args().any(|arg| arg == AUTOSTART_ARG);
+    let autostarted = std::env::args().any(|arg| arg == autostart::ARG);
     if !autostarted {
         let _ = window.show();
     } else if tray::available() {
@@ -561,7 +573,6 @@ fn main() {
     }
     builder
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(logs.clone())
@@ -600,7 +611,14 @@ fn main() {
             app.manage(rt.clone());
             app.manage(Arc::new(Updates::new(&rt.app_state())));
             tray::init(app.handle());
-            configure_autostart(app.handle(), &rt);
+            // Unter Linux zeigt der Eintrag auf die AppImage, nicht auf ihren flüchtigen Einhängepunkt
+            #[cfg(target_os = "linux")]
+            let appimage = app.env().appimage;
+            #[cfg(not(target_os = "linux"))]
+            let appimage: Option<std::ffi::OsString> = None;
+            let autostart = Autostart::new(appimage.as_deref().map(std::path::Path::new));
+            configure_autostart(&autostart, &rt);
+            app.manage(autostart);
             show_window(app.handle());
             let handle = app.handle().clone();
             let watch = rt.clone();

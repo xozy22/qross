@@ -15,9 +15,21 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 - **Einstellungen mit Bereichen:** Allgemein, Profile, Tastatur, Spielemodus, Updates, Zwischenablage und Info
   sind jetzt je eine eigene Seite statt einer langen Liste zum Scrollen. Bei schmalem Fenster stehen die Bereiche
   als Zeile oben; Pfeiltasten wechseln zwischen ihnen, und beim nächsten Öffnen kommt der zuletzt gewählte.
+- **Autostart auf allen Systemen überarbeitet:** Qross verwaltet den Eintrag jetzt selbst, an denselben Orten
+  wie bisher (Windows: Autostart-Liste, macOS: Anmeldeobjekte, Linux: `~/.config/autostart`). Verschiebst du
+  Qross oder die AppImage, folgt der Eintrag beim nächsten Start. Unter Windows steht der Pfad in
+  Anführungszeichen (Pfade mit Leerzeichen), unter macOS zeigen die Anmeldeobjekte „Qross“. Im System
+  abgeschaltet (Task-Manager, GNOME Tweaks) zeigt Qross ihn als aus. Unter dem Schalter steht, wo der Eintrag
+  zu finden ist. Alles dazu, auch für `qross` ohne Oberfläche als Dienst, steht in `docs/autostart.md`.
 - **Rückfrage beim Wechsel der Rolle:** Läuft der Server und du wechselst zum Client – über den Schalter, ein
   Profil oder das Tray-Menü –, fragt Qross erst nach, denn der Server schaltet sich dabei aus und verbundene
   Rechner verlieren Maus und Tastatur. Ebenso, wenn ein verbundener Client zum Server werden soll.
+
+### Behoben
+
+- **macOS: Autostart aus dem DMG:** Startete Qross das erste Mal direkt aus dem DMG oder aus der
+  Quarantäne-Kopie, zeigte der Autostart danach ins Leere. Jetzt trägt es sich erst ein, wenn es im Ordner
+  „Programme“ läuft, und sagt in den Einstellungen, warum.
 
 ## [0.7.0] - 2026-10-18
 
