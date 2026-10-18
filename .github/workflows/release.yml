@@ -325,6 +325,8 @@ jobs:
       # Gatekeeper wie nach einem Download aus dem Browser (Quarantäne-Attribut). Zum Vergleich die
       # bisherige Ad-hoc-Signatur (0.3.1 bis 0.5.0) und ein absichtlich beschädigtes Paket.
       - name: Gatekeeper-Vergleich
+        continue-on-error: true
+        timeout-minutes: 5
         run: |
           # Nur Diagnose: Ablehnungen sind hier das erwartete Ergebnis, nicht ein Fehler des Schritts.
           set +e
@@ -341,14 +343,20 @@ jobs:
             echo "==================== ${variant}"
             codesign --verify --deep --strict "$app" 2>&1 && echo "codesign: gültig"
             spctl --assess --type execute -vvv "$app" 2>&1
-            syspolicy_check distribution "$app" 2>&1 | head -n 20
-            # Echter erster Start: Gatekeeper entscheidet und zeigt seinen Dialog.
-            open "$app" 2>&1
-            sleep 6
-            log show --last 8s --style compact \
+            # Nur Befunde und ihre Fehlertexte, ohne Vorschläge zur Abhilfe
+            syspolicy_check distribution "$app" 2>&1 | grep -E "^[A-Z]|Full Error" | head -n 20
+            # Echter erster Start: Gatekeeper entscheidet und zeigt seinen Dialog. Bis jemand ihn
+            # beantwortet, hält macOS den Prozess an und `open` wartet – deshalb im Hintergrund.
+            open "$app" > /dev/null 2>&1 &
+            opener=$!
+            sleep 8
+            log show --last 10s --style compact \
               --predicate 'process == "syspolicyd" OR process == "CoreServicesUIAgent"' 2> /dev/null \
               | grep -i -E 'qross|prompt|malware|damaged|broken|verif|reject|allow|scan' | tail -n 25
-            killall CoreServicesUIAgent qross-gui 2> /dev/null
+            kill "$opener" 2> /dev/null
+            pkill -f "gatekeeper/${variant}/Qross.app" 2> /dev/null
+            killall CoreServicesUIAgent 2> /dev/null
+            sleep 2
           done
           exit 0
 
