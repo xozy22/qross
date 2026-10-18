@@ -255,6 +255,8 @@ jobs:
     name: macOS-Paket auf frischem Mac prüfen
     needs: build
     runs-on: macos-26
+    # Normal unter 3 Minuten; ein Hänger (etwa ein offener Dialog) darf das Release nicht blockieren.
+    timeout-minutes: 15
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -264,6 +266,7 @@ jobs:
           path: release
 
       - name: Signatur und designierte Anforderung
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           codesign --display release/*.dmg 2>&1 || true
@@ -279,6 +282,7 @@ jobs:
       # Wie macOS nach einem Update: Erfüllt die neue Version die designierte Anforderung der zuletzt
       # veröffentlichten? Nur dann gelten erteilte Rechte weiter (Apple TN3127).
       - name: Rechte bleiben nach dem Update erhalten
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           gh release download --repo "${{ github.repository }}" --pattern '*.dmg' --dir previous
@@ -304,6 +308,7 @@ jobs:
       # Startet die App kurz: Signatur und Hardened Runtime ohne Team-ID werden von macOS angenommen,
       # und die Rechteprüfung läuft auf echtem macOS.
       - name: Startprobe
+        timeout-minutes: 3
         run: |
           # Der Runner startet Skripte mit bash -e; `wait` auf den beendeten Prozess liefert 143.
           set +e
@@ -314,8 +319,12 @@ jobs:
           if kill -0 "$pid" 2> /dev/null; then
             alive=yes
             kill "$pid"
+            sleep 3
+            # Reagiert die App nicht auf TERM, hart beenden, damit `wait` nicht hängt.
+            kill -0 "$pid" 2> /dev/null && kill -9 "$pid"
           fi
           wait "$pid" 2> /dev/null
+          pkill -9 -f "check/Qross.app/Contents/MacOS/qross-gui" 2> /dev/null
           cat start.log
           if [ "$alive" != yes ]; then
             echo "::error::Qross hat sich beim Start beendet"
@@ -354,7 +363,7 @@ jobs:
               --predicate 'process == "syspolicyd" OR process == "CoreServicesUIAgent"' 2> /dev/null \
               | grep -i -E 'qross|prompt|malware|damaged|broken|verif|reject|allow|scan' | tail -n 25
             kill "$opener" 2> /dev/null
-            pkill -f "gatekeeper/${variant}/Qross.app" 2> /dev/null
+            pkill -9 -f "gatekeeper/${variant}/Qross.app" 2> /dev/null
             killall CoreServicesUIAgent 2> /dev/null
             sleep 2
           done
