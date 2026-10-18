@@ -13,6 +13,7 @@ pub mod discovery;
 pub mod files;
 pub mod game;
 mod identity;
+pub mod progress;
 pub mod quality;
 pub mod server;
 mod streams;

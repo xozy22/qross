@@ -381,7 +381,7 @@ async fn simulate_clipboard_files(rt: Rt<'_>, kind: String) -> Result<(), String
     match kind.as_str() {
         "ready" | "slow" => {
             rt.on_files_notice(FilesNotice::Receiving { peer: peer.clone(), names: names.clone(), bytes: 3_141_592 });
-            let wait = if kind == "slow" { 2500 } else { 300 };
+            let wait = if kind == "slow" { 3500 } else { 300 };
             tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
             rt.on_files_notice(FilesNotice::Ready { peer, names, bytes: 3_141_592 });
         }
@@ -390,6 +390,13 @@ async fn simulate_clipboard_files(rt: Rt<'_>, kind: String) -> Result<(), String
         other => return Err(format!("unbekannt: {other}")),
     }
     Ok(())
+}
+
+/// „Abbrechen“ einer laufenden Dateiübertragung (`id` aus dem Ereignis `transfer`). `false`, wenn
+/// sie inzwischen zu Ende ist.
+#[tauri::command]
+fn cancel_transfer(rt: Rt<'_>, id: String) -> Result<bool, String> {
+    rt.cancel_transfer(&id).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -510,6 +517,7 @@ fn main() {
             key_names,
             trust_server,
             simulate_clipboard_files,
+            cancel_transfer,
             get_prefs,
             set_autostart,
             check_updates,

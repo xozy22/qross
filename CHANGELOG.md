@@ -8,13 +8,31 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
-## [Unreleased]
+## [0.6.0] - 2026-10-18
 
 ### Neu
 
+- **Spielemodus:** Läuft auf dem Rechner mit dem Cursor ein Spiel, ein Video oder eine Präsentation im Vollbild,
+  bleibt der Cursor dort, bis es endet. Die Fang-Taste gibt ihn sofort frei. Die Oberfläche zeigt an, warum der
+  Cursor festgehalten wird. Abschaltbar in den Einstellungen bzw. mit `[game] enabled = false`.
+- Spiele auf einem Client bekommen relative Mausbewegungen wie von einer echten Maus, auch Spiele, die den
+  Zeiger einfangen. Die Kamera dreht so auch am Bildschirmrand weiter.
+- **Tastenkürzel zum Wechseln:** frei belegbare Kürzel springen direkt zu einem Rechner (der Cursor landet in
+  dessen Mitte) oder zum Nachbarn in einer Richtung, z. B. Strg+Alt+1 oder Strg+Alt+Pfeil links. Einstellbar
+  unter Einstellungen → Tastatur bzw. `[keys.switch]` in `qross.toml`.
+- **Fortschritt bei Dateiübertragungen:** Drag & Drop und kopierte Dateien zeigen Prozent, Rate und Restzeit und
+  lassen sich auf beiden Seiten abbrechen, ohne Reste zu hinterlassen.
+- **Linux mit Wayland** (GNOME ab 45, KDE Plasma ab 6.1): Maus und Tastatur laufen über die Desktop-Portale.
+  Beim ersten Start fragt das System einmal nach der Freigabe; wo der Desktop es kann, merkt sich Qross sie.
+  Als Server erfasst Qross über InputCapture (auch Hyprland ab 0.56). Ohne passendes Portal speist der Client
+  über XWayland ein. Die Oberfläche erklärt, wenn das Portal fehlt oder die Freigabe abgelehnt wurde.
 - **macOS: Hinweis bei fehlenden Rechten:** Fehlen Qross „Bedienungshilfen“ oder „Eingabeüberwachung“, zeigt
   es das oben im Fenster an, mit einem Knopf, der Qross in die Liste der Systemeinstellungen einträgt und die
   passende Seite öffnet. Bisher kamen Maus und Tastatur dann einfach nicht an.
+
+### Verbessert
+
+- Nach dem Notausgang zeigt die Oberfläche die Fang-Taste wieder als gelöst an.
 
 ### Behoben
 
@@ -27,6 +45,10 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 - Mac-Nutzer müssen die Rechte nach diesem Update ein letztes Mal neu erteilen: Qross unter Systemeinstellungen
   → Datenschutz & Sicherheit → Bedienungshilfen (und, als Server, Eingabeüberwachung) mit „−“ entfernen und
   über den Hinweis in Qross neu eintragen. Ab dann bleiben sie über Updates erhalten.
+- Rechner mit Qross 0.5 bleiben verbunden. Mit ihnen gilt der Spielemodus nur für ein Vollbild auf dem Server
+  selbst.
+- Unter Wayland wirkt die Fang-Taste nur, solange der Cursor auf einem Client ist, Drag & Drop geht dort noch
+  nicht, und unter GNOME läuft die Zwischenablage über XWayland.
 
 ## [0.5.0] - 2026-10-18
 
@@ -181,6 +203,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.6.0]: https://github.com/xozy22/qross/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/xozy22/qross/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/xozy22/qross/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/xozy22/qross/compare/v0.3.0...v0.3.1

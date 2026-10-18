@@ -73,6 +73,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Mehrere Monitore je Rechner: Skizze im Layout, Cursor nur auf Monitorflächen | ✔ | ✔ | ✔ in logischen Pixeln | ✔¹ |
 | Verbindungsqualität: Latenz, Jitter, Verlust, Durchsatz | ✔ | ✔ | ✔ | ✔¹ |
 | Spielemodus: bei Vollbild festhalten, relative Mausbewegung für Spiele | ✔ Vollbild, eingefangener Zeiger | ✔ Vollbild | – | ✔ Vollbild¹ |
+| Dateiübertragungen: Fortschritt, Rate und Restzeit, Abbrechen auf beiden Seiten | ✔ | ✔ | ✔ | ✔¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
 
 ¹ macOS wird in der CI auf Apple Silicon gebaut und getestet, auch mit der echten Zwischenablage. Erfassung und
@@ -91,8 +92,9 @@ einer X11-Sitzung. Details, Grenzen und Testanleitung: [Wayland](docs/wayland.md
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
   (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, kopierte
-  Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, mehrere Monitore je Client, Messwerte der
-  Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5, Ablehnung unbekannter Clients, LAN-Suche).
+  Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, Fortschritt und Abbrechen von Sender und
+  Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5,
+  Wechsel per Tastenkürzel, Ablehnung unbekannter Clients, LAN-Suche).
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
   die der Explorer anschließend selbst einfügt.
 - Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
@@ -268,6 +270,10 @@ docker run --rm -v "%CD%:/src" -v qross-cargo:/usr/local/cargo/registry -v qross
 Diagnose für Drag & Drop: `cargo run -p qross-platform --example folder_at -- <x> <y>` zeigt den Ablageordner
 an einer Bildschirmposition. `cargo run -p qross-platform --example clipboard_check` prüft die echte
 Zwischenablage dieses Rechners mit allen Formaten und stellt den vorherigen Inhalt danach wieder her.
+`cargo run -p qross-net --example scripted_server -- drag <Client-Name> <Datei>` spielt einen Server mit
+simulierter Maus, der einer Oberfläche im Client-Modus eine Datei hinüberzieht (oder mit `copy` kopiert, mit
+`receive` ihre kopierten Dateien abholt). So lassen sich Fortschritt und Abbrechen ohne zweiten Rechner
+ansehen.
 
 ### Releases und Signaturen
 

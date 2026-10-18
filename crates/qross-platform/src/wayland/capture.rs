@@ -595,9 +595,10 @@ impl State {
             return Some(Release { id, x, y });
         }
         let key = u16::try_from(code).ok().and_then(hid_from_evdev)?;
-        match self.hotkey.on_key(key, down, keys.lock.as_ref()) {
-            HotkeyEvent::Triggered => self.send(CaptureEvent::ToggleLock),
-            HotkeyEvent::Consumed => {}
+        // Fang-Taste und Wechsel-Kürzel; das gemeldete Ereignis wertet der Server-Kern aus.
+        match self.hotkey.on_key(key, down, keys) {
+            HotkeyEvent::Triggered { event, .. } => self.send(event),
+            HotkeyEvent::Consumed { .. } => {}
             HotkeyEvent::None => self.send(CaptureEvent::Key { key, down }),
         }
         None
