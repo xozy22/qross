@@ -40,12 +40,16 @@ jobs:
       - name: Abschnitt aus CHANGELOG.md
         run: |
           bash tools/release-notes.sh "${TAG#v}" > release-notes.md
+          NOTES_ONLY=1 bash tools/release-notes.sh "${TAG#v}" > changelog-section.md
           cat release-notes.md
 
       - uses: actions/upload-artifact@v7
         with:
           name: release-notes
-          path: release-notes.md
+          path: |
+            release-notes.md
+            changelog-section.md
+            tools/latest_json.py
           if-no-files-found: error
 
   build:
@@ -106,8 +110,12 @@ jobs:
       - name: Kommandozeile bauen
         run: cargo build --release --locked -p qross --target ${{ matrix.target }}
 
+      # Mit dem Schlüssel entstehen zusätzlich die signierten Update-Pakete (*.sig) für den Updater der App.
       - name: App bauen (Tauri)
         working-directory: crates/qross-gui
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx --yes @tauri-apps/cli@2 build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       # Ohne gültige Signatur des ganzen App-Pakets meldet macOS nach dem Download „beschädigt“
@@ -120,7 +128,8 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "${bundle}/macos/Qross.app"
           codesign --display --verbose=2 "${bundle}/macos/Qross.app" 2>&1 | grep -E "^(Identifier|Format|Signature|Sealed Resources)"
           mount="$(mktemp -d)"
-          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "${bundle}"/dmg/*.dmg > /dev/null
+          # Das DMG zeigt beim Öffnen die Lizenz; ohne Zustimmung bricht hdiutil das Einhängen ab.
+          (yes || true) | hdiutil attach -nobrowse -readonly -mountpoint "$mount" "${bundle}"/dmg/*.dmg > /dev/null
           codesign --verify --deep --strict --verbose=2 "${mount}/Qross.app"
           spctl --assess --type execute --verbose=2 "${mount}/Qross.app" || true
           hdiutil detach "$mount" > /dev/null
@@ -142,7 +151,14 @@ jobs:
             tar -czf "release/${name}.tar.gz" -C pkg "${name}"
           fi
           find "${bin}/bundle" -type f \( -name '*.msi' -o -name '*-setup.exe' -o -name '*.AppImage' \
-            -o -name '*.deb' -o -name '*.dmg' \) -exec cp {} release/ \;
+            -o -name '*.deb' -o -name '*.dmg' -o -name '*.msi.sig' -o -name '*-setup.exe.sig' \
+            -o -name '*.AppImage.sig' -o -name '*.deb.sig' \) -exec cp {} release/ \;
+          # Update-Paket für macOS: das App-Bundle als tar.gz, mit Version im Namen
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            for ext in app.tar.gz app.tar.gz.sig; do
+              cp "${bin}/bundle/macos/Qross.${ext}" "release/Qross_${version}_aarch64.${ext}"
+            done
+          fi
           ls -la release
 
       - uses: actions/upload-artifact@v7
@@ -165,6 +181,24 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: release-notes
+
+      # Der Updater der App liest releases/latest/download/latest.json. Die Signaturen stecken
+      # darin, die .sig-Dateien selbst braucht danach niemand mehr.
+      - name: Update-Manifest (latest.json)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if compgen -G "release/*.sig" > /dev/null; then
+            python3 tools/latest_json.py --version "${TAG#v}" --repo "${{ github.repository }}" \
+              --dir release --notes-file changelog-section.md > release/latest.json
+            cat release/latest.json
+            rm release/*.sig
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "::error::Keine signierten Update-Pakete – sind die Secrets TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) gesetzt?"
+            exit 1
+          else
+            echo "Ohne signierte Update-Pakete (älterer Tag) – kein latest.json"
+          fi
 
       - name: Prüfsummen
         run: |

@@ -27,6 +27,12 @@ if [ -z "$section" ]; then
   exit 1
 fi
 
+# Nur der Abschnitt, ohne Download-Hinweise (für das Update-Manifest latest.json)
+if [ "${NOTES_ONLY:-}" = 1 ]; then
+  printf '%s\n' "$section"
+  exit 0
+fi
+
 printf '%s\n\n' "$section"
 cat <<'EOF'
 ### Downloads
