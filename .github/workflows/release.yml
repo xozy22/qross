@@ -153,8 +153,8 @@ jobs:
           find "${bin}/bundle" -type f \( -name '*.msi' -o -name '*-setup.exe' -o -name '*.AppImage' \
             -o -name '*.deb' -o -name '*.dmg' -o -name '*.msi.sig' -o -name '*-setup.exe.sig' \
             -o -name '*.AppImage.sig' -o -name '*.deb.sig' \) -exec cp {} release/ \;
-          # Update-Paket für macOS: das App-Bundle als tar.gz, mit Version im Namen
-          if [ "$RUNNER_OS" = "macOS" ]; then
+          # Update-Paket für macOS: das App-Bundle als tar.gz, mit Version im Namen (erst ab 0.4.0)
+          if [ -f "${bin}/bundle/macos/Qross.app.tar.gz" ]; then
             for ext in app.tar.gz app.tar.gz.sig; do
               cp "${bin}/bundle/macos/Qross.${ext}" "release/Qross_${version}_aarch64.${ext}"
             done
