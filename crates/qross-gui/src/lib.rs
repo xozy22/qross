@@ -49,6 +49,9 @@ pub struct Settings {
     /// Kopierte Dateien beim Wechsel bis zu dieser Gesamtgröße in MB mitgeben (0 = aus).
     /// Gilt als Server wie als Client.
     pub clipboard_files_mb: u64,
+    /// Inhalte, die ein Passwortmanager als vertraulich markiert, trotzdem teilen (Standard: nein).
+    /// Gilt als Server wie als Client.
+    pub clipboard_share_concealed: bool,
     /// Lief beim Beenden ein Server oder Client, startet er beim nächsten Start wieder.
     pub resume_role: bool,
     /// Updates im Hintergrund laden und in einem ruhigen Moment installieren
@@ -128,6 +131,7 @@ impl Settings {
             },
             client: ClientSettings { address: String::new(), name: hostname.to_owned(), dry_run: false },
             clipboard_files_mb: qross_net::clipfiles::DEFAULT_LIMIT / 1_000_000,
+            clipboard_share_concealed: false,
             resume_role: true,
             auto_update: true,
             game_mode: true,
@@ -141,7 +145,8 @@ impl Settings {
 
     /// Inhalt einer `qross.toml` für `qross server --config`.
     pub fn server_toml(&self) -> String {
-        self.server.to_toml(self.clipboard_files_mb) + &format!("\n[game]\nenabled = {}\n", self.game_mode)
+        self.server.to_toml(self.clipboard_files_mb, self.clipboard_share_concealed)
+            + &format!("\n[game]\nenabled = {}\n", self.game_mode)
     }
 
     /// Lädt `gui.json` aus `dir`; `None`, wenn es die Datei noch nicht gibt.
@@ -282,13 +287,13 @@ impl ServerSettings {
     }
 
     /// Inhalt einer `qross.toml` für `qross server --config` (siehe auch [`Settings::server_toml`]).
-    pub fn to_toml(&self, clipboard_files_mb: u64) -> String {
+    pub fn to_toml(&self, clipboard_files_mb: u64, share_concealed: bool) -> String {
         let mut out = String::from("# Erzeugt von der Qross-Oberfläche\n");
         out += &format!("name = {}\n", quote(&self.name));
         out += &format!("listen = \"{}\"\n", self.listen());
         out += &format!("discovery = {}\n", self.discovery);
         out += &format!("\n[switching]\ncorner_size = {}\ndelay_ms = {}\n", self.corner_size, self.switch_delay_ms);
-        out += &format!("\n[clipboard]\nmax_file_mb = {clipboard_files_mb}\n");
+        out += &format!("\n[clipboard]\nmax_file_mb = {clipboard_files_mb}\nshare_concealed = {share_concealed}\n");
         out += &self.effective_keys().to_toml();
         for link in self.links() {
             out += &format!(
@@ -380,7 +385,7 @@ mod tests {
             s.effective_keys().config().unwrap().options.switch.iter().map(|(_, t)| t.to_string()).collect();
         assert_eq!(targets, ["right", "laptop"], "Rechner, die nicht mehr im Layout stehen, fallen weg");
 
-        let file: toml::Table = toml::from_str(&s.to_toml(0)).unwrap();
+        let file: toml::Table = toml::from_str(&s.to_toml(0, false)).unwrap();
         let entries: std::collections::HashMap<String, String> =
             file["keys"]["switch"].clone().try_into().expect("[keys.switch] als Tabelle");
         let parsed = qross_core::keys::parse_switch_keys(&entries).unwrap();
@@ -418,6 +423,7 @@ mod tests {
         #[serde(deny_unknown_fields)]
         struct ClipboardSection {
             max_file_mb: u64,
+            share_concealed: bool,
         }
         let mut s = server(&[("pc", 3, 2), ("lap\"top", 4, 2)]);
         s.corner_size = 12;
@@ -429,12 +435,13 @@ mod tests {
             "lap\"top".into(),
             vec![crate::keys::KeyRule { from: "AltLeft".into(), to: "MetaLeft".into() }],
         );
-        let file: ServerFile = toml::from_str(&s.to_toml(250)).unwrap();
+        let file: ServerFile = toml::from_str(&s.to_toml(250, true)).unwrap();
         assert_eq!(file.keys.lock, "Ctrl+Alt+KeyL");
         assert_eq!(file.keys.media, qross_core::keys::MediaKeys::Local);
         let remap = qross_core::keys::parse_key_map(&file.keys.remap["lap\"top"]).unwrap();
         assert_eq!(remap.len(), 1, "die CLI liest die Umbelegung");
         assert_eq!(file.clipboard.max_file_mb, 250);
+        assert!(file.clipboard.share_concealed);
         assert_eq!(file.name, "pc");
         assert!(!file.discovery);
         assert_eq!((file.switching.corner_size, file.switching.delay_ms), (12, 150));
@@ -494,6 +501,8 @@ mod tests {
         assert!(old.server.discovery);
         // … und die Standardgrenze für kopierte Dateien (1 GB)
         assert_eq!(old.clipboard_files_mb, 1000);
+        // … und vertrauliche Inhalte bleiben auf dem Rechner
+        assert!(!old.clipboard_share_concealed);
         // … und Fortsetzen, automatische Updates und der Spielemodus sind an
         assert!(old.resume_role && old.auto_update && old.game_mode);
         // … und die Tasten-Standards des Servers (Rollen, Medientasten an den aktiven Rechner)

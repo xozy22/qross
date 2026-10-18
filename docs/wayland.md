@@ -145,6 +145,11 @@ Die Sitzung ersetzt das gleich danach. Server und Client fragen ohnehin alle 2 s
   Nach allgemeiner Erfahrung gleicht mutter beide Zwischenablagen ab (xclip funktioniert unter GNOME)
   [V]. Ohne XWayland gibt es unter GNOME keine Zwischenablage.
 
+Passwörter: KeePassXC markiert sie mit dem MIME-Typ `x-kde-passwordManagerHint` und dem Inhalt
+`secret` [B]. `arboard` liest den nicht; Qross fragt ihn auf demselben Weg selbst ab
+(`clipboard_hint.rs`): über data-control mit `wl-clipboard-rs`, sonst über die Ziele (`TARGETS`) der
+X11-Zwischenablage. Dass mutter den MIME-Typ beim Abgleich an XWayland weitergibt, ist vermutet [V].
+
 Die saubere Lösung für GNOME wäre das Clipboard-Portal. Das gibt es nur zusammen mit einer
 RemoteDesktop- bzw. InputCapture-Sitzung (GNOME ab 45 bzw. 51, KDE ab 6.4 bzw. 6.7). Deskflow nutzt es
 seit 1.27. Für Qross ist das ein eigener nächster Schritt.
@@ -257,7 +262,8 @@ Protokoll ausführlich.
    - Monitor an- oder abstecken: Im Protokoll steht „Monitore geändert“, bzw. die Sitzung wird neu
      aufgebaut. Danach wechselt der Cursor weiter.
 4. **Zwischenablage:** Text, Bild (Screenshot) und eine Datei aus dem Dateimanager in beide
-   Richtungen kopieren. Unter GNOME braucht das XWayland.
+   Richtungen kopieren. Unter GNOME braucht das XWayland. Ein Passwort aus KeePassXC kommt nicht an,
+   im Protokoll steht „vertraulicher Inhalt … wird nicht geteilt“.
 5. **Ohne Portal** (z. B. Sway): Der Client speist mit Warnung über XWayland ein. Der Server meldet
    „Eingaben erfassen (Server) unter Wayland geht nicht …“, die GUI zeigt den Hinweis.
 6. **Erzwingen:** Mit `QROSS_BACKEND=x11` läuft unter XWayland der alte Weg. Das ist nur zum

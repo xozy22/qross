@@ -1,5 +1,6 @@
 //! Zwischenablage für Linux und macOS über `arboard`: Text, HTML, Bilder und kopierte Dateien
-//! (Finder bzw. Dateimanager: `public.file-url` bzw. `text/uri-list`).
+//! (Finder bzw. Dateimanager: `public.file-url` bzw. `text/uri-list`). Die Markierungen der
+//! Passwortmanager liest Qross selbst (`mac::pasteboard` bzw. `clipboard_hint`).
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -15,6 +16,8 @@ use crate::Clipboard;
 pub struct ArboardClipboard {
     /// Lebt so lange wie das Programm – unter X11 hält diese Instanz den Clipboard-Inhalt.
     inner: Option<arboard::Clipboard>,
+    #[cfg(target_os = "linux")]
+    hint: crate::clipboard_hint::Hint,
 }
 
 impl ArboardClipboard {
@@ -93,6 +96,13 @@ impl Clipboard for ArboardClipboard {
 
     fn files(&mut self) -> Vec<PathBuf> {
         self.inner().and_then(|cb| cb.get().file_list().ok()).unwrap_or_default()
+    }
+
+    fn concealed(&mut self) -> Option<&'static str> {
+        #[cfg(target_os = "macos")]
+        return crate::mac::concealed();
+        #[cfg(target_os = "linux")]
+        return self.hint.concealed();
     }
 
     /// `arboard` setzt nur eine Art von Inhalt: Die Dateien gewinnen, `data` entfällt.

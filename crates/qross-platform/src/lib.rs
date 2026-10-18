@@ -3,6 +3,7 @@
 //! liefern einen klaren Fehler.
 
 pub mod clipformat;
+pub mod concealed;
 pub mod dryrun;
 pub mod keymap_linux;
 pub mod keymap_mac;
@@ -30,6 +31,8 @@ use mac as imp;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod arboard_clipboard;
+#[cfg(target_os = "linux")]
+mod clipboard_hint;
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod unsupported;
@@ -87,6 +90,13 @@ pub trait Clipboard: Send {
     fn write(&mut self, data: &ClipboardData) -> anyhow::Result<()>;
     /// Ändert sich bei jeder Änderung des Clipboards (auch durch andere Programme).
     fn sequence(&mut self) -> u64;
+
+    /// Markierung, mit der ein Passwortmanager den aktuellen Inhalt als vertraulich gekennzeichnet
+    /// hat (siehe [`concealed`]); `None`, wenn keine vorliegt. Liest nur die Markierungen, nie den
+    /// Inhalt selbst.
+    fn concealed(&mut self) -> Option<&'static str> {
+        None
+    }
 
     /// Kopierte Dateien und Ordner (Explorer, Finder, Dateimanager) als absolute Pfade; leer, wenn keine.
     fn files(&mut self) -> Vec<PathBuf> {

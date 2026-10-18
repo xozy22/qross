@@ -56,6 +56,9 @@ enum Command {
         /// Kopierte Dateien bis zu dieser Gesamtgröße in MB zum Server mitgeben (0 = nie)
         #[arg(long, value_name = "MB", default_value_t = config::default_max_file_mb())]
         clipboard_max_mb: u64,
+        /// Inhalte, die ein Passwortmanager als vertraulich markiert, trotzdem zum Server mitgeben
+        #[arg(long)]
+        share_concealed: bool,
         /// Eingaben nur protokollieren statt ausführen (Test auf einem einzigen Rechner)
         #[arg(long)]
         dry_run: bool,
@@ -99,7 +102,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Server { config } => run_server(&data_dir, &config).await,
-        Command::Client { server, name, server_fingerprint, clipboard_max_mb, dry_run, no_game_mode } => {
+        Command::Client { server, name, server_fingerprint, clipboard_max_mb, share_concealed, dry_run, no_game_mode } => {
             let server = match server {
                 Some(server) => server,
                 None => find_server().await?,
@@ -109,6 +112,7 @@ async fn main() -> Result<()> {
                 server,
                 server_fingerprint,
                 clipboard_file_limit: config::mb_to_bytes(clipboard_max_mb),
+                share_concealed,
             };
             run_client(&data_dir, config, dry_run, !no_game_mode).await
         }
@@ -164,6 +168,7 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
         .with_switch_options(file.switching.options())
         .with_discovery(file.discovery)
         .with_clipboard_file_limit(file.clipboard.file_limit())
+        .with_share_concealed(file.clipboard.share_concealed)
         .with_keys(file.keys.config()?)
         .with_game_mode(file.game.enabled);
     let platform = ServerPlatform {

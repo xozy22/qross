@@ -47,6 +47,9 @@ pub struct ClientConfig {
     /// Kopierte Dateien bis zu dieser Gesamtgröße in Bytes mitgeben (0 = nie);
     /// üblich: `clipfiles::DEFAULT_LIMIT`
     pub clipboard_file_limit: u64,
+    /// Inhalte der Zwischenablage, die ein Passwortmanager als vertraulich markiert, trotzdem an
+    /// den Server geben (üblich: nein; dann meldet `ClientNotice::ClipboardConcealed` das Zurückhalten)
+    pub share_concealed: bool,
 }
 
 pub struct ClientPlatform {
@@ -132,6 +135,9 @@ pub enum ClientNotice {
     /// Stand einer Dateiübertragung etwa viermal pro Sekunde und zum Schluss ihr Ergebnis
     /// (siehe [`crate::progress`]). Abbrechen über die `Transfers` aus [`run_with_transfers`].
     Transfer(Progress),
+    /// Ein Passwortmanager hat den Inhalt der Zwischenablage als vertraulich markiert; er bleibt
+    /// hier (einmal je Inhalt, siehe [`ClientConfig::share_concealed`]).
+    ClipboardConcealed,
 }
 
 type Notices<'a> = Option<&'a mpsc::UnboundedSender<ClientNotice>>;
@@ -209,7 +215,14 @@ async fn run_inner(
         })
     };
     let mut clipboard = ClipboardSide {
-        hub: ClipboardHub::spawn(clipboard),
+        hub: ClipboardHub::spawn(clipboard, config.share_concealed, {
+            let notices = notices.cloned();
+            move || {
+                if let Some(tx) = &notices {
+                    let _ = tx.send(ClientNotice::ClipboardConcealed);
+                }
+            }
+        }),
         incoming: Incoming::new(Staging::persistent(&clipfiles::default_store())?, transfers.clone()),
         transfers,
         notify: {

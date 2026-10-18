@@ -59,6 +59,8 @@ pub struct Server {
     discovery: bool,
     /// Kopierte Dateien bis zu dieser Gesamtgröße mitgeben (0 = nie)
     clipboard_file_limit: u64,
+    /// Vertraulich markierte Inhalte der Zwischenablage trotzdem teilen
+    share_concealed: bool,
     /// Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung je Rechner
     keys: KeyConfig,
     /// Bei Vollbild bzw. eingefangenem Zeiger festhalten und relative Bewegungen schicken
@@ -106,6 +108,9 @@ pub enum ServerNotice {
     /// Stand einer Dateiübertragung (Drag & Drop, kopierte Dateien) etwa viermal pro Sekunde und
     /// zum Schluss ihr Ergebnis (siehe [`crate::progress`]). Abbrechen über [`Server::transfers`].
     Transfer(Progress),
+    /// Ein Passwortmanager hat den Inhalt der Zwischenablage als vertraulich markiert; er bleibt
+    /// hier (einmal je Inhalt, siehe [`Server::with_share_concealed`]).
+    ClipboardConcealed,
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -173,6 +178,7 @@ impl Server {
             switching: SwitchOptions::RECOMMENDED,
             discovery,
             clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+            share_concealed: false,
             keys: KeyConfig::default(),
             game_mode: true,
             fingerprint: identity.fingerprint(),
@@ -204,6 +210,13 @@ impl Server {
     /// Standard: `clipfiles::DEFAULT_LIMIT`). Größeres bleibt Drag & Drop vorbehalten.
     pub fn with_clipboard_file_limit(mut self, bytes: u64) -> Self {
         self.clipboard_file_limit = bytes;
+        self
+    }
+
+    /// Inhalte der Zwischenablage, die ein Passwortmanager als vertraulich markiert, trotzdem an
+    /// Clients geben (Standard: nein; dann meldet `ServerNotice::ClipboardConcealed` das Zurückhalten).
+    pub fn with_share_concealed(mut self, share: bool) -> Self {
+        self.share_concealed = share;
         self
     }
 
@@ -280,7 +293,14 @@ impl Server {
         if self.game_mode {
             local_game = game::watch(game);
         }
-        let clipboard = ClipboardHub::spawn(clipboard);
+        let clipboard = ClipboardHub::spawn(clipboard, self.share_concealed, {
+            let notices = self.notices.clone();
+            move || {
+                if let Some(tx) = &notices {
+                    let _ = tx.send(ServerNotice::ClipboardConcealed);
+                }
+            }
+        });
         let files_notify: Notify = {
             let notices = self.notices.clone();
             Arc::new(move |notice| {
