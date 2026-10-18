@@ -335,6 +335,72 @@ async fn too_large_files_stay_put_but_their_names_arrive() {
     let _ = std::fs::remove_dir_all(&source);
 }
 
+/// Cursor zum Laptop bringen und warten, bis er dort angekommen ist
+async fn enter_laptop(s: &Setup) {
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    let injected = s.injected.clone();
+    wait_for("Enter beim Client", || injected.0.lock().unwrap().contains(&Inject::MoveTo { x: 1, y: 399 })).await;
+}
+
+fn released(capture: &RecordingCapture) -> bool {
+    capture.0.lock().unwrap().iter().any(|c| matches!(c, CaptureCall::Release { .. }))
+}
+
+#[tokio::test]
+async fn files_dragged_on_the_client_are_dropped_on_the_server() {
+    let s = start(true, None);
+    let (source, report) = copied_files("rueckwaerts");
+    let target = source.with_file_name(format!("qross-rueckwaerts-ziel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::create_dir_all(&target).unwrap();
+    *s.capture.1.lock().unwrap() = Some(target.clone());
+    enter_laptop(&s).await;
+
+    // Auf dem Laptop Dateien greifen und an die Kante zum PC ziehen
+    *s.injected.2.lock().unwrap() = vec![source.join("Bericht.pdf"), source.join("Projekt")];
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: true }).unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("Rückkehr zum Server mit den Dateien", || {
+        capture.0.lock().unwrap().contains(&CaptureCall::AwaitLocalDrop)
+    })
+    .await;
+    assert!(released(&s.capture), "der Cursor ist wieder auf dem Server");
+
+    // Über einem Ordner auf dem Server loslassen
+    s.events.send(CaptureEvent::LocalDrop { x: 300, y: 200 }).unwrap();
+    let (file, note) = (target.join("Bericht.pdf"), target.join("Projekt/sub/notiz.txt"));
+    wait_up_to(Duration::from_secs(20), "abgelegte Dateien", || file.exists() && note.exists()).await;
+    assert_eq!(std::fs::read(&file).unwrap(), report);
+    assert_eq!(std::fs::read_to_string(&note).unwrap(), "Grüße");
+    assert!(target.join("Projekt/leer").is_dir());
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+#[tokio::test]
+async fn holding_a_button_without_files_keeps_the_cursor_on_the_client() {
+    let s = start(true, None);
+    enter_laptop(&s).await;
+    // Z. B. ein Fenster an den Rand schieben: kein Wechsel, solange die Taste gedrückt ist
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: true }).unwrap();
+    for _ in 0..5 {
+        s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+    assert!(!released(&s.capture), "mit gedrückter Taste ohne Dateien bleibt der Cursor auf dem Client");
+
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("Rückkehr nach dem Loslassen", || released(&capture)).await;
+}
+
 #[tokio::test]
 async fn unknown_client_is_rejected() {
     let s = start(false, None);

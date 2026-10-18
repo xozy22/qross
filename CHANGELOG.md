@@ -8,6 +8,39 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.4.0] - 2026-10-18
+
+### Neu
+
+- **Automatische Updates:** Qross prüft beim Start und danach täglich, ob es eine neue Version gibt. Es lädt
+  sie im Hintergrund, prüft ihre Signatur und installiert sie in einem ruhigen Moment, nie mitten in einer
+  Fernsteuerung. Danach startet Qross neu und setzt Server bzw. Client fort.
+- **Mit dem System starten:** Qross startet bei der Anmeldung unauffällig im Tray und setzt fort, was zuletzt
+  lief.
+- **Einstellungen:** ein eigener Bereich für Autostart, Updates, Zwischenablage und Tastatur, der mit künftigen
+  Optionen wächst.
+- **Drag & Drop in beide Richtungen:** Dateien lassen sich jetzt auch vom Client auf den Server ziehen. Im
+  Explorer oder Finder greifen, über die Kante ziehen und auf dem Server loslassen. Sie landen im Ordner unter
+  dem Cursor (Windows) bzw. in „Downloads/Qross“.
+- **Fang-Taste frei wählbar:** Statt der Rollen-Taste z. B. Strg+Alt+L, auch auf dem Mac, der keine Rollen-Taste
+  hat.
+- **Medientasten:** Wiedergabe/Pause, Weiter, Zurück und Stopp gehen mit. Auf dem Mac wirken Lautstärke und
+  Wiedergabe jetzt tatsächlich. Auf Wunsch bleiben Medientasten immer auf dem Server.
+- **Tasten je Rechner umbelegen**, z. B. Alt und Windows-Taste für einen Mac tauschen.
+
+### Behoben
+
+- Wer auf dem Client etwas mit gedrückter Maustaste an die Kante zum Server zog, wechselte sofort zurück, und
+  der Client ließ die Taste los. Gezogene Dateien landeten dabei ungewollt am Bildschirmrand. Mit gedrückter
+  Taste wird jetzt nur gewechselt, wenn Dateien gezogen werden.
+
+### Wichtig
+
+- Automatische Updates gibt es ab dieser Version. Wer eine ältere Version nutzt, installiert 0.4.0 einmal von
+  Hand.
+- Drag & Drop zum Server braucht Qross 0.4.0 auf beiden Rechnern. „Medientasten immer auf dem Server“ wirkt,
+  wenn der Server unter Windows läuft.
+
 ## [0.3.1] - 2026-10-18
 
 ### Behoben
@@ -107,6 +140,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.4.0]: https://github.com/xozy22/qross/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/xozy22/qross/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/xozy22/qross/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/xozy22/qross/compare/v0.2.0...v0.2.1

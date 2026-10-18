@@ -145,11 +145,15 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
     let capture = qross_platform::start_capture(events)?;
     info!("Notausgang: Strg+Alt+Shift+Esc holt Maus und Tastatur sofort zurück");
+    if let Some(lock) = file.keys.config()?.options.lock {
+        info!("Fang-Taste: {} hält den Cursor auf dem aktuellen Bildschirm fest", lock.label(cfg!(target_os = "macos")));
+    }
 
     let server = Server::bind(ServerConfig { name, listen: file.listen, layout }, &identity, trust)?
         .with_switch_options(file.switching.options())
         .with_discovery(file.discovery)
-        .with_clipboard_file_limit(file.clipboard.file_limit());
+        .with_clipboard_file_limit(file.clipboard.file_limit())
+        .with_keys(file.keys.config()?);
     let platform = ServerPlatform {
         capture,
         events: events_rx,

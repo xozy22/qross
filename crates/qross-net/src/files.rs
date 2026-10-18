@@ -433,6 +433,16 @@ fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Ablage, wenn unter dem Cursor kein Ordner erkennbar ist: „Downloads/Qross“.
+pub fn fallback_drop_folder() -> PathBuf {
+    dirs::download_dir().or_else(dirs::home_dir).unwrap_or_else(std::env::temp_dir).join("Qross")
+}
+
+/// Zwischenordner für gezogene Dateien, bis sie abgelegt werden
+pub fn drag_staging_base() -> PathBuf {
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("Qross").join("incoming")
+}
+
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;

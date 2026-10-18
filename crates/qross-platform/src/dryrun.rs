@@ -20,9 +20,14 @@ impl Injector for LogInjector {
     }
 }
 
-/// Merkt sich alle Ereignisse (für Tests); `1` ist der Ablageordner für Drag & Drop.
+/// Merkt sich alle Ereignisse (für Tests); `1` ist der Ablageordner für Drag & Drop, `2` die
+/// Dateien, die hier gerade gezogen werden (Drag & Drop zum Server).
 #[derive(Clone, Default)]
-pub struct RecordingInjector(pub Arc<Mutex<Vec<Inject>>>, pub Arc<Mutex<Option<PathBuf>>>);
+pub struct RecordingInjector(
+    pub Arc<Mutex<Vec<Inject>>>,
+    pub Arc<Mutex<Option<PathBuf>>>,
+    pub Arc<Mutex<Vec<PathBuf>>>,
+);
 
 impl Injector for RecordingInjector {
     fn inject(&mut self, event: &Inject) {
@@ -31,6 +36,10 @@ impl Injector for RecordingInjector {
 
     fn drop_folder(&mut self, _x: i32, _y: i32) -> Option<PathBuf> {
         self.1.lock().unwrap().clone()
+    }
+
+    fn take_dragged_files(&mut self, _x: i32, _y: i32) -> Vec<PathBuf> {
+        std::mem::take(&mut *self.2.lock().unwrap())
     }
 }
 
@@ -100,11 +109,13 @@ pub enum CaptureCall {
     Release { x: i32, y: i32 },
     ProbeDrag { x: i32, y: i32 },
     CancelLocalDrag,
+    AwaitLocalDrop,
 }
 
-/// Merkt sich Aufrufe der Erfassungs-Steuerung (für Tests).
+/// Merkt sich Aufrufe der Erfassungs-Steuerung (für Tests); `1` ist der Ablageordner für Dateien
+/// vom Client.
 #[derive(Clone, Default)]
-pub struct RecordingCapture(pub Arc<Mutex<Vec<CaptureCall>>>);
+pub struct RecordingCapture(pub Arc<Mutex<Vec<CaptureCall>>>, pub Arc<Mutex<Option<PathBuf>>>);
 
 impl Capture for RecordingCapture {
     fn capture_remote(&self) {
@@ -121,5 +132,13 @@ impl Capture for RecordingCapture {
 
     fn cancel_local_drag(&self) {
         self.0.lock().unwrap().push(CaptureCall::CancelLocalDrag);
+    }
+
+    fn await_local_drop(&self) {
+        self.0.lock().unwrap().push(CaptureCall::AwaitLocalDrop);
+    }
+
+    fn drop_folder(&self, _x: i32, _y: i32) -> Option<PathBuf> {
+        self.1.lock().unwrap().clone()
     }
 }

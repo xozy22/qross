@@ -5,21 +5,29 @@
 mod logs;
 mod runtime;
 mod tray;
+mod updates;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use qross_gui::changelog::{self, Release};
-use qross_gui::clipboard_files::FilesMessage;
+use qross_gui::lifecycle;
 use qross_gui::{Role, Settings, EXPORT_FILE, GRID_COLS, GRID_ROWS};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WindowEvent};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
+use tauri_plugin_opener::OpenerExt;
 use tracing::{info, warn};
 
 use crate::logs::{LogBuffer, LogLine};
 use crate::runtime::{FoundServer, Runtime, ServerProbe, Status};
+use crate::updates::{UpdateStatus, Updates};
 
 type Rt<'a> = State<'a, Arc<Runtime>>;
+
+/// Mit diesem Argument startet das System Qross bei der Anmeldung (unsichtbar im Tray).
+const AUTOSTART_ARG: &str = "--autostart";
+const PROJECT_URL: &str = "https://github.com/xozy22/qross";
 
 /// Rechnername in Kleinbuchstaben (Windows liefert ihn in Großbuchstaben).
 pub fn hostname() -> String {
@@ -39,7 +47,7 @@ pub fn quit(app: &AppHandle) {
     let app = app.clone();
     let rt = app.state::<Arc<Runtime>>().inner().clone();
     tauri::async_runtime::spawn(async move {
-        rt.stop().await;
+        rt.stop_for_exit().await;
         app.exit(0);
     });
 }
@@ -53,15 +61,10 @@ pub fn window_in_front(app: &AppHandle) -> bool {
 
 /// Systembenachrichtigung (Windows-Infocenter, macOS-Mitteilungen, Linux über D-Bus).
 /// Schlägt sie fehl, bleibt es beim Hinweis in der App.
-pub fn notify(app: &AppHandle, message: &FilesMessage) {
+pub fn notify(app: &AppHandle, title: &str, body: &str) {
     use tauri_plugin_notification::NotificationExt;
-    tracing::debug!("Systembenachrichtigung: {}", message.title);
-    let result = app
-        .notification()
-        .builder()
-        .title(&message.title)
-        .body(message.text.as_deref().unwrap_or_default())
-        .show();
+    tracing::debug!("Systembenachrichtigung: {title}");
+    let result = app.notification().builder().title(title).body(body).show();
     if let Err(e) = result {
         warn!("Systembenachrichtigung nicht möglich: {e}");
     }
@@ -106,6 +109,62 @@ fn get_state(rt: Rt<'_>, logs: State<'_, Arc<LogBuffer>>) -> Result<Snapshot, St
         version: env!("CARGO_PKG_VERSION"),
         logs: logs.snapshot(),
     })
+}
+
+/// Einstellungen, die nicht in `gui.json` stehen, sondern vom System kommen
+#[derive(Serialize)]
+struct Prefs {
+    /// Echter Zustand des Autostarts im System
+    autostart: bool,
+    /// Nur Release-Builds tragen sich in den Autostart ein
+    autostart_editable: bool,
+    update: UpdateStatus,
+    data_dir: String,
+}
+
+#[tauri::command]
+fn get_prefs(app: AppHandle, rt: Rt<'_>) -> Prefs {
+    Prefs {
+        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        autostart_editable: !cfg!(debug_assertions),
+        update: app.state::<Arc<Updates>>().status(),
+        data_dir: rt.data_dir.display().to_string(),
+    }
+}
+
+/// „Mit dem System starten“; liefert den Zustand danach.
+#[tauri::command]
+fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    if cfg!(debug_assertions) {
+        return Err("Im Entwicklungsbuild trägt sich Qross nicht in den Autostart ein.".into());
+    }
+    let autolaunch = app.autolaunch();
+    let result = if enabled { autolaunch.enable() } else { autolaunch.disable() };
+    result.map_err(|e| format!("Autostart nicht geändert: {e}"))?;
+    info!("Autostart {}", if enabled { "eingeschaltet" } else { "ausgeschaltet" });
+    autolaunch.is_enabled().map_err(|e| e.to_string())
+}
+
+/// „Jetzt nach Updates suchen“; das Ergebnis kommt als Ereignis `update-status`.
+#[tauri::command]
+fn check_updates(app: AppHandle) {
+    tauri::async_runtime::spawn(async move { updates::check(&app).await });
+}
+
+/// „Jetzt aktualisieren“ für ein angebotenes Update
+#[tauri::command]
+fn install_update(app: AppHandle) {
+    tauri::async_runtime::spawn(async move { updates::install_now(&app).await });
+}
+
+#[tauri::command]
+fn open_data_dir(app: AppHandle, rt: Rt<'_>) -> Result<(), String> {
+    app.opener().open_path(rt.data_dir.display().to_string(), None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_project_page(app: AppHandle) -> Result<(), String> {
+    app.opener().open_url(PROJECT_URL, None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -175,6 +234,21 @@ async fn probe_server(rt: Rt<'_>, address: String) -> Result<ServerProbe, String
     rt.probe_server(address.trim()).await.map_err(|e| format!("{e:#}"))
 }
 
+/// Benennbare Taste für Listen und Aufnahme in der Oberfläche
+#[derive(Serialize)]
+struct KeyName {
+    /// Wie `KeyboardEvent.code`, z. B. „AltLeft“
+    name: &'static str,
+    /// Deutsche Beschriftung, z. B. „Alt links“
+    label: &'static str,
+}
+
+/// Alle Tasten, die sich als Fang-Taste oder für die Umbelegung eintragen lassen
+#[tauri::command]
+fn key_names() -> Vec<KeyName> {
+    qross_core::keys::all_keys().map(|(_, name, label)| KeyName { name, label }).collect()
+}
+
 /// Neuigkeiten aus dem eingebetteten CHANGELOG.md, neueste Version zuerst.
 #[tauri::command]
 fn changelog() -> &'static [Release] {
@@ -224,6 +298,51 @@ fn local_ip() -> Option<String> {
     (!ip.is_unspecified() && !ip.is_loopback()).then(|| ip.to_string())
 }
 
+/// Beim allerersten Start (nur Release-Builds) Autostart einschalten; danach entscheidet der Nutzer.
+fn configure_autostart(app: &AppHandle, rt: &Runtime) {
+    if cfg!(debug_assertions) || rt.app_state().autostart_configured {
+        return;
+    }
+    match app.autolaunch().enable() {
+        Ok(()) => info!("Autostart eingerichtet: Qross startet bei der Anmeldung"),
+        Err(e) => warn!("Autostart nicht eingerichtet: {e}"),
+    }
+    rt.update_app_state(|s| s.autostart_configured = true);
+}
+
+/// Das Fenster startet unsichtbar (tauri.conf.json). Normal zeigen; beim Autostart im Tray
+/// bleiben, ohne Tray minimiert zeigen.
+fn show_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else { return };
+    let autostarted = std::env::args().any(|arg| arg == AUTOSTART_ARG);
+    if !autostarted {
+        let _ = window.show();
+    } else if tray::available() {
+        info!("Autostart: Qross läuft im Tray");
+    } else {
+        // Erst minimieren, dann zeigen: umgekehrt geht das Minimieren beim frisch gezeigten Fenster verloren.
+        let _ = window.minimize();
+        let _ = window.show();
+    }
+}
+
+/// Lief beim letzten Beenden ein Server oder Client, wieder starten (falls gewünscht).
+pub fn resume(app: &AppHandle) {
+    let rt = app.state::<Arc<Runtime>>().inner().clone();
+    let settings = rt.settings.lock().unwrap().clone();
+    let Some(role) = lifecycle::resume_role(settings.resume_role, rt.app_state().last_running, settings.role) else {
+        return;
+    };
+    info!("Setze {} fort", if role == Role::Server { "den Server" } else { "den Client" });
+    tauri::async_runtime::spawn(async move {
+        match rt.start().await {
+            Ok(None) => {}
+            Ok(Some(_)) => warn!("Fortsetzen: Der Server ist unbekannt und muss erst bestätigt werden"),
+            Err(e) => warn!("Fortsetzen fehlgeschlagen: {e:#}"),
+        }
+    });
+}
+
 fn data_dir() -> PathBuf {
     std::env::var_os("QROSS_DATA_DIR")
         .map(PathBuf::from)
@@ -248,6 +367,13 @@ fn main() {
 
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
+    // Nur eine Qross-Instanz: Ein zweiter Start (z. B. aus dem Startmenü, während Qross per
+    // Autostart im Tray läuft) zeigt das vorhandene Fenster. Debug-Builds bleiben mehrfach
+    // startbar, für Tests mit Server und Client auf einem Rechner.
+    #[cfg(not(debug_assertions))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)));
+    }
     #[cfg(debug_assertions)]
     {
         builder = builder.plugin(tauri_plugin_mcp_bridge::init_with_config(
@@ -256,6 +382,9 @@ fn main() {
     }
     builder
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_opener::init())
         .manage(logs.clone())
         .invoke_handler(tauri::generate_handler![
             get_state,
@@ -268,13 +397,26 @@ fn main() {
             probe_server,
             discover_servers,
             changelog,
+            key_names,
             trust_server,
             simulate_clipboard_files,
+            get_prefs,
+            set_autostart,
+            check_updates,
+            install_update,
+            open_data_dir,
+            open_project_page,
         ])
         .setup(move |app| {
             logs.attach(app.handle().clone());
-            app.manage(Arc::new(Runtime::new(app.handle().clone(), data_dir.clone(), settings.clone())));
+            let rt = Arc::new(Runtime::new(app.handle().clone(), data_dir.clone(), settings.clone()));
+            app.manage(rt.clone());
+            app.manage(Arc::new(Updates::new(&rt.app_state())));
             tray::init(app.handle());
+            configure_autostart(app.handle(), &rt);
+            show_window(app.handle());
+            resume(app.handle());
+            updates::spawn_scheduler(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -12,12 +12,13 @@ use std::cell::RefCell;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use anyhow::{anyhow, bail, Context};
+use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions, MediaKeys};
 use qross_core::CaptureEvent;
-use qross_proto::{Edge, MouseButton};
+use qross_proto::{Edge, KeyCode, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
 use windows_sys::Win32::Foundation::{GetLastError, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -29,7 +30,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MBUTTON, VK_RBUTTON,
-    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_SCROLL, VK_XBUTTON1, VK_XBUTTON2,
+    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_XBUTTON1, VK_XBUTTON2,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, PostThreadMessageW, SetCursorPos,
@@ -45,6 +46,9 @@ use crate::Capture;
 struct Shared {
     remote: AtomicBool,
     events: UnboundedSender<CaptureEvent>,
+    keys: Mutex<KeyOptions>,
+    /// Dateien vom Client warten: das nächste Loslassen einer Maustaste meldet `LocalDrop`
+    await_drop: AtomicBool,
 }
 
 /// Hook-Prozeduren sind freie Funktionen ohne Kontext – daher ein prozessweiter Zustand.
@@ -59,11 +63,18 @@ struct HookState {
     local_down: [bool; 256],
     /// Dasselbe für Maustasten (wichtig beim Ziehen von Dateien über die Kante)
     buttons_down: [bool; 5],
+    /// Erkennt die Fang-Taste
+    hotkey: HotkeyTracker,
 }
 
 thread_local! {
     static STATE: RefCell<HookState> = const {
-        RefCell::new(HookState { pressed: [false; 256], local_down: [false; 256], buttons_down: [false; 5] })
+        RefCell::new(HookState {
+            pressed: [false; 256],
+            local_down: [false; 256],
+            buttons_down: [false; 5],
+            hotkey: HotkeyTracker::new(),
+        })
     };
 }
 
@@ -78,7 +89,9 @@ impl HookState {
 }
 
 pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Arc<dyn Capture>> {
-    if SHARED.set(Shared { remote: AtomicBool::new(false), events }).is_err() {
+    let shared =
+        Shared { remote: AtomicBool::new(false), events, keys: Mutex::new(KeyOptions::default()), await_drop: AtomicBool::new(false) };
+    if SHARED.set(shared).is_err() {
         bail!("die Eingabe-Erfassung läuft in diesem Prozess bereits");
     }
     // Falls ein früherer Lauf im Remote-Modus abgestürzt ist
@@ -91,10 +104,8 @@ pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Ar
         .recv()
         .context("Hook-Thread hat sich unerwartet beendet")?
         .map_err(|code| anyhow!("SetWindowsHookExW fehlgeschlagen (Fehlercode {code})"))?;
-    if let Some(shared) = SHARED.get() {
-        if let Err(e) = dnd::start(shared.events.clone()) {
-            tracing::warn!("{e:#} – Dateien lassen sich nicht über die Kante ziehen");
-        }
+    if let Err(e) = dnd::start() {
+        tracing::warn!("{e:#} – Dateien lassen sich nicht über die Kante ziehen");
     }
     Ok(Arc::new(WinCapture { thread_id }))
 }
@@ -130,6 +141,12 @@ struct WinCapture {
 }
 
 impl Capture for WinCapture {
+    fn set_key_options(&self, options: KeyOptions) {
+        if let Some(shared) = SHARED.get() {
+            *shared.keys.lock().unwrap_or_else(|e| e.into_inner()) = options;
+        }
+    }
+
     fn capture_remote(&self) {
         if let Some(shared) = SHARED.get() {
             shared.remote.store(true, Ordering::Release);
@@ -149,15 +166,28 @@ impl Capture for WinCapture {
     }
 
     fn probe_drag(&self, x: i32, y: i32) {
-        if !dnd::probe(x, y) {
-            if let Some(shared) = SHARED.get() {
-                let _ = shared.events.send(CaptureEvent::DragProbeResult { files: Vec::new() });
-            }
+        let Some(shared) = SHARED.get() else { return };
+        let events = shared.events.clone();
+        let sent = dnd::probe(x, y, true, move |files| {
+            let _ = events.send(CaptureEvent::DragProbeResult { files });
+        });
+        if !sent {
+            let _ = shared.events.send(CaptureEvent::DragProbeResult { files: Vec::new() });
         }
     }
 
     fn cancel_local_drag(&self) {
         inject::tap_escape();
+    }
+
+    fn await_local_drop(&self) {
+        if let Some(shared) = SHARED.get() {
+            shared.await_drop.store(true, Ordering::Release);
+        }
+    }
+
+    fn drop_folder(&self, x: i32, y: i32) -> Option<std::path::PathBuf> {
+        super::shell::folder_at(x, y)
     }
 }
 
@@ -199,6 +229,10 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
     let remote = shared.remote.load(Ordering::Acquire);
     if let Some((button, down)) = button_of(msg, info) {
+        if !remote && !down && shared.await_drop.swap(false, Ordering::AcqRel) {
+            // Dateien vom Client: hier losgelassen = hier ablegen
+            let _ = shared.events.send(CaptureEvent::LocalDrop { x: info.pt.x, y: info.pt.y });
+        }
         let slot = button as usize;
         let local_release = STATE.with_borrow_mut(|st| {
             if !remote {
@@ -263,16 +297,26 @@ fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
 fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
     let up = info.flags & LLKHF_UP != 0;
     let vk = (info.vkCode & 0xFF) as usize;
+    // Von AltGr erzeugtes künstliches LCtrl zählt nicht als Strg (sonst wäre AltGr+L = Strg+Alt+L).
+    let fake_ctrl = info.scanCode & 0x200 != 0;
+    let extended = info.flags & LLKHF_EXTENDED != 0;
+    let key = if fake_ctrl { None } else { hid_from_windows(info.scanCode, extended, info.vkCode) };
+    let options = *shared.keys.lock().unwrap_or_else(|e| e.into_inner());
     STATE.with_borrow_mut(|st| {
-        let was_down = st.pressed[vk];
         st.pressed[vk] = !up;
         let remote = shared.remote.load(Ordering::Acquire);
-        if vk == VK_SCROLL as usize {
-            // Rollen-Taste schaltet die Bildschirmsperre um (nicht bei Auto-Repeat)
-            if !up && !was_down {
-                let _ = shared.events.send(CaptureEvent::ToggleLock);
+        if let (Some(key), Some(lock)) = (key, options.lock.as_ref()) {
+            // Fang-Taste (Standard: Rollen) hält den Cursor fest bzw. gibt ihn frei
+            match st.hotkey.on_key(key, !up, Some(lock)) {
+                HotkeyEvent::Triggered => {
+                    let _ = shared.events.send(CaptureEvent::ToggleLock);
+                    return remote || lock.swallow_locally();
+                }
+                HotkeyEvent::Consumed => return remote || lock.swallow_locally(),
+                HotkeyEvent::None => {}
             }
-            return remote;
+        } else if let Some(key) = key {
+            st.hotkey.on_key(key, !up, None);
         }
         if !remote {
             st.local_down[vk] = !up;
@@ -295,12 +339,15 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
             let _ = shared.events.send(CaptureEvent::PanicReturn);
             return true;
         }
-        if info.scanCode & 0x200 != 0 {
-            // Von AltGr erzeugtes künstliches LCtrl – der Client erzeugt es selbst.
+        if fake_ctrl {
+            // Künstliches LCtrl von AltGr – der Client erzeugt es selbst.
             return true;
         }
-        let extended = info.flags & LLKHF_EXTENDED != 0;
-        match hid_from_windows(info.scanCode, extended, info.vkCode) {
+        if options.media == MediaKeys::Local && key.is_some_and(KeyCode::is_media) {
+            // Medientasten wirken auf Wunsch immer hier (z. B. Lautsprecher am Server)
+            return false;
+        }
+        match key {
             Some(key) => {
                 let _ = shared.events.send(CaptureEvent::Key { key, down: !up });
             }

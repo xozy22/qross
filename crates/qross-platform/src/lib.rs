@@ -34,6 +34,7 @@ use unsupported as imp;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use qross_core::keys::KeyOptions;
 use qross_core::{CaptureEvent, Inject};
 use qross_proto::{ClipboardData, Rect};
 use tokio::sync::mpsc::UnboundedSender;
@@ -49,6 +50,15 @@ pub trait Capture: Send + Sync {
     fn probe_drag(&self, _x: i32, _y: i32) {}
     /// Den lokalen Drag abbrechen (die Dateien gehen stattdessen an einen Client).
     fn cancel_local_drag(&self) {}
+    /// Fang-Taste und Medientasten einstellen (Standard: Rollen, Medientasten an den aktiven Rechner).
+    fn set_key_options(&self, _options: KeyOptions) {}
+    /// Dateien vom Client sind unterwegs: Das nächste Loslassen einer Maustaste hier als
+    /// `CaptureEvent::LocalDrop` melden. Ohne Unterstützung bleiben sie liegen, bis der Cursor wechselt.
+    fn await_local_drop(&self) {}
+    /// Ordner zum Ablegen an (x, y), z. B. das Explorer-Fenster darunter; `None`: „Downloads“.
+    fn drop_folder(&self, _x: i32, _y: i32) -> Option<PathBuf> {
+        None
+    }
 }
 
 pub trait Injector: Send {
@@ -57,6 +67,11 @@ pub trait Injector: Send {
     /// der Desktop unter dem Cursor. `None`: keine passende Ablage, die Laufzeit nimmt „Downloads“.
     fn drop_folder(&mut self, _x: i32, _y: i32) -> Option<PathBuf> {
         None
+    }
+    /// Zieht der Nutzer hier gerade Dateien (Cursor bei x, y, Taste gedrückt)? Dann wird der lokale
+    /// Drag abgebrochen und die Pfade geliefert – die Dateien wandern zum Server. Leer: kein Datei-Drag.
+    fn take_dragged_files(&mut self, _x: i32, _y: i32) -> Vec<PathBuf> {
+        Vec::new()
     }
 }
 

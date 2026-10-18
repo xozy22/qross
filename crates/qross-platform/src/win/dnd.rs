@@ -1,7 +1,9 @@
-//! Drag & Drop am Server: Werden Dateien an eine Bildschirmkante gezogen, erscheint dort kurz
-//! ein unsichtbares OLE-Drop-Ziel (48×48 px, fast vollständig transparent) unter dem Cursor.
-//! Der laufende Drag meldet beim Betreten seine Daten – daraus lesen wir die Dateiliste.
-//! Kommt innerhalb von 400 ms nichts, war es kein Datei-Drag (z. B. ein Fenster am Rand).
+//! Werden gerade Dateien gezogen? Dazu erscheint kurz ein unsichtbares OLE-Drop-Ziel
+//! (48×48 px, fast vollständig transparent) unter dem Cursor. Der laufende Drag meldet beim
+//! Betreten seine Daten – daraus lesen wir die Dateiliste. Kommt innerhalb von 400 ms nichts,
+//! war es kein Datei-Drag (z. B. ein Fenster am Rand).
+//!
+//! Genutzt vom Server (Dateien an der Kante zum Client) und vom Client (Dateien zurück zum Server).
 
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -10,11 +12,10 @@ use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use anyhow::anyhow;
-use qross_core::CaptureEvent;
-use tokio::sync::mpsc::UnboundedSender;
 use windows::core::{implement, w, Ref};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINTL, WPARAM};
 use windows::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
@@ -43,33 +44,53 @@ const TIMER_ID: usize = 1;
 const PROBE_SIZE: i32 = 48;
 const PROBE_TIMEOUT_MS: u32 = 400;
 
+/// Empfänger des Ergebnisses der laufenden Prüfung
+type Reply = Box<dyn FnOnce(Vec<PathBuf>) + Send>;
+
+/// Angeforderte Prüfung: Empfänger und ob die Wiederholungssperre gilt
+static PENDING: Mutex<Option<(Reply, bool)>> = Mutex::new(None);
+
 struct ProbeState {
-    events: UnboundedSender<CaptureEvent>,
     active: bool,
+    reply: Option<Reply>,
     /// `BUTTON_RELEASES` beim letzten Ergebnis ohne Dateien
     empty_at: Option<u32>,
 }
 
 thread_local! {
-    static PROBE: RefCell<Option<ProbeState>> = const { RefCell::new(None) };
+    static PROBE: RefCell<ProbeState> = const { RefCell::new(ProbeState { active: false, reply: None, empty_at: None }) };
 }
 
-/// Startet den Drop-Ziel-Thread (STA mit eigenem Fenster und Nachrichtenschleife).
-pub fn start(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<()> {
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-    thread::Builder::new().name("qross-dnd".into()).spawn(move || run(events, ready_tx))?;
-    ready_rx.recv()?.map_err(|e| anyhow!("Drag-&-Drop-Erkennung nicht verfügbar: {e}"))
+/// Startet den Drop-Ziel-Thread (STA mit eigenem Fenster und Nachrichtenschleife) – nur einmal.
+pub fn start() -> anyhow::Result<()> {
+    static STARTED: OnceLock<Result<(), String>> = OnceLock::new();
+    STARTED
+        .get_or_init(|| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            thread::Builder::new()
+                .name("qross-dnd".into())
+                .spawn(move || run(ready_tx))
+                .map_err(|e| e.to_string())?;
+            ready_rx.recv().map_err(|e| e.to_string())?
+        })
+        .clone()
+        .map_err(|e| anyhow!("Drag-&-Drop-Erkennung nicht verfügbar: {e}"))
 }
 
-/// Fordert eine Prüfung an. `false`, wenn die Erkennung nicht läuft.
-pub fn probe(x: i32, y: i32) -> bool {
+/// Fordert eine Prüfung an; `reply` bekommt die gezogenen Dateien (leer: kein Datei-Drag).
+/// `once_per_press`: nach einem leeren Ergebnis erst nach dem nächsten Loslassen wieder prüfen
+/// (pflegt der Hook des Servers). `false`, wenn die Erkennung nicht läuft.
+pub fn probe(x: i32, y: i32, once_per_press: bool, reply: impl FnOnce(Vec<PathBuf>) + Send + 'static) -> bool {
     let hwnd = PROBE_HWND.load(Ordering::Acquire);
-    hwnd != 0
-        && unsafe { PostMessageW(Some(HWND(hwnd as _)), WM_PROBE, WPARAM(x as u32 as usize), LPARAM(y as isize)) }.is_ok()
+    if hwnd == 0 {
+        return false;
+    }
+    *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some((Box::new(reply), once_per_press));
+    unsafe { PostMessageW(Some(HWND(hwnd as _)), WM_PROBE, WPARAM(x as u32 as usize), LPARAM(y as isize)) }.is_ok()
 }
 
-fn run(events: UnboundedSender<CaptureEvent>, ready: Sender<Result<(), String>>) {
-    match unsafe { setup(events) } {
+fn run(ready: Sender<Result<(), String>>) {
+    match unsafe { setup() } {
         Ok(hwnd) => {
             PROBE_HWND.store(hwnd.0 as isize, Ordering::Release);
             let _ = ready.send(Ok(()));
@@ -86,7 +107,7 @@ fn run(events: UnboundedSender<CaptureEvent>, ready: Sender<Result<(), String>>)
     }
 }
 
-unsafe fn setup(events: UnboundedSender<CaptureEvent>) -> windows::core::Result<HWND> {
+unsafe fn setup() -> windows::core::Result<HWND> {
     OleInitialize(None)?;
     let instance = HINSTANCE(GetModuleHandleW(None)?.0);
     let class = WNDCLASSW {
@@ -112,7 +133,6 @@ unsafe fn setup(events: UnboundedSender<CaptureEvent>) -> windows::core::Result<
     )?;
     // Alpha 1 statt 0: unsichtbar, aber Windows testet das Fenster noch auf Treffer.
     SetLayeredWindowAttributes(hwnd, COLORREF(0), 1, LWA_ALPHA)?;
-    PROBE.with_borrow_mut(|p| *p = Some(ProbeState { events, active: false, empty_at: None }));
     let target: IDropTarget = DropTarget.into();
     RegisterDragDrop(hwnd, &target)?;
     Ok(hwnd)
@@ -133,13 +153,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 }
 
 fn on_probe(hwnd: HWND, x: i32, y: i32) {
+    let Some((reply, once_per_press)) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
     let releases = BUTTON_RELEASES.load(Ordering::Acquire);
     let show = PROBE.with_borrow_mut(|p| {
-        let Some(p) = p.as_mut() else { return false };
-        if p.empty_at == Some(releases) {
+        if once_per_press && p.empty_at == Some(releases) {
             // Dieselbe gedrückte Taste wie bei der letzten erfolglosen Prüfung
-            let _ = p.events.send(CaptureEvent::DragProbeResult { files: Vec::new() });
+            reply(Vec::new());
             return false;
+        }
+        if let Some(previous) = p.reply.replace(reply) {
+            previous(Vec::new());
         }
         p.active = true;
         true
@@ -167,7 +190,6 @@ fn finish(hwnd: HWND, files: Vec<PathBuf>) {
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
     PROBE.with_borrow_mut(|p| {
-        let Some(p) = p.as_mut() else { return };
         if !p.active {
             return;
         }
@@ -176,7 +198,9 @@ fn finish(hwnd: HWND, files: Vec<PathBuf>) {
         if !files.is_empty() {
             tracing::info!("{} Datei(en) werden über die Kante gezogen", files.len());
         }
-        let _ = p.events.send(CaptureEvent::DragProbeResult { files });
+        if let Some(reply) = p.reply.take() {
+            reply(files);
+        }
     });
 }
 

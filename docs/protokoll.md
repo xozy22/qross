@@ -26,9 +26,11 @@ Implementierung: `crates/qross-proto`.
 | Clipboard (je Übertragung ein eigener Stream, Priorität −10) | ⇄ | ja | `Clipboard::Data { text, html, png }`, `Clipboard::Files { transfer, entries, data }` |
 | Datei für Drag & Drop (je Datei ein eigener Stream, Priorität −10) | Server → Client | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
 | Datei aus der Zwischenablage (wie oben) | ⇄ | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
+| Drag (je Nachricht ein eigener Stream, Priorität 10) | ⇄ | ja | `DragMessage::Query` / `Offer` |
 
 Jeder unidirektionale Stream beginnt mit einem Byte `StreamKind` (1 = Input, 2 = Clipboard, 3 = Datei für
-Drag & Drop, 4 = Datei aus der Zwischenablage).
+Drag & Drop, 4 = Datei aus der Zwischenablage, 5 = Drag-Nachricht). Dateien für Drag & Drop fließen seit
+Qross 0.4 in beide Richtungen.
 Durch die Trennung blockieren Clipboard und Dateien nie die Eingaben, das war im Benchmark der zweite
 große Schwachpunkt von Synergy.
 
@@ -103,6 +105,29 @@ Streams und bleiben verbunden. Text, HTML und Bilder funktionieren mit ihnen wei
 Dateinamen werden beim Empfang bereinigt: keine absoluten Pfade und kein `..`, unter Windows unzulässige
 Zeichen und reservierte Namen werden ersetzt.
 
+### Vom Client zum Server
+
+1. Der Server weiß, welche Maustasten auf dem Client gedrückt sind. Erreicht der Cursor dort mit gedrückter
+   Taste die Kante zum Server, wechselt er nicht sofort, sondern fragt mit `DragMessage::Query { probe }` nach.
+2. Der Client prüft, ob gerade Dateien gezogen werden. Unter Windows geschieht das mit demselben unsichtbaren
+   OLE-Drop-Ziel wie am Server, unter macOS über die Drag-Zwischenablage des Systems.
+3. Zieht er Dateien, bricht er seinen Drag mit Esc ab, antwortet mit `Offer { probe, transfer, entries }` und
+   schickt die Dateien auf Streams vom Typ 3. Sonst kommt `Offer` mit leerer Liste. Der Server wechselt dann
+   nicht, solange die Taste gedrückt ist; so bleibt ein an den Rand geschobenes Fenster auf dem Client.
+4. Mit Dateien wechselt der Cursor zum Server. Lässt der Nutzer die Taste dort los, legt der Server die Dateien
+   im Ordner unter dem Cursor ab (Windows: Explorer oder Desktop), sonst in `Downloads/Qross`.
+5. Geht der Cursor vorher zurück zu einem Client, wird die Übertragung verworfen.
+
+Ein älterer Client antwortet nie auf die Nachfrage. Mit gedrückter Taste bleibt der Cursor dann auf ihm.
+
+## Tasten
+
+- Medientasten der HID-Consumer-Page (Wiedergabe/Pause, Weiter, Zurück, Stopp) werden als `0xC000 | Usage`
+  übertragen. Ältere Gegenstellen kennen sie nicht und ignorieren sie. Ein Mac-Client erzeugt daraus und aus
+  Lautstärke und Stumm Systemereignisse (`NX_SYSDEFINED`), denn nur auf diese reagiert macOS.
+- Fang-Taste, Medientasten-Ziel und Umbelegung je Rechner wertet nur der Server aus; das Protokoll ändert sich
+  dadurch nicht.
+
 ## Regeln für Robustheit
 
 - **Mausposition absolut**, in Client-Koordinaten (physische Pixel, virtueller Desktop). Ein verlorenes
@@ -118,7 +143,7 @@ Zeichen und reservierte Namen werden ersetzt.
 
 ## Noch offen
 
-- Drag & Drop in Gegenrichtung (Client → Server) und als Quelle unter Linux/macOS
+- Drag & Drop mit Linux als Quelle (XDND) und vom Mac-Server aus
 - Relative Mausbewegung für Spiele
 - Zwischenablage: RTF; virtuelle Dateien (z. B. Outlook-Anhänge) und Dateien erst beim Einfügen übertragen
 - Bildschirmschoner-Sync, Strg+Alt+Entf, Secure Desktop (UAC)

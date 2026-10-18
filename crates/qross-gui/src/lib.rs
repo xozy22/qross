@@ -5,6 +5,8 @@
 
 pub mod changelog;
 pub mod clipboard_files;
+pub mod keys;
+pub mod lifecycle;
 
 use std::collections::HashSet;
 use std::fs;
@@ -17,6 +19,8 @@ use qross_core::server::SwitchOptions;
 use qross_core::{Layout, LinkConfig};
 use qross_proto::{Edge, DEFAULT_PORT};
 use serde::{Deserialize, Serialize};
+
+use crate::keys::KeySettings;
 
 /// Einstellungen der Oberfläche, im Datenverzeichnis von Qross.
 pub const SETTINGS_FILE: &str = "gui.json";
@@ -44,6 +48,10 @@ pub struct Settings {
     /// Kopierte Dateien beim Wechsel bis zu dieser Gesamtgröße in MB mitgeben (0 = aus).
     /// Gilt als Server wie als Client.
     pub clipboard_files_mb: u64,
+    /// Lief beim Beenden ein Server oder Client, startet er beim nächsten Start wieder.
+    pub resume_role: bool,
+    /// Updates im Hintergrund laden und in einem ruhigen Moment installieren
+    pub auto_update: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -59,6 +67,8 @@ pub struct ServerSettings {
     pub switch_delay_ms: u64,
     /// Auf Suchanfragen von Clients im LAN antworten
     pub discovery: bool,
+    /// Fang-Taste, Medientasten, Umbelegung je Rechner (wirkt auf dem Server)
+    pub keys: KeySettings,
 }
 
 /// Ein Bildschirm im Raster des Layout-Editors.
@@ -110,9 +120,12 @@ impl Settings {
                 corner_size: SwitchOptions::RECOMMENDED.corner_size,
                 switch_delay_ms: SwitchOptions::RECOMMENDED.delay.as_millis() as u64,
                 discovery: true,
+                keys: KeySettings::default(),
             },
             client: ClientSettings { address: String::new(), name: hostname.to_owned(), dry_run: false },
             clipboard_files_mb: qross_net::clipfiles::DEFAULT_LIMIT / 1_000_000,
+            resume_role: true,
+            auto_update: true,
         }
     }
 
@@ -162,6 +175,7 @@ impl ServerSettings {
             || self.port != old.port
             || self.switch_options() != old.switch_options()
             || self.discovery != old.discovery
+            || self.keys != old.keys
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -263,6 +277,7 @@ impl ServerSettings {
         out += &format!("discovery = {}\n", self.discovery);
         out += &format!("\n[switching]\ncorner_size = {}\ndelay_ms = {}\n", self.corner_size, self.switch_delay_ms);
         out += &format!("\n[clipboard]\nmax_file_mb = {clipboard_files_mb}\n");
+        out += &self.keys.to_toml();
         for link in self.links() {
             out += &format!(
                 "\n[[links]]\nfrom = {}\nedge = \"{}\"\nto = {}\n",
@@ -285,7 +300,7 @@ fn edge_name(edge: Edge) -> &'static str {
 }
 
 /// TOML-Zeichenkette mit Escapes (Namen stammen aus Benutzereingaben).
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
         match c {
@@ -352,7 +367,16 @@ mod tests {
             discovery: bool,
             switching: Switching,
             clipboard: ClipboardSection,
+            keys: KeysSection,
             links: Vec<LinkConfig>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct KeysSection {
+            lock: String,
+            media: qross_core::keys::MediaKeys,
+            #[serde(default)]
+            remap: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
         }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -369,7 +393,17 @@ mod tests {
         s.corner_size = 12;
         s.switch_delay_ms = 150;
         s.discovery = false;
+        s.keys.lock = "Ctrl+Alt+KeyL".into();
+        s.keys.media = qross_core::keys::MediaKeys::Local;
+        s.keys.remap.insert(
+            "lap\"top".into(),
+            vec![crate::keys::KeyRule { from: "AltLeft".into(), to: "MetaLeft".into() }],
+        );
         let file: ServerFile = toml::from_str(&s.to_toml(250)).unwrap();
+        assert_eq!(file.keys.lock, "Ctrl+Alt+KeyL");
+        assert_eq!(file.keys.media, qross_core::keys::MediaKeys::Local);
+        let remap = qross_core::keys::parse_key_map(&file.keys.remap["lap\"top"]).unwrap();
+        assert_eq!(remap.len(), 1, "die CLI liest die Umbelegung");
         assert_eq!(file.clipboard.max_file_mb, 250);
         assert_eq!(file.name, "pc");
         assert!(!file.discovery);
@@ -418,6 +452,11 @@ mod tests {
         assert!(old.server.discovery);
         // … und die Standardgrenze für kopierte Dateien (1 GB)
         assert_eq!(old.clipboard_files_mb, 1000);
+        // … und Fortsetzen sowie automatische Updates sind an
+        assert!(old.resume_role && old.auto_update);
+        // … und die Tasten-Standards des Servers (Rollen, Medientasten an den aktiven Rechner)
+        assert_eq!(old.server.keys, crate::keys::KeySettings::default());
+        assert_eq!(old.server.keys.config().unwrap(), qross_core::keys::KeyConfig::default());
         assert_eq!(old.clipboard_file_limit(), qross_net::clipfiles::DEFAULT_LIMIT);
     }
 }

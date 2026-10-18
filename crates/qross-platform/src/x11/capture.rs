@@ -1,31 +1,36 @@
 //! Eingabe-Erfassung unter X11.
 //!
-//! Lokaler Modus: Zeigerposition alle 4 ms abfragen und Kanten melden (keine Grabs, das System
-//! verhält sich völlig normal). Remote-Modus: Zeiger und Tastatur auf dem Root-Fenster grabben,
-//! Cursor durch einen leeren ersetzen und nach jeder Bewegung in die Mitte zurücksetzen.
+//! Lokaler Modus: Zeigerposition alle 4 ms abfragen und Kanten melden. Gegriffen wird nur die
+//! Fang-Taste (passiver Tastengriff), sonst verhält sich das System völlig normal.
+//! Remote-Modus: Zeiger und Tastatur auf dem Root-Fenster grabben, Cursor durch einen leeren
+//! ersetzen und nach jeder Bewegung in die Mitte zurücksetzen.
+//!
+//! Medientasten gehen unter X11 immer an den aktiven Rechner: Während des Tastatur-Grabs lässt
+//! sich eine einzelne Taste nicht lokal durchreichen.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions, Mods};
 use qross_core::CaptureEvent;
 use qross_proto::{Edge, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConnectionExt as _, Cursor, EventMask, GrabMode, GrabStatus, Window};
+use x11rb::protocol::xkb::{self, ConnectionExt as _};
+use x11rb::protocol::xproto::{ConnectionExt as _, Cursor, EventMask, GrabMode, GrabStatus, ModMask, Window};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::{CURRENT_TIME, NONE};
 
-use crate::keymap_linux::{hid_from_evdev, X11_OFFSET};
+use crate::keymap_linux::{evdev_from_hid, hid_from_evdev, X11_OFFSET};
 use crate::Capture;
 
-/// evdev-Codes für Notausgang und Rollen-Taste
+/// evdev-Codes für den Notausgang
 const KEY_ESC: u16 = 1;
-const KEY_SCROLLLOCK: u16 = 70;
 const CTRL: [u16; 2] = [29, 97];
 const ALT: [u16; 2] = [56, 100];
 const SHIFT: [u16; 2] = [42, 54];
@@ -39,6 +44,26 @@ struct Shared {
     blank: Cursor,
     remote: AtomicBool,
     events: UnboundedSender<CaptureEvent>,
+    keys: Mutex<KeyOptions>,
+    /// Passiv gegriffene Fang-Taste (X11-Keycode, Zusatztasten)
+    grabbed: Mutex<Option<(u8, ModMask)>>,
+    /// Dateien vom Client warten: das nächste Loslassen meldet `LocalDrop`
+    await_drop: AtomicBool,
+}
+
+/// Feststell- und Num-Taste sollen die Fang-Taste nicht verhindern.
+fn lock_variants() -> [ModMask; 4] {
+    [ModMask::from(0u16), ModMask::LOCK, ModMask::M2, ModMask::LOCK | ModMask::M2]
+}
+
+fn mod_mask(mods: Mods) -> ModMask {
+    let mut mask = ModMask::from(0u16);
+    for (on, bit) in [(mods.ctrl, ModMask::CONTROL), (mods.shift, ModMask::SHIFT), (mods.alt, ModMask::M1), (mods.meta, ModMask::M4)] {
+        if on {
+            mask |= bit;
+        }
+    }
+    mask
 }
 
 impl Shared {
@@ -61,7 +86,25 @@ impl Shared {
 pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> {
     let (conn, root) = super::connect()?;
     let blank = blank_cursor(&conn, root).context("leeren Cursor anlegen")?;
-    let shared = Arc::new(Shared { conn, root, blank, remote: AtomicBool::new(false), events });
+    // Gehaltene Tasten wiederholen nur KeyPress, ohne künstliche KeyRelease dazwischen
+    let xkb_ok = conn.xkb_use_extension(1, 0).ok().and_then(|c| c.reply().ok()).is_some_and(|r| r.supported);
+    if xkb_ok {
+        let flag = xkb::PerClientFlag::DETECTABLE_AUTO_REPEAT;
+        let device = xkb::DeviceSpec::from(xkb::ID::USE_CORE_KBD);
+        let none = xkb::BoolCtrl::from(0u32);
+        let _ = conn.xkb_per_client_flags(device, flag, flag, none, none, none);
+    }
+    let shared = Arc::new(Shared {
+        conn,
+        root,
+        blank,
+        remote: AtomicBool::new(false),
+        events,
+        keys: Mutex::new(KeyOptions::default()),
+        grabbed: Mutex::new(None),
+        await_drop: AtomicBool::new(false),
+    });
+    X11Capture(shared.clone()).set_key_options(KeyOptions::default());
     let worker = shared.clone();
     thread::Builder::new().name("qross-x11-capture".into()).spawn(move || {
         if let Err(e) = run(&worker) {
@@ -84,6 +127,29 @@ fn blank_cursor(conn: &RustConnection, root: Window) -> Result<Cursor> {
 struct X11Capture(Arc<Shared>);
 
 impl Capture for X11Capture {
+    fn set_key_options(&self, options: KeyOptions) {
+        let s = &self.0;
+        *s.keys.lock().unwrap_or_else(|e| e.into_inner()) = options;
+        let mut grabbed = s.grabbed.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((code, mods)) = grabbed.take() {
+            for extra in lock_variants() {
+                let _ = s.conn.ungrab_key(code, s.root, mods | extra);
+            }
+        }
+        let target = options.lock.and_then(|h| Some((evdev_from_hid(h.key)? + X11_OFFSET, mod_mask(h.mods))));
+        if let Some((code, mods)) = target.and_then(|(code, mods)| Some((u8::try_from(code).ok()?, mods))) {
+            for extra in lock_variants() {
+                let _ = s.conn.grab_key(true, s.root, mods | extra, code, GrabMode::ASYNC, GrabMode::ASYNC);
+            }
+            *grabbed = Some((code, mods));
+        }
+        let _ = s.conn.flush();
+    }
+
+    fn await_local_drop(&self) {
+        self.0.await_drop.store(true, Ordering::Release);
+    }
+
     fn capture_remote(&self) {
         let s = &self.0;
         let mask = EventMask::POINTER_MOTION | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE;
@@ -130,21 +196,47 @@ fn run(s: &Shared) -> Result<()> {
     let mut pressed: HashSet<u16> = HashSet::new();
     let mut size = super::root_size(&s.conn, s.root)?;
     let mut size_checked = Instant::now();
+    let mut hotkey = HotkeyTracker::new();
+    let mut was_remote = false;
+    // Lokal gedrückte Fang-Taste (gegen Auto-Repeat)
+    let mut local_hotkey_held = false;
 
     loop {
-        if !s.remote.load(Ordering::Acquire) {
+        let remote = s.remote.load(Ordering::Acquire);
+        if remote && !was_remote {
+            // Was lokal an Zusatztasten passierte, hat die Erfassung nicht gesehen.
+            hotkey = HotkeyTracker::new();
+        }
+        was_remote = remote;
+        if !remote {
             if size_checked.elapsed() > Duration::from_secs(1) {
                 size = super::root_size(&s.conn, s.root)?;
                 size_checked = Instant::now();
             }
             let pointer = s.conn.query_pointer(s.root)?.reply()?;
             let (x, y) = (i32::from(pointer.root_x), i32::from(pointer.root_y));
+            let buttons = u16::from(pointer.mask) & ANY_BUTTON_MASK != 0;
+            if !buttons && s.await_drop.swap(false, Ordering::AcqRel) {
+                // Dateien vom Client: hier losgelassen = hier ablegen
+                let _ = s.events.send(CaptureEvent::LocalDrop { x, y });
+            }
             if let Some(edge) = edge_at(x, y, size) {
-                let buttons_down = u16::from(pointer.mask) & ANY_BUTTON_MASK != 0;
+                let buttons_down = buttons;
                 let _ = s.events.send(CaptureEvent::EdgeHit { edge, x, y, buttons_down });
             }
-            // Ereignisse aus der letzten Remote-Phase verwerfen
-            while s.conn.poll_for_event()?.is_some() {}
+            // Lokal kommt nur die passiv gegriffene Fang-Taste an; Reste der Remote-Phase verwerfen.
+            let grabbed = s.grabbed.lock().unwrap_or_else(|e| e.into_inner()).map(|(code, _)| code);
+            while let Some(event) = s.conn.poll_for_event()? {
+                match event {
+                    Event::KeyPress(e) if Some(e.detail) == grabbed => {
+                        if !std::mem::replace(&mut local_hotkey_held, true) {
+                            let _ = s.events.send(CaptureEvent::ToggleLock);
+                        }
+                    }
+                    Event::KeyRelease(e) if Some(e.detail) == grabbed => local_hotkey_held = false,
+                    _ => {}
+                }
+            }
             thread::sleep(POLL);
             continue;
         }
@@ -168,8 +260,9 @@ fn run(s: &Shared) -> Result<()> {
             Event::KeyPress(e) | Event::KeyRelease(e) if e.detail as u16 >= X11_OFFSET => {
                 let down = matches!(event, Event::KeyPress(_));
                 let code = e.detail as u16 - X11_OFFSET;
-                let repeat = down && !pressed.insert(code);
-                if !down {
+                if down {
+                    pressed.insert(code);
+                } else {
                     pressed.remove(&code);
                 }
                 let held = |keys: [u16; 2]| keys.iter().any(|k| pressed.contains(k));
@@ -180,10 +273,15 @@ fn run(s: &Shared) -> Result<()> {
                     s.warp(cx, cy);
                     pressed.clear();
                     Some(CaptureEvent::PanicReturn)
-                } else if code == KEY_SCROLLLOCK {
-                    (down && !repeat).then_some(CaptureEvent::ToggleLock)
+                } else if let Some(key) = hid_from_evdev(code) {
+                    let options = *s.keys.lock().unwrap_or_else(|e| e.into_inner());
+                    match hotkey.on_key(key, down, options.lock.as_ref()) {
+                        HotkeyEvent::Triggered => Some(CaptureEvent::ToggleLock),
+                        HotkeyEvent::Consumed => None,
+                        HotkeyEvent::None => Some(CaptureEvent::Key { key, down }),
+                    }
                 } else {
-                    hid_from_evdev(code).map(|key| CaptureEvent::Key { key, down })
+                    None
                 }
             }
             _ => None,

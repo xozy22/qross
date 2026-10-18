@@ -12,8 +12,8 @@ use qross_core::client::{ClientState, Transition};
 use qross_core::Inject;
 use qross_platform::{Clipboard, Injector};
 use qross_proto::{
-    decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, FileEntry,
-    Input, MouseMove, Platform, Rect, ScreenInfo, StreamKind, DEFAULT_PORT, PROTOCOL_VERSION,
+    decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
+    FileEntry, Input, MouseMove, Platform, Rect, ScreenInfo, StreamKind, DEFAULT_PORT, PROTOCOL_VERSION,
 };
 use quinn::{Connection, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot};
@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Incoming, Notify, Ready};
 use crate::files::{self, FileOutcome, Receiver, Staging};
-use crate::streams::read_kind;
+use crate::streams::{read_kind, send_drag_message};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
 
@@ -70,6 +70,8 @@ enum FromServer {
     File(FileOutcome),
     ClipboardFiles { transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     ClipboardFile(FileOutcome),
+    /// Server fragt: Werden hier gerade Dateien gezogen? (Drag & Drop zum Server)
+    DragQuery { probe: u32 },
 }
 
 /// Zwischenablage dieses Clients: Zugriff, ankommende kopierte Dateien, Meldungen dazu.
@@ -84,6 +86,8 @@ struct ClipboardSide {
 enum ToInjector {
     Inject(Inject),
     DropFolder { x: i32, y: i32, reply: oneshot::Sender<Option<PathBuf>> },
+    /// Gezogene Dateien übernehmen (der lokale Drag wird dabei abgebrochen)
+    TakeDragged { x: i32, y: i32, reply: oneshot::Sender<Vec<PathBuf>> },
 }
 
 fn inject_all(inject: &Sender<ToInjector>, events: impl IntoIterator<Item = Inject>) {
@@ -185,6 +189,9 @@ async fn run_inner(
                 ToInjector::DropFolder { x, y, reply } => {
                     let _ = reply.send(injector.drop_folder(x, y));
                 }
+                ToInjector::TakeDragged { x, y, reply } => {
+                    let _ = reply.send(injector.take_dragged_files(x, y));
+                }
             }
         }
     })?;
@@ -254,8 +261,7 @@ async fn session(
         other => bail!("unerwartete Antwort vom Server: {other:?}"),
     };
 
-    let staging_base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("Qross").join("incoming");
-    let mut receiver = Receiver::new(Staging::create(&staging_base)?);
+    let mut receiver = Receiver::new(Staging::create(&files::drag_staging_base())?);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(receive_datagrams(conn.clone(), tx.clone()));
@@ -306,7 +312,7 @@ async fn session(
                         if let Some((transfer, x, y)) = dropped {
                             let (reply, folder) = oneshot::channel();
                             let _ = inject.send(ToInjector::DropFolder { x, y, reply });
-                            let target = folder.await.ok().flatten().unwrap_or_else(fallback_drop_folder);
+                            let target = folder.await.ok().flatten().unwrap_or_else(files::fallback_drop_folder);
                             receiver.on_drop(transfer, target);
                         }
                         match transition {
@@ -359,6 +365,11 @@ async fn session(
                                 (clip.notify)(FilesNotice::Failed { peer: server_name.clone(), reason: format!("{e:#}") });
                             }
                         }
+                    }
+                    FromServer::DragQuery { probe } => {
+                        let (reply, dragged) = oneshot::channel();
+                        let _ = inject.send(ToInjector::TakeDragged { x: last_pos.0, y: last_pos.1, reply });
+                        tokio::spawn(offer_dragged_files(conn.clone(), probe, dragged));
                     }
                     FromServer::ClipboardFile(outcome) => match clip.incoming.on_file(outcome) {
                         Ok(Some(ready)) => deliver_files(ready, clip, &clip_synced),
@@ -469,9 +480,34 @@ async fn receive_datagrams(conn: Connection, tx: mpsc::UnboundedSender<FromServe
     }
 }
 
-/// Ablage, wenn unter dem Cursor kein Ordner erkennbar ist.
-fn fallback_drop_folder() -> PathBuf {
-    dirs::download_dir().or_else(dirs::home_dir).unwrap_or_else(std::env::temp_dir).join("Qross")
+/// Antwort auf die Drag-Nachfrage des Servers: Werden hier Dateien gezogen, gehen sie zum Server.
+async fn offer_dragged_files(conn: Connection, probe: u32, dragged: oneshot::Receiver<Vec<PathBuf>>) {
+    let paths = dragged.await.unwrap_or_default();
+    let entries = if paths.is_empty() {
+        Vec::new()
+    } else {
+        match tokio::task::spawn_blocking(move || files::collect(&paths)).await {
+            Ok(Ok(entries)) => entries,
+            Ok(Err(e)) => {
+                warn!("Gezogene Dateien nicht lesbar: {e:#}");
+                Vec::new()
+            }
+            Err(_) => Vec::new(),
+        }
+    };
+    let transfer = clipfiles::new_transfer_id();
+    let offer = DragMessage::Offer { probe, transfer, entries: entries.iter().map(|e| e.entry.clone()).collect() };
+    if let Err(e) = send_drag_message(&conn, &offer).await {
+        return warn!("Drag-Antwort an den Server nicht gesendet: {e:#}");
+    }
+    if entries.is_empty() {
+        return;
+    }
+    let total: u64 = entries.iter().map(|e| e.entry.size).sum();
+    info!("übertrage {} gezogene Einträge ({}) zum Server", entries.len(), files::human_size(total));
+    if let Err(e) = files::send_files(conn, StreamKind::File, transfer, entries).await {
+        warn!("Übertragung zum Server abgebrochen: {e:#}");
+    }
 }
 
 async fn receive_streams(
@@ -518,6 +554,11 @@ async fn read_server_stream(
         StreamKind::ClipboardFile => {
             let outcome = files::receive_file(stream, clipboard).await?;
             let _ = tx.send(FromServer::ClipboardFile(outcome));
+        }
+        StreamKind::Drag => {
+            if let Some(DragMessage::Query { probe }) = read_frame(stream).await? {
+                let _ = tx.send(FromServer::DragQuery { probe });
+            }
         }
     }
     Ok(())

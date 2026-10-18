@@ -34,6 +34,8 @@ const TABLE: &[(u16, u16)] = &[
     (0x68, 183), (0x69, 184), (0x6A, 185), (0x6B, 186), (0x6C, 187), (0x6D, 188),
     (0x6E, 189), (0x6F, 190), (0x70, 191), (0x71, 192), (0x72, 193), (0x73, 194),
     (0x7F, 113), (0x80, 115), (0x81, 114), // Stumm Lauter Leiser
+    // Medientasten (HID-Consumer-Page): Weiter, Zurück, Stopp, Wiedergabe/Pause
+    (0xC0B5, 163), (0xC0B6, 165), (0xC0B7, 166), (0xC0CD, 164),
     (0x87, 89), (0x88, 93), (0x89, 124), (0x8A, 92), (0x8B, 94), // japanische Tasten
     // Modifier
     (0xE0, 29), (0xE1, 42), (0xE2, 56), (0xE3, 125), (0xE4, 97), (0xE5, 54), (0xE6, 100), (0xE7, 126),
@@ -72,8 +74,9 @@ mod tests {
     #[test]
     fn covers_the_same_keys_as_windows() {
         // Jede Taste, die Windows erfassen kann, muss Linux einspeisen können (und umgekehrt).
-        for hid in 0..=0xFFu16 {
-            let key = KeyCode(hid);
+        let media = [KeyCode::MEDIA_NEXT, KeyCode::MEDIA_PREVIOUS, KeyCode::MEDIA_STOP, KeyCode::MEDIA_PLAY_PAUSE];
+        for key in (0..=0xFFu16).map(KeyCode).chain(media) {
+            let hid = key.0;
             assert_eq!(
                 crate::keymap_windows::windows_from_hid(key).is_some(),
                 evdev_from_hid(key).is_some(),

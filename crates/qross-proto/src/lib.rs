@@ -193,6 +193,22 @@ pub enum StreamKind {
     /// Eine Datei aus der Zwischenablage (`Clipboard::Files`), aufgebaut wie `File`.
     /// Ältere Gegenstellen kennen den Typ nicht und brechen nur diesen Stream ab.
     ClipboardFile = 4,
+    /// Drag & Drop vom Client zum Server: eine `DragMessage` (seit Qross 0.5)
+    Drag = 5,
+}
+
+/// Nachricht auf einem Stream vom Typ `StreamKind::Drag`: Drag & Drop vom Client zum Server.
+///
+/// Steht der Cursor auf einem Client mit gedrückter Taste an der Kante zum Server, fragt der
+/// Server nach. Zieht der Client gerade Dateien, bricht er seinen Drag ab, bietet sie an und
+/// schickt sie auf Streams vom Typ `File`. Ein älterer Client antwortet nie; der Server wechselt
+/// dann mit gedrückter Taste nicht.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum DragMessage {
+    /// Server → Client: Werden gerade Dateien gezogen?
+    Query { probe: u32 },
+    /// Client → Server: Antwort. Leere `entries` = kein Datei-Drag.
+    Offer { probe: u32, transfer: u64, entries: Vec<FileEntry> },
 }
 
 impl StreamKind {
@@ -202,6 +218,7 @@ impl StreamKind {
             2 => Some(Self::Clipboard),
             3 => Some(Self::File),
             4 => Some(Self::ClipboardFile),
+            5 => Some(Self::Drag),
             _ => None,
         }
     }
@@ -240,5 +257,18 @@ mod tests {
         assert!(postcard::from_bytes::<ClipboardV02>(&bytes).is_err(), "ältere Version muss sauber ablehnen");
         assert_eq!(postcard::from_bytes::<Clipboard>(&bytes).unwrap(), files);
         assert_eq!(StreamKind::from_u8(StreamKind::ClipboardFile as u8), Some(StreamKind::ClipboardFile));
+    }
+
+    #[test]
+    fn drag_messages_roundtrip() {
+        for msg in [
+            DragMessage::Query { probe: 3 },
+            DragMessage::Offer { probe: 3, transfer: 9, entries: vec![FileEntry { path: "a".into(), size: 1, is_dir: false }] },
+        ] {
+            let bytes = postcard::to_stdvec(&msg).unwrap();
+            assert_eq!(postcard::from_bytes::<DragMessage>(&bytes).unwrap(), msg);
+        }
+        assert_eq!(StreamKind::from_u8(5), Some(StreamKind::Drag));
+        assert_eq!(StreamKind::from_u8(6), None);
     }
 }

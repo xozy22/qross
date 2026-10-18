@@ -4,3 +4,5 @@
 /qross.toml
 # Nur lokal: nicht zur Veröffentlichung bestimmte Unterlagen
 /local/
+/.claude/worktrees/
+/.claude/.cargo/

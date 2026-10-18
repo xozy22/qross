@@ -4,9 +4,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use qross_proto::{Edge, Input, MouseMove, Rect};
+use qross_proto::{Edge, Input, MouseButton, MouseMove, Rect};
 
 use crate::input::CaptureEvent;
+use crate::keys::KeyMap;
 use crate::layout::Layout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,8 @@ pub enum ServerEvent {
     ClientScreenChanged { name: String, screen: Rect },
     ClientDisconnected { name: String },
     LocalScreenChanged(Rect),
+    /// Antwort des Clients auf `Action::QueryRemoteDrag`: Werden dort Dateien gezogen?
+    RemoteDragOffer { client: String, probe: u32, transfer: u64, has_files: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +40,15 @@ pub enum Action {
     CancelLocalDrag,
     /// `DragStart` an den Client senden und die Dateien übertragen
     StartFileDrag { to: String, transfer: u64, files: Vec<PathBuf> },
+    /// Der Cursor steht auf dem Client mit gedrückter Taste an der Kante zum Server:
+    /// nachfragen, ob dort Dateien gezogen werden (Antwort: `ServerEvent::RemoteDragOffer`)
+    QueryRemoteDrag { to: String, probe: u32 },
+    /// Dateien vom Client kommen; das nächste Loslassen hier legt sie ab (`CaptureEvent::LocalDrop`)
+    AwaitLocalDrop { from: String, transfer: u64 },
+    /// Losgelassen an (x, y): die Dateien dieser Übertragung dort ablegen
+    DropIncoming { transfer: u64, x: i32, y: i32 },
+    /// Nicht abgelegt (Cursor ging zurück, Client getrennt): Übertragung verwerfen
+    CancelIncoming { transfer: u64 },
 }
 
 /// Wann der Cursor den Bildschirm wechseln darf.
@@ -89,6 +101,17 @@ pub struct ServerState {
     options: SwitchOptions,
     /// Gegen welche Kante seit wann (erste, letzte Berührung) gedrückt wird
     push: Option<(Edge, Instant, Instant)>,
+    /// Umbelegte Tasten je Rechner
+    key_maps: HashMap<String, KeyMap>,
+    /// Auf dem aktiven Client gedrückte Maustasten (Bit je `MouseButton`)
+    remote_buttons: u8,
+    /// Nachfrage beim Client läuft: (Nummer, Kante, Position)
+    remote_probe: Option<(u32, Edge, i32, i32)>,
+    next_probe: u32,
+    /// Ohne Dateien erst wieder nachfragen, wenn alle Tasten losgelassen wurden
+    remote_probe_failed: bool,
+    /// Dateien vom Client warten auf das Ablegen hier
+    incoming: Option<u64>,
 }
 
 impl ServerState {
@@ -107,7 +130,18 @@ impl ServerState {
             next_transfer: 1,
             options: SwitchOptions::IMMEDIATE,
             push: None,
+            key_maps: HashMap::new(),
+            remote_buttons: 0,
+            remote_probe: None,
+            next_probe: 1,
+            remote_probe_failed: false,
+            incoming: None,
         }
+    }
+
+    /// Tasten je Rechner umbelegen (Name des Rechners → gedrückte Taste → gesendete Taste).
+    pub fn set_key_maps(&mut self, maps: HashMap<String, KeyMap>) {
+        self.key_maps = maps;
     }
 
     pub fn set_switch_options(&mut self, options: SwitchOptions) {
@@ -155,8 +189,31 @@ impl ServerState {
                 }
             }
             ServerEvent::LocalScreenChanged(rect) => self.local = rect,
+            ServerEvent::RemoteDragOffer { client, probe, transfer, has_files } => {
+                self.on_remote_offer(client, probe, transfer, has_files, &mut out)
+            }
         }
         out
+    }
+
+    fn on_remote_offer(&mut self, client: String, probe: u32, transfer: u64, has_files: bool, out: &mut Vec<Action>) {
+        let Some((pending, edge, x, y)) = self.remote_probe else { return };
+        let current = matches!(&self.active, Active::Remote { name, .. } if *name == client);
+        if pending != probe || !current {
+            return;
+        }
+        self.remote_probe = None;
+        if !has_files {
+            // Z. B. ein Fenster oder markierter Text: mit gedrückter Taste nicht wechseln
+            self.remote_probe_failed = true;
+            return;
+        }
+        let Some(&rect) = self.clients.get(&client) else { return };
+        // Der Client hat seinen Drag schon abgebrochen; `Leave` lässt nur noch die Taste los.
+        out.push(Action::Send { to: client.clone(), input: Input::Leave });
+        self.go_local(map_across(rect, edge, x, y, self.local), out);
+        self.incoming = Some(transfer);
+        out.push(Action::AwaitLocalDrop { from: client, transfer });
     }
 
     /// Darf über `edge` an Position (x, y) von `rect` gewechselt werden?
@@ -231,6 +288,17 @@ impl ServerState {
             CaptureEvent::MouseDelta { dx, dy } => self.on_delta(dx, dy, now, out),
             CaptureEvent::Button { button, down } => {
                 if let Active::Remote { name, x, y } = &self.active {
+                    if self.drag.is_none() {
+                        let bit = 1 << button_bit(button);
+                        if down {
+                            self.remote_buttons |= bit;
+                        } else {
+                            self.remote_buttons &= !bit;
+                        }
+                        if self.remote_buttons == 0 {
+                            self.remote_probe_failed = false;
+                        }
+                    }
                     let input = match self.drag {
                         // Die Taste, mit der gezogen wird, wurde nie an den Client geschickt:
                         // Loslassen bedeutet hier „ablegen“.
@@ -245,7 +313,12 @@ impl ServerState {
                 }
             }
             CaptureEvent::Wheel { dx, dy } => self.send_remote(Input::Wheel { dx, dy }, out),
-            CaptureEvent::Key { key, down } => self.send_remote(Input::Key { key, down }, out),
+            CaptureEvent::Key { key, down } => {
+                if let Active::Remote { name, .. } = &self.active {
+                    let key = self.key_maps.get(name).and_then(|map| map.get(&key)).copied().unwrap_or(key);
+                    out.push(Action::Send { to: name.clone(), input: Input::Key { key, down } });
+                }
+            }
             CaptureEvent::PanicReturn => {
                 self.locked = false;
                 if let Active::Remote { name, .. } = &self.active {
@@ -254,6 +327,11 @@ impl ServerState {
                 }
             }
             CaptureEvent::ToggleLock => self.locked = !self.locked,
+            CaptureEvent::LocalDrop { x, y } => {
+                if let (Some(transfer), Active::Local) = (self.incoming.take(), &self.active) {
+                    out.push(Action::DropIncoming { transfer, x, y });
+                }
+            }
         }
     }
 
@@ -293,12 +371,19 @@ impl ServerState {
         });
         if let Some(edge) = crossing {
             if let Some(target) = self.layout.neighbor(&name, edge).map(str::to_owned) {
-                if target == self.me {
+                if self.remote_buttons != 0 {
+                    // Mit gedrückter Taste nur wechseln, wenn der Client Dateien zum Server zieht.
+                    if target == self.me && self.remote_probe.is_none() && !self.remote_probe_failed {
+                        let probe = self.next_probe;
+                        self.next_probe = self.next_probe.wrapping_add(1);
+                        self.remote_probe = Some((probe, edge, cx, cy));
+                        out.push(Action::QueryRemoteDrag { to: name.clone(), probe });
+                    }
+                } else if target == self.me {
                     out.push(Action::Send { to: name, input: Input::Leave });
                     self.go_local(map_across(rect, edge, cx, cy, self.local), out);
                     return;
-                }
-                if let Some(&target_rect) = self.clients.get(&target) {
+                } else if let Some(&target_rect) = self.clients.get(&target) {
                     let (tx, ty) = map_across(rect, edge, cx, cy, target_rect);
                     self.enter(target, tx, ty, out);
                     return;
@@ -317,6 +402,7 @@ impl ServerState {
     fn enter(&mut self, target: String, x: i32, y: i32, out: &mut Vec<Action>) {
         // Ein Drag endet, sobald er den Client ohne Ablegen verlässt (der Client verwirft ihn).
         self.drag = None;
+        self.reset_remote_drag(out);
         match &self.active {
             Active::Local => out.push(Action::CaptureRemote),
             Active::Remote { name, .. } => out.push(Action::Send { to: name.clone(), input: Input::Leave }),
@@ -330,7 +416,29 @@ impl ServerState {
     fn go_local(&mut self, (x, y): (i32, i32), out: &mut Vec<Action>) {
         self.active = Active::Local;
         self.drag = None;
+        self.reset_remote_drag(out);
         out.push(Action::ReleaseCapture { x, y });
+    }
+
+    /// Neuer Bildschirm: Tastenzustand und Nachfragen des alten Clients gelten nicht mehr;
+    /// noch nicht abgelegte Dateien vom Client werden verworfen.
+    fn reset_remote_drag(&mut self, out: &mut Vec<Action>) {
+        self.remote_buttons = 0;
+        self.remote_probe = None;
+        self.remote_probe_failed = false;
+        if let Some(transfer) = self.incoming.take() {
+            out.push(Action::CancelIncoming { transfer });
+        }
+    }
+}
+
+fn button_bit(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Right => 1,
+        MouseButton::Middle => 2,
+        MouseButton::Back => 3,
+        MouseButton::Forward => 4,
     }
 }
 
@@ -499,6 +607,81 @@ mod tests {
             ]
         );
         assert_eq!(s.active_screen(), "pc");
+    }
+
+    fn button(down: bool) -> ServerEvent {
+        ServerEvent::Capture(CaptureEvent::Button { button: MouseButton::Left, down })
+    }
+
+    fn offer(probe: u32, has_files: bool) -> ServerEvent {
+        ServerEvent::RemoteDragOffer { client: "laptop".into(), probe, transfer: 7, has_files }
+    }
+
+    /// Auf dem Laptop (rechts vom PC) mit gedrückter Taste nach links an die Kante zum PC
+    fn drag_on_laptop_to_pc(s: &mut ServerState) -> Vec<Action> {
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        s.handle(button(true));
+        s.handle(delta(-100, 0))
+    }
+
+    #[test]
+    fn files_dragged_on_the_client_come_back_to_the_server() {
+        let mut s = state();
+        let actions = drag_on_laptop_to_pc(&mut s);
+        assert_eq!(actions[0], Action::QueryRemoteDrag { to: "laptop".into(), probe: 1 }, "erst nachfragen");
+        assert!(!actions.iter().any(|a| matches!(a, Action::ReleaseCapture { .. })), "{actions:?}");
+        assert_eq!(s.active_screen(), "laptop");
+        assert!(s.handle(delta(-10, 0)).is_empty(), "keine zweite Nachfrage");
+
+        assert!(s.handle(offer(99, true)).is_empty(), "veraltete Antwort");
+        let actions = s.handle(offer(1, true));
+        assert_eq!(actions[0], Action::Send { to: "laptop".into(), input: Input::Leave });
+        assert!(matches!(actions[1], Action::ReleaseCapture { x: 1918, .. }), "{actions:?}");
+        assert_eq!(actions[2], Action::AwaitLocalDrop { from: "laptop".into(), transfer: 7 });
+        assert_eq!(s.active_screen(), "pc");
+        let drop = ServerEvent::Capture(CaptureEvent::LocalDrop { x: 500, y: 300 });
+        assert_eq!(s.handle(drop.clone()), vec![Action::DropIncoming { transfer: 7, x: 500, y: 300 }]);
+        assert!(s.handle(drop).is_empty(), "nur einmal ablegen");
+    }
+
+    #[test]
+    fn held_button_without_files_stays_on_the_client_until_released() {
+        let mut s = state();
+        drag_on_laptop_to_pc(&mut s);
+        assert!(s.handle(offer(1, false)).is_empty());
+        assert!(s.handle(delta(-10, 0)).is_empty(), "z. B. Fenster an den Rand geschoben: kein Wechsel, keine Nachfrage");
+        assert_eq!(s.active_screen(), "laptop");
+
+        s.handle(button(false));
+        let actions = s.handle(delta(-10, 0));
+        assert!(actions.contains(&Action::Send { to: "laptop".into(), input: Input::Leave }), "{actions:?}");
+        assert_eq!(s.active_screen(), "pc");
+    }
+
+    #[test]
+    fn going_back_before_dropping_discards_the_files() {
+        let mut s = state();
+        drag_on_laptop_to_pc(&mut s);
+        s.handle(offer(1, true));
+        let actions = s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert!(actions.contains(&Action::CancelIncoming { transfer: 7 }), "{actions:?}");
+        assert!(s.handle(ServerEvent::Capture(CaptureEvent::LocalDrop { x: 1, y: 1 })).is_empty());
+    }
+
+    #[test]
+    fn keys_are_remapped_per_client() {
+        let mut s = state();
+        let alt = KeyCode::LEFT_ALT;
+        let meta = KeyCode(0xE3);
+        s.set_key_maps(HashMap::from([("laptop".to_owned(), HashMap::from([(alt, meta)]))]));
+        s.handle(edge_hit(Edge::Right, 1919, 0));
+        let send = |s: &mut ServerState, key| s.handle(ServerEvent::Capture(CaptureEvent::Key { key, down: true }));
+        assert_eq!(send(&mut s, alt), vec![Action::Send { to: "laptop".into(), input: Input::Key { key: meta, down: true } }]);
+        assert_eq!(
+            send(&mut s, KeyCode::A),
+            vec![Action::Send { to: "laptop".into(), input: Input::Key { key: KeyCode::A, down: true } }],
+            "nicht umbelegte Tasten bleiben"
+        );
     }
 
     #[test]

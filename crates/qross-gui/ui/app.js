@@ -28,6 +28,15 @@ const state = {
   /** Version dieser App und die Neuigkeiten aus CHANGELOG.md (einmal geladen) */
   version: "",
   releases: null,
+  /** Vom System: Autostart, Update-Status, Datenordner (siehe get_prefs) */
+  prefs: null,
+  /** Benennbare Tasten [{ name, label }] und Beschriftung je Name */
+  keyNames: null,
+  keyLabels: new Map(),
+  /** Rechner, dessen Umbelegung gerade angezeigt wird */
+  remapPc: null,
+  /** Laufende Tastenaufnahme (Fang-Taste oder Auswahlfeld) */
+  recording: null,
   /** Ergebnis der LAN-Suche (null = noch nicht gesucht) */
   found: null,
   searching: false,
@@ -941,7 +950,36 @@ const SECTION_TONES = {
   removed: "wichtig",
 };
 
-let newsReturnFocus = null;
+/**
+ * Gemeinsames Verhalten der Dialoge „Neuigkeiten“ und „Einstellungen“: Esc und Klick auf den
+ * Hintergrund schließen, der Fokus geht beim Schließen an den Auslöser zurück.
+ */
+function setupSheet(dialog, closeButton) {
+  closeButton.addEventListener("click", () => dialog.close());
+  // Der Inhalt füllt den Dialog aus: Ein Klick direkt auf das Dialog-Element ist der Hintergrund.
+  dialog.addEventListener("click", (e) => {
+    if (e.target === dialog) dialog.close();
+  });
+  // Esc schließt auch dann, wenn der native Abbruch des Dialogs nicht greift.
+  dialog.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      dialog.close();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    dialog.returnFocus?.focus?.();
+    dialog.returnFocus = null;
+  });
+}
+
+function openSheet(dialog, focusTarget) {
+  if (dialog.open) return false;
+  dialog.returnFocus = document.activeElement;
+  dialog.showModal();
+  focusTarget.focus();
+  return true;
+}
 
 function compareVersions(a, b) {
   const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
@@ -1023,10 +1061,8 @@ async function openNews() {
       ? state.releases.map(releaseNode)
       : [el("li", { class: "news-empty", text: "Für diese Version sind keine Neuigkeiten hinterlegt." })]),
   );
-  newsReturnFocus = document.activeElement;
-  dialog.showModal();
+  openSheet(dialog, $("#newsClose"));
   list.scrollTop = 0;
-  $("#newsClose").focus();
   markNewsSeen();
 }
 
@@ -1062,25 +1098,430 @@ function checkForNews() {
 }
 
 function setupNews() {
-  const dialog = $("#news");
   $("#newsChip").addEventListener("click", openNews);
-  $("#newsClose").addEventListener("click", () => dialog.close());
-  // Klick auf den abgedunkelten Hintergrund schließt (der Inhalt füllt den Dialog vollständig aus).
-  dialog.addEventListener("click", (e) => {
-    if (e.target === dialog) dialog.close();
-  });
-  // Esc schließt auch dann, wenn der native Abbruch des Dialogs nicht greift.
-  dialog.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      dialog.close();
-    }
-  });
-  dialog.addEventListener("close", () => {
-    newsReturnFocus?.focus?.();
-    newsReturnFocus = null;
-  });
+  setupSheet($("#news"), $("#newsClose"));
   checkForNews();
+}
+
+// ------------------------------------------------------------------ Einstellungen
+
+async function refreshPrefs() {
+  try {
+    state.prefs = await invoke("get_prefs");
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+async function openSettings(section) {
+  const dialog = $("#settings");
+  if (!dialog.open) {
+    await loadKeyNames();
+    await refreshPrefs();
+    renderSettings();
+    openSheet(dialog, $("#settingsClose"));
+    $("#settingsContent").scrollTop = 0;
+    markSection("set-general");
+  }
+  if (section) showSection(section);
+}
+
+function showSection(id) {
+  $(`#${id}`).scrollIntoView({ block: "start" });
+  markSection(id);
+}
+
+function markSection(id) {
+  for (const b of $$(".settings-nav button")) b.setAttribute("aria-current", String(b.dataset.section === id));
+}
+
+/** Beim Scrollen den Bereich markieren, dessen Überschrift gerade oben steht. */
+function trackSection() {
+  const content = $("#settingsContent");
+  const top = content.getBoundingClientRect().top;
+  let current = null;
+  for (const section of $$(".settings-section")) {
+    if (section.getBoundingClientRect().top - top < 60) current = section.id;
+  }
+  // Ganz unten angekommen: den letzten Bereich markieren, auch wenn er kurz ist
+  if (content.scrollTop + content.clientHeight >= content.scrollHeight - 4) current = $$(".settings-section").at(-1).id;
+  markSection(current || "set-general");
+}
+
+function renderSettings() {
+  const prefs = state.prefs;
+  if (!prefs) return;
+  renderKeys();
+  const autostart = $("#prefAutostart");
+  autostart.checked = prefs.autostart;
+  autostart.disabled = !prefs.autostart_editable;
+  autostart.closest(".setting").classList.toggle("disabled", !prefs.autostart_editable);
+  $("#autostartHint").textContent = prefs.autostart_editable
+    ? "Qross startet bei der Anmeldung unsichtbar im Tray."
+    : "Im Entwicklungsbuild trägt sich Qross nicht in den Autostart ein.";
+  $("#prefResume").checked = state.settings.resume_role;
+  $("#prefAutoUpdate").checked = state.settings.auto_update;
+  $("#aboutVersion").textContent = state.version;
+  $("#aboutDataDir").textContent = prefs.data_dir;
+  renderClipLimit();
+  renderUpdateStatus();
+}
+
+/** „heute um 14:02“, „gestern um 9:15“, sonst „am 3. Oktober um 14:02“ */
+function whenText(ms) {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+  const today = new Date();
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return `heute um ${time}`;
+  if (d.toDateString() === yesterday.toDateString()) return `gestern um ${time}`;
+  return `am ${d.toLocaleDateString("de-DE", { day: "numeric", month: "long" })} um ${time}`;
+}
+
+function updateStatusText(u) {
+  const checked = u.checked_at ? `, geprüft ${whenText(u.checked_at)}` : "";
+  switch (u.phase) {
+    case "checking":
+      return ["Suche nach Updates …", ""];
+    case "current":
+      return [`Qross ${u.current} ist aktuell${checked}.`, ""];
+    case "downloading":
+      return [`Update ${u.version} wird geladen … ${u.progress ?? 0} %`, "new"];
+    case "waiting":
+      return [`Update ${u.version} ist geladen und wird installiert, sobald Maus und Tastatur gerade nicht gebraucht werden.`, "new"];
+    case "installing":
+      return [`Update ${u.version} wird installiert, Qross startet gleich neu.`, "new"];
+    case "available": {
+      const prompt = u.bundle === "msi" ? " Die Installation fragt nach Administratorrechten."
+        : u.bundle === "deb" || u.bundle === "rpm" ? " Die Installation fragt nach dem Passwort." : "";
+      return [`Update ${u.version} ist verfügbar.${prompt}`, "new"];
+    }
+    case "error":
+      return [`${u.message || "Prüfung fehlgeschlagen"}${u.checked_at ? `. Zuletzt erfolgreich geprüft ${whenText(u.checked_at)}.` : "."}`, "error"];
+    default:
+      return [u.automatic ? "Die erste Prüfung folgt kurz nach dem Start." : `Qross ${u.current}. Automatische Prüfung nur in installierten Versionen.`, ""];
+  }
+}
+
+function renderUpdateStatus() {
+  const u = state.prefs?.update;
+  if (!u) return;
+  const [text, tone] = updateStatusText(u);
+  const line = $("#updateStatus");
+  line.textContent = text;
+  line.dataset.tone = tone;
+  const busy = ["checking", "downloading", "installing"].includes(u.phase);
+  $("#updateCheck").disabled = busy;
+  $("#updateInstall").hidden = u.phase !== "available";
+}
+
+// ------------------------------------------------------------------ Tastatur
+
+const KEY_GROUPS = [
+  ["Buchstaben", /^Key[A-Z]$/],
+  ["Ziffern", /^Digit\d$/],
+  ["Zusatztasten", /^(Control|Shift|Alt|Meta)(Left|Right)$|^CapsLock$/],
+  ["Funktionstasten", /^F\d+$/],
+  ["Medien", /^(Audio|Media)/],
+  ["Navigation", /^(Arrow|Home|End|Page|Insert|Delete)/],
+  ["Ziffernblock", /^Num/],
+  ["Weitere", /./],
+];
+const DEFAULT_LOCK = "ScrollLock";
+const MODIFIER_CODES = new Set(["ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight"]);
+const PRESETS = {
+  "alt-meta": [["AltLeft", "MetaLeft"], ["MetaLeft", "AltLeft"], ["AltRight", "MetaRight"], ["MetaRight", "AltRight"]],
+  "caps-ctrl": [["CapsLock", "ControlLeft"]],
+};
+
+async function loadKeyNames() {
+  if (state.keyNames) return;
+  try {
+    state.keyNames = await invoke("key_names");
+  } catch {
+    state.keyNames = [];
+  }
+  state.keyLabels = new Map(state.keyNames.map((k) => [k.name, k.label]));
+  const groups = KEY_GROUPS.map(([label, re]) => ({ label, re, keys: [] }));
+  for (const key of state.keyNames) groups.find((g) => g.re.test(key.name)).keys.push(key);
+  for (const select of [$("#addFrom"), $("#addTo")]) {
+    select.replaceChildren(
+      ...groups
+        .filter((g) => g.keys.length)
+        .map((g) => el("optgroup", { label: g.label }, g.keys.map((k) => el("option", { value: k.name, text: k.label })))),
+    );
+  }
+  $("#addFrom").value = "CapsLock";
+  $("#addTo").value = "ControlLeft";
+}
+
+const keyLabel = (name) => state.keyLabels.get(name) || name;
+
+/** „Ctrl+Alt+KeyL“ → „Strg+Alt+L“ (Mac: Ctrl, Option, Cmd) */
+function hotkeyLabel(text) {
+  if (!text) return "Aus";
+  const mac = state.platform === "macos";
+  const names = mac ? { Ctrl: "Ctrl", Shift: "Umschalt", Alt: "Option", Meta: "Cmd" } : { Ctrl: "Strg", Shift: "Umschalt", Alt: "Alt", Meta: "Windows" };
+  const parts = text.split("+");
+  const key = parts.pop();
+  return [...parts.map((m) => names[m] || m), keyLabel(key)].join("+");
+}
+
+function machinesForRemap() {
+  const server = state.settings.server;
+  return server.screens.map((s) => s.name).filter((n) => n !== server.name).sort((a, b) => a.localeCompare(b, "de"));
+}
+
+function renderKeys() {
+  const keys = state.settings.server.keys;
+  const isClient = state.settings.role === "client";
+  $("#keysClientNote").hidden = !isClient;
+  $("#keysBlock").disabled = isClient;
+
+  const lock = $("#lockLabel");
+  if (state.recording?.kind !== "lock") {
+    lock.textContent = hotkeyLabel(keys.lock);
+    lock.className = keys.lock ? "keycap" : "keycap off";
+  }
+  $("#lockDefault").disabled = keys.lock === DEFAULT_LOCK;
+  $("#lockOff").disabled = !keys.lock;
+
+  const media = $("#mediaMode");
+  media.value = keys.media;
+  const platform = state.platform;
+  media.disabled = platform !== "windows";
+  $("#mediaHint").textContent =
+    platform === "macos" ? "Unter macOS bleiben Medientasten immer auf diesem Mac."
+    : platform === "linux" ? "Unter Linux (X11) gehen Medientasten immer an den Rechner mit dem Cursor."
+    : "Lautstärke, Wiedergabe/Pause, Weiter, Zurück, Stopp. „Immer auf diesem Rechner“ gibt es nur mit einem Windows-Server.";
+
+  const machines = machinesForRemap();
+  if (!machines.includes(state.remapPc)) state.remapPc = machines[0] ?? null;
+  const pc = $("#remapPc");
+  pc.replaceChildren(
+    ...(machines.length
+      ? machines.map((m) => el("option", { value: m, text: m }))
+      : [el("option", { value: "", text: "Kein anderer Rechner im Layout" })]),
+  );
+  pc.value = state.remapPc ?? "";
+  const hasPc = !!state.remapPc;
+  pc.disabled = !hasPc;
+  for (const b of $$(".remap-presets button, .remap-add button, .remap-add select")) b.disabled = !hasPc;
+
+  const rules = (hasPc && keys.remap[state.remapPc]) || [];
+  $("#remapList").replaceChildren(
+    ...(rules.length
+      ? rules.map((rule, i) =>
+          el(
+            "li",
+            {},
+            el("kbd", { class: "keycap", text: keyLabel(rule.from) }),
+            el("span", { class: "arrow", "aria-hidden": "true", text: "→" }),
+            el("kbd", { class: "keycap", text: keyLabel(rule.to) }),
+            el(
+              "button",
+              {
+                type: "button",
+                class: "icon-btn small remove-rule",
+                title: "Regel entfernen",
+                "aria-label": `Regel ${keyLabel(rule.from)} → ${keyLabel(rule.to)} entfernen`,
+                onclick: () => removeRule(i),
+              },
+              icon("x"),
+            ),
+          ),
+        )
+      : [el("li", { class: "empty", text: hasPc ? `Keine Umbelegung für „${state.remapPc}“.` : "Füge im Layout einen Rechner hinzu, um Tasten umzubelegen." })]),
+  );
+}
+
+function keysChanged() {
+  renderKeys();
+  settingsChanged();
+}
+
+function setRules(machine, change) {
+  const remap = state.settings.server.keys.remap;
+  const rules = change([...(remap[machine] || [])]);
+  if (rules.length) remap[machine] = rules;
+  else delete remap[machine];
+  keysChanged();
+}
+
+/** Regel setzen; eine vorhandene Regel für dieselbe gedrückte Taste wird ersetzt. */
+function addRules(pairs) {
+  if (!state.remapPc) return;
+  setRules(state.remapPc, (rules) => {
+    for (const [from, to] of pairs) {
+      const i = rules.findIndex((r) => r.from === from);
+      if (from === to) {
+        if (i >= 0) rules.splice(i, 1);
+      } else if (i >= 0) rules[i] = { from, to };
+      else rules.push({ from, to });
+    }
+    return rules;
+  });
+}
+
+function removeRule(index) {
+  setRules(state.remapPc, (rules) => {
+    rules.splice(index, 1);
+    return rules;
+  });
+}
+
+/** Tastenaufnahme: fängt Tasten ab, bevor Dialog (Esc) oder Formularfelder sie sehen. */
+function startRecording(recording) {
+  stopRecording();
+  state.recording = recording;
+  recording.pressed = new Set();
+  recording.keyDown = (e) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.code === "Escape") return stopRecording();
+    if (!state.keyLabels.has(e.code)) return;
+    recording.pressed.add(e.code);
+    if (recording.kind === "select") return finishRecording(e.code);
+    if (MODIFIER_CODES.has(e.code)) return; // Zusatztaste: bis zur eigentlichen Taste warten
+    const mods = [["Ctrl", e.ctrlKey], ["Shift", e.shiftKey], ["Alt", e.altKey], ["Meta", e.metaKey]].filter(([, on]) => on).map(([m]) => m);
+    finishRecording([...mods, e.code].join("+"));
+  };
+  recording.keyUp = (e) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    // Eine Zusatztaste zählt allein, wenn sie ohne andere Taste losgelassen wird.
+    if (recording.kind === "lock" && MODIFIER_CODES.has(e.code) && recording.pressed.size === 1 && recording.pressed.has(e.code)) {
+      return finishRecording(e.code);
+    }
+    recording.pressed.delete(e.code);
+  };
+  recording.cancel = (e) => e.preventDefault(); // Esc darf den Dialog während der Aufnahme nicht schließen
+  window.addEventListener("keydown", recording.keyDown, true);
+  window.addEventListener("keyup", recording.keyUp, true);
+  $("#settings").addEventListener("cancel", recording.cancel);
+  recording.start?.();
+}
+
+function finishRecording(value) {
+  const recording = state.recording;
+  stopRecording();
+  recording?.done(value);
+}
+
+function stopRecording() {
+  const recording = state.recording;
+  if (!recording) return;
+  state.recording = null;
+  window.removeEventListener("keydown", recording.keyDown, true);
+  window.removeEventListener("keyup", recording.keyUp, true);
+  $("#settings").removeEventListener("cancel", recording.cancel);
+  recording.end?.();
+}
+
+function recordLock() {
+  const label = $("#lockLabel");
+  const button = $("#lockChange");
+  startRecording({
+    kind: "lock",
+    start() {
+      label.textContent = "Taste drücken …";
+      label.className = "keycap recording";
+      button.textContent = "Abbrechen";
+      $("#lockRecordHint").hidden = false;
+    },
+    end() {
+      button.textContent = "Ändern";
+      $("#lockRecordHint").hidden = true;
+      renderKeys();
+    },
+    done(value) {
+      state.settings.server.keys.lock = value;
+      keysChanged();
+    },
+  });
+}
+
+function recordInto(selectId, button) {
+  const select = $(`#${selectId}`);
+  startRecording({
+    kind: "select",
+    start() {
+      button.textContent = "Taste drücken …";
+      button.classList.add("recording");
+    },
+    end() {
+      button.textContent = "Aufnehmen";
+      button.classList.remove("recording");
+    },
+    done(code) {
+      select.value = code;
+    },
+  });
+}
+
+function setupKeys() {
+  $("#lockChange").addEventListener("click", () => (state.recording?.kind === "lock" ? stopRecording() : recordLock()));
+  $("#lockDefault").addEventListener("click", () => {
+    state.settings.server.keys.lock = DEFAULT_LOCK;
+    keysChanged();
+  });
+  $("#lockOff").addEventListener("click", () => {
+    state.settings.server.keys.lock = "";
+    keysChanged();
+  });
+  $("#mediaMode").addEventListener("change", (e) => {
+    state.settings.server.keys.media = e.target.value;
+    keysChanged();
+  });
+  $("#remapPc").addEventListener("change", (e) => {
+    state.remapPc = e.target.value;
+    renderKeys();
+  });
+  for (const b of $$("[data-preset]")) b.addEventListener("click", () => addRules(PRESETS[b.dataset.preset]));
+  for (const b of $$("[data-record]")) {
+    b.addEventListener("click", () => (state.recording?.kind === "select" ? stopRecording() : recordInto(b.dataset.record, b)));
+  }
+  $("#addRule").addEventListener("click", () => {
+    const from = $("#addFrom").value;
+    const to = $("#addTo").value;
+    if (from === to) return toast("Gedrückte und gesendete Taste sind gleich.", "error");
+    addRules([[from, to]]);
+  });
+  $("#settings").addEventListener("close", stopRecording);
+}
+
+function setupSettings() {
+  setupKeys();
+  $("#settingsBtn").addEventListener("click", () => openSettings());
+  setupSheet($("#settings"), $("#settingsClose"));
+  for (const b of $$(".settings-nav button")) b.addEventListener("click", () => showSection(b.dataset.section));
+  $("#settingsContent").addEventListener("scroll", trackSection, { passive: true });
+
+  $("#prefAutostart").addEventListener("change", async (e) => {
+    try {
+      state.prefs.autostart = await invoke("set_autostart", { enabled: e.target.checked });
+    } catch (err) {
+      toast(String(err), "error");
+      await refreshPrefs();
+    }
+    renderSettings();
+  });
+  $("#prefResume").addEventListener("change", (e) => {
+    state.settings.resume_role = e.target.checked;
+    saveSoon.flush();
+  });
+  $("#prefAutoUpdate").addEventListener("change", (e) => {
+    state.settings.auto_update = e.target.checked;
+    saveSoon.flush();
+  });
+  $("#updateCheck").addEventListener("click", () => invoke("check_updates"));
+  $("#updateInstall").addEventListener("click", () => invoke("install_update"));
+  $("#openDataDir").addEventListener("click", () => invoke("open_data_dir").catch((e) => toast(String(e), "error")));
+  $("#aboutProject").addEventListener("click", () => invoke("open_project_page").catch((e) => toast(String(e), "error")));
+  $("#aboutNews").addEventListener("click", () => {
+    $("#settings").close();
+    openNews();
+  });
 }
 
 // ------------------------------------------------------------------ Gesamt
@@ -1121,6 +1562,18 @@ async function init() {
     if (!running()) startFlow();
   });
   await listen("show-news", () => openNews());
+  await listen("show-settings", () => openSettings());
+  await listen("update-status", (e) => {
+    if (state.prefs) state.prefs.update = e.payload;
+    renderUpdateStatus();
+  });
+  // Hinweise aus dem Backend (z. B. „Update verfügbar“); Fehler kommen nie als Hinweis.
+  await listen("app-notice", (e) => {
+    const { tone, text, action } = e.payload;
+    const button = action === "install-update" ? { label: "Jetzt aktualisieren", run: () => invoke("install_update") } : null;
+    toast(text, TOAST_KIND[tone] ?? "", button);
+  });
+  setupSettings();
   // Kopierte Dateien: dezente Hinweise im Fenster (Texte kommen fertig aus dem Backend)
   await listen("clipboard-files", (e) => {
     if (e.payload.text) toast(e.payload.text, TOAST_KIND[e.payload.tone] ?? "");

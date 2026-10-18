@@ -1,7 +1,7 @@
 //! Hilfen für unidirektionale Streams (erstes Byte = `StreamKind`).
 
 use anyhow::{Context, Result};
-use qross_proto::{write_frame, Clipboard, ClipboardData, StreamKind, MAX_FRAME_LEN};
+use qross_proto::{write_frame, Clipboard, ClipboardData, DragMessage, StreamKind, MAX_FRAME_LEN};
 use quinn::{Connection, RecvStream, SendStream};
 
 /// Eingaben vor allem anderen senden; Clipboard nur, wenn die Leitung frei ist.
@@ -33,6 +33,16 @@ pub async fn send_clipboard(conn: Connection, mut data: ClipboardData) {
     if let Err(e) = send_clipboard_message(&conn, &Clipboard::Data(data)).await {
         tracing::warn!("Clipboard konnte nicht gesendet werden: {e:#}");
     }
+}
+
+/// Eine Drag-Nachricht auf einem eigenen Stream – mit Vorrang, der Nutzer wartet an der Kante.
+pub async fn send_drag_message(conn: &Connection, message: &DragMessage) -> Result<()> {
+    let mut stream = conn.open_uni().await?;
+    stream.set_priority(INPUT_PRIORITY)?;
+    stream.write_all(&[StreamKind::Drag as u8]).await?;
+    write_frame(&mut stream, message).await?;
+    stream.finish()?;
+    Ok(())
 }
 
 /// Eine Nachricht auf einem eigenen Clipboard-Stream (niedrige Priorität).

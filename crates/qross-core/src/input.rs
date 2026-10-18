@@ -18,6 +18,8 @@ pub enum CaptureEvent {
     ToggleLock,
     /// Antwort auf `Action::ProbeDrag`: die gezogenen Dateien, leer wenn kein Datei-Drag lief.
     DragProbeResult { files: Vec<PathBuf> },
+    /// Nach `Action::AwaitLocalDrop`: Maustaste hier losgelassen – Dateien vom Client ablegen.
+    LocalDrop { x: i32, y: i32 },
 }
 
 /// Was der Client in sein Betriebssystem einspeisen soll.

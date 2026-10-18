@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use qross_core::keys::KeyConfig;
 use qross_core::server::{Action, ServerEvent, ServerState, SwitchOptions};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard};
 use qross_proto::{
-    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, FileEntry,
-    Input, Platform, Rect, StreamKind, PROTOCOL_VERSION,
+    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
+    FileEntry, Input, Platform, Rect, StreamKind, PROTOCOL_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming};
 use tokio::sync::{mpsc, oneshot};
@@ -20,9 +21,9 @@ use tracing::{debug, info, warn};
 
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Notify, Ready};
-use crate::files::{FileOutcome, Staging};
+use crate::files::{FileOutcome, Receiver, Staging};
 use crate::{discovery, files};
-use crate::streams::{open_input, read_kind};
+use crate::streams::{open_input, read_kind, send_drag_message};
 use crate::tls::{peer_fingerprint, server_config};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore};
 
@@ -51,6 +52,8 @@ pub struct Server {
     discovery: bool,
     /// Kopierte Dateien bis zu dieser Gesamtgröße mitgeben (0 = nie)
     clipboard_file_limit: u64,
+    /// Fang-Taste, Medientasten, Umbelegung je Rechner
+    keys: KeyConfig,
     fingerprint: Fingerprint,
 }
 
@@ -103,7 +106,17 @@ enum NetEvent {
     Clipboard { name: String, id: usize, data: ClipboardData },
     ClipboardFiles { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     ClipboardFile { name: String, id: usize, outcome: FileOutcome },
+    /// Antwort auf eine Drag-Nachfrage (Drag & Drop vom Client zum Server)
+    DragOffer { name: String, id: usize, probe: u32, transfer: u64, entries: Vec<FileEntry> },
+    DragFile { name: String, id: usize, outcome: FileOutcome },
     Closed { name: String, id: usize },
+}
+
+/// Zwischenordner für ankommende Dateien
+#[derive(Clone)]
+struct Stagings {
+    clipboard: Arc<Staging>,
+    drag: Arc<Staging>,
 }
 
 struct ClientHandle {
@@ -126,8 +139,16 @@ impl Server {
             switching: SwitchOptions::RECOMMENDED,
             discovery,
             clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+            keys: KeyConfig::default(),
             fingerprint: identity.fingerprint(),
         })
+    }
+
+    /// Fang-Taste, Medientasten und Umbelegung je Rechner (Standard: Rollen-Taste,
+    /// Medientasten an den aktiven Rechner, keine Umbelegung).
+    pub fn with_keys(mut self, keys: KeyConfig) -> Self {
+        self.keys = keys;
+        self
     }
 
     /// Kopierte Dateien bis zu dieser Gesamtgröße in Bytes mitgeben (0 = nie;
@@ -181,8 +202,11 @@ impl Server {
     pub async fn run(mut self, platform: ServerPlatform) -> Result<()> {
         // Kopierte Dateien aller Clients landen hier, bis sie in die Zwischenablage kommen.
         let mut incoming = clipfiles::Incoming::new(Staging::persistent(&clipfiles::default_store())?);
+        // Vom Client gezogene Dateien warten hier, bis sie auf dem Server abgelegt werden.
+        let mut drops = Receiver::new(Staging::create(&files::drag_staging_base())?);
+        let stagings = Stagings { clipboard: incoming.staging(), drag: drops.staging() };
         let (net_tx, mut net_rx) = mpsc::unbounded_channel();
-        tokio::spawn(accept_loop(self.endpoint.clone(), net_tx, incoming.staging()));
+        tokio::spawn(accept_loop(self.endpoint.clone(), net_tx, stagings));
 
         let ServerPlatform { capture, mut events, clipboard, screen } = platform;
         let clipboard = ClipboardHub::spawn(clipboard);
@@ -197,6 +221,8 @@ impl Server {
         let mut local_screen = screen();
         let mut state = ServerState::new(self.config.name.clone(), self.config.layout.clone(), local_screen);
         state.set_switch_options(self.switching);
+        state.set_key_maps(self.keys.remap.clone());
+        capture.set_key_options(self.keys.options);
         let _discovery = self.discovery.then(|| {
             let port = self.local_addr().map(|a| a.port()).unwrap_or_default();
             AbortOnDrop(tokio::spawn(discovery::respond(self.config.name.clone(), port, self.fingerprint.to_string())))
@@ -303,6 +329,17 @@ impl Server {
                         }
                         Vec::new()
                     }
+                    NetEvent::DragOffer { name, id, probe, transfer, entries } if is_current(&clients, &name, id) => {
+                        let has_files = !entries.is_empty();
+                        if has_files {
+                            drops.on_drag_start(transfer, entries);
+                        }
+                        state.handle(ServerEvent::RemoteDragOffer { client: name, probe, transfer, has_files })
+                    }
+                    NetEvent::DragFile { name, id, outcome } if is_current(&clients, &name, id) => {
+                        drops.on_file(outcome);
+                        Vec::new()
+                    }
                     NetEvent::Closed { name, id } if is_current(&clients, &name, id) => {
                         clients.remove(&name);
                         info!("Client „{name}“ getrennt");
@@ -325,7 +362,7 @@ impl Server {
             for action in actions {
                 self.notify_action(&action);
                 let files = (self.clipboard_file_limit, &files_notify);
-                apply(action, &*capture, &clipboard, &clients, &clip_synced, files);
+                apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops);
             }
         }
     }
@@ -415,6 +452,7 @@ fn apply(
     clients: &HashMap<String, ClientHandle>,
     clip_synced: &ClipSynced,
     (file_limit, files_notify): (u64, &Notify),
+    drops: &mut Receiver,
 ) {
     match action {
         Action::CaptureRemote => capture.capture_remote(),
@@ -458,6 +496,28 @@ fn apply(
             if let Some(client) = clients.get(&to) {
                 tokio::spawn(start_file_drag(client.conn.clone(), client.input.clone(), to, transfer, files));
             }
+        }
+        Action::QueryRemoteDrag { to, probe } => {
+            if let Some(client) = clients.get(&to) {
+                let conn = client.conn.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = send_drag_message(&conn, &DragMessage::Query { probe }).await {
+                        debug!("Drag-Nachfrage an „{to}“ nicht gesendet: {e:#}");
+                    }
+                });
+            }
+        }
+        Action::AwaitLocalDrop { from, transfer } => {
+            info!("Dateien von „{from}“ werden hierher gezogen – Loslassen legt sie ab (Übertragung {transfer})");
+            capture.await_local_drop();
+        }
+        Action::DropIncoming { transfer, x, y } => {
+            let folder = capture.drop_folder(x, y).unwrap_or_else(files::fallback_drop_folder);
+            drops.on_drop(transfer, folder);
+        }
+        Action::CancelIncoming { transfer } => {
+            debug!("Übertragung {transfer} nicht abgelegt");
+            drops.cancel_undropped();
         }
     }
 }
@@ -509,12 +569,12 @@ fn spawn_input_writer(conn: Connection, name: String) -> mpsc::UnboundedSender<I
     tx
 }
 
-async fn accept_loop(endpoint: Endpoint, tx: mpsc::UnboundedSender<NetEvent>, staging: Arc<Staging>) {
+async fn accept_loop(endpoint: Endpoint, tx: mpsc::UnboundedSender<NetEvent>, stagings: Stagings) {
     while let Some(incoming) = endpoint.accept().await {
-        let (tx, staging) = (tx.clone(), staging.clone());
+        let (tx, stagings) = (tx.clone(), stagings.clone());
         tokio::spawn(async move {
             let remote = incoming.remote_address();
-            if let Err(e) = handle_connection(incoming, tx, staging).await {
+            if let Err(e) = handle_connection(incoming, tx, stagings).await {
                 debug!("Verbindung von {remote} beendet: {e:#}");
             }
         });
@@ -524,7 +584,7 @@ async fn accept_loop(endpoint: Endpoint, tx: mpsc::UnboundedSender<NetEvent>, st
 async fn handle_connection(
     incoming: Incoming,
     tx: mpsc::UnboundedSender<NetEvent>,
-    staging: Arc<Staging>,
+    stagings: Stagings,
 ) -> Result<()> {
     let remote = incoming.remote_address();
     let conn = incoming.await.context("QUIC-Handshake")?;
@@ -558,7 +618,7 @@ async fn handle_connection(
     }
 
     let id = conn.stable_id();
-    tokio::spawn(receive_client_streams(conn.clone(), name.clone(), id, tx.clone(), staging));
+    tokio::spawn(receive_client_streams(conn.clone(), name.clone(), id, tx.clone(), stagings));
     loop {
         match read_frame::<_, Control>(&mut recv).await {
             Ok(Some(Control::ScreenChanged(info))) => {
@@ -573,16 +633,16 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Streams vom Client: nur Zwischenablage (Inhalte und kopierte Dateien).
+/// Streams vom Client: Zwischenablage (Inhalte und kopierte Dateien) und Drag & Drop zum Server.
 async fn receive_client_streams(
     conn: Connection,
     name: String,
     id: usize,
     tx: mpsc::UnboundedSender<NetEvent>,
-    staging: Arc<Staging>,
+    stagings: Stagings,
 ) {
     while let Ok(mut stream) = conn.accept_uni().await {
-        let (name, tx, staging) = (name.clone(), tx.clone(), staging.clone());
+        let (name, tx, stagings) = (name.clone(), tx.clone(), stagings.clone());
         tokio::spawn(async move {
             let result: Result<()> = async {
                 match read_kind(&mut stream).await? {
@@ -596,8 +656,17 @@ async fn receive_client_streams(
                         None => {}
                     },
                     StreamKind::ClipboardFile => {
-                        let outcome = files::receive_file(&mut stream, &staging).await?;
+                        let outcome = files::receive_file(&mut stream, &stagings.clipboard).await?;
                         let _ = tx.send(NetEvent::ClipboardFile { name, id, outcome });
+                    }
+                    StreamKind::Drag => {
+                        if let Some(DragMessage::Offer { probe, transfer, entries }) = read_frame(&mut stream).await? {
+                            let _ = tx.send(NetEvent::DragOffer { name, id, probe, transfer, entries });
+                        }
+                    }
+                    StreamKind::File => {
+                        let outcome = files::receive_file(&mut stream, &stagings.drag).await?;
+                        let _ = tx.send(NetEvent::DragFile { name, id, outcome });
                     }
                     other => bail!("Client darf keine Streams vom Typ {other:?} öffnen"),
                 }

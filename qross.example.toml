@@ -33,3 +33,17 @@ delay_ms = 0
 # Kopierte Dateien (Strg+C im Explorer) bis zu dieser Gesamtgröße in MB beim Wechsel mitgeben,
 # damit sie drüben mit Strg+V eingefügt werden können. Größeres per Drag & Drop ziehen. 0 = aus
 max_file_mb = 1000
+
+# Tasten (optional)
+[keys]
+# Taste oder Kombination, die den Cursor auf dem aktuellen Bildschirm festhält, z. B. für Spiele.
+# Namen wie KeyboardEvent.code im Browser: "ScrollLock", "Ctrl+Alt+KeyL", "Pause" … Leer = aus
+lock = "ScrollLock"
+# Medientasten (Lautstärke, Wiedergabe): "active" = an den Rechner mit dem Cursor,
+# "local" = immer auf diesem Rechner (z. B. weil hier die Lautsprecher hängen)
+media = "active"
+
+# Tasten je Rechner umbelegen: gedrückte Taste = gesendete Taste
+# Beispiel: Am Mac Alt und Windows-Taste tauschen, damit Cmd dort liegt, wo am Mac Cmd ist
+[keys.remap.laptop]
+AltLeft = "MetaLeft"

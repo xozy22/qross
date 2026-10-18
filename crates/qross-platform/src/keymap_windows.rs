@@ -52,7 +52,16 @@ const TABLE: &[(u16, u16)] = &[
     (EXT | 0x4F, 0x4D), (EXT | 0x50, 0x51), (EXT | 0x51, 0x4E), // Ende ↓ BildAb
     (EXT | 0x52, 0x49), (EXT | 0x53, 0x4C), // Einfg Entf
     (EXT | 0x5B, 0xE3), (EXT | 0x5C, 0xE7), (EXT | 0x5D, 0x65), // LWin RWin Menü
-    (EXT | 0x20, 0x7F), (EXT | 0x2E, 0x81), (EXT | 0x30, 0x80), // Stumm Leiser Lauter
+];
+
+/// Medientasten: (Virtual-Key, Scancode, HID). Windows meldet sie je nach Tastatur mit oder ohne
+/// Scancode, und Programme reagieren auf den Virtual-Key – daher in beide Richtungen über ihn.
+#[rustfmt::skip]
+const MEDIA: &[(u32, u16, u16)] = &[
+    (0xAD, EXT | 0x20, KeyCode::MUTE.0), (0xAE, EXT | 0x2E, KeyCode::VOLUME_DOWN.0),
+    (0xAF, EXT | 0x30, KeyCode::VOLUME_UP.0),
+    (0xB0, EXT | 0x19, KeyCode::MEDIA_NEXT.0), (0xB1, EXT | 0x10, KeyCode::MEDIA_PREVIOUS.0),
+    (0xB2, EXT | 0x24, KeyCode::MEDIA_STOP.0), (0xB3, EXT | 0x22, KeyCode::MEDIA_PLAY_PAUSE.0),
 ];
 
 /// Zusätzliche Scancodes, die Windows liefert, die aber auf eine schon belegte HID-Usage zeigen.
@@ -71,6 +80,9 @@ pub fn hid_from_windows(scan: u32, extended: bool, vk: u32) -> Option<KeyCode> {
         VK_PAUSE => return Some(KeyCode(0x48)),
         VK_NUMLOCK => return Some(KeyCode(0x53)),
         _ => {}
+    }
+    if let Some(&(_, _, hid)) = MEDIA.iter().find(|(media_vk, ..)| *media_vk == vk) {
+        return Some(KeyCode(hid));
     }
     let scan = (scan & 0xFF) as u16;
     let lookup = |code: u16| {
@@ -93,6 +105,9 @@ pub fn windows_from_hid(key: KeyCode) -> Option<WinKey> {
         0x48 => return Some(WinKey { scan: 0x45, extended: false, vk: Some(VK_PAUSE as u16) }),
         0x53 => return Some(WinKey { scan: 0x45, extended: true, vk: Some(VK_NUMLOCK as u16) }),
         _ => {}
+    }
+    if let Some(&(vk, scan, _)) = MEDIA.iter().find(|(.., hid)| *hid == key.0) {
+        return Some(WinKey { scan: scan & 0xFF, extended: true, vk: Some(vk as u16) });
     }
     let code = TABLE
         .iter()
@@ -139,6 +154,19 @@ mod tests {
         assert_eq!(hid_from_windows(0x56, false, 0xE2), Some(KeyCode(0x64)));
         assert_eq!(windows_from_hid(KeyCode::RIGHT_ALT), Some(WinKey { scan: 0x38, extended: true, vk: None }));
         assert_eq!(windows_from_hid(KeyCode(0x32)).unwrap().scan, 0x2B);
-        assert_eq!(hid_from_windows(0x00, false, 0xB3), None);
+        assert_eq!(hid_from_windows(0x00, false, 0xFF), None);
+    }
+
+    #[test]
+    fn media_keys_go_by_virtual_key_in_both_directions() {
+        for &(vk, scan, hid) in MEDIA {
+            // Mit und ohne Scancode (manche Tastaturen melden 0)
+            assert_eq!(hid_from_windows(0, false, vk), Some(KeyCode(hid)));
+            assert_eq!(hid_from_windows((scan & 0xFF) as u32, true, vk), Some(KeyCode(hid)));
+            let win = windows_from_hid(KeyCode(hid)).unwrap();
+            assert_eq!(win, WinKey { scan: scan & 0xFF, extended: true, vk: Some(vk as u16) });
+            assert!(KeyCode(hid).is_media());
+        }
+        assert_eq!(hid_from_windows(0x22, true, 0xB3), Some(KeyCode::MEDIA_PLAY_PAUSE));
     }
 }

@@ -28,7 +28,8 @@ anderen Rechner einfach **einfügen** (Strg+C hier, Strg+V dort).
     <td align="center"><img src="docs/assets/screenshots/freigabe.png" alt="Freigabe-Dialog mit Fingerprint"><br><sub>Neuer Rechner: Freigabe erst nach Fingerprint-Vergleich</sub></td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><img src="docs/assets/screenshots/neuigkeiten.png" width="620" alt="Neuigkeiten mit allen Versionen und ihren Änderungen"><br><sub>Neuigkeiten: Klick auf die Version in der Kopfzeile zeigt, was sich geändert hat</sub></td>
+    <td align="center"><img src="docs/assets/screenshots/einstellungen.png" alt="Einstellungen mit Autostart, Fang-Taste, Medientasten und Tastenumbelegung"><br><sub>Einstellungen: Autostart, Updates, Fang-Taste, Medientasten, Tasten je Rechner</sub></td>
+    <td align="center"><img src="docs/assets/screenshots/neuigkeiten.png" alt="Neuigkeiten mit allen Versionen und ihren Änderungen"><br><sub>Neuigkeiten: Klick auf die Version in der Kopfzeile zeigt, was sich geändert hat</sub></td>
   </tr>
 </table>
 
@@ -62,13 +63,17 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Zwischenablage in beide Richtungen: Text, HTML, Bilder (z. B. Screenshots) | ✔ | ✔ | ✔¹ |
 | Dateien kopieren und einfügen, in beide Richtungen | ✔ Explorer | ✔ Dateimanager mit `text/uri-list` (Nautilus, Dolphin) | ✔ Finder¹ |
 | Cursor auf dem Server ausblenden | ✔ | ✔ | soweit macOS es zulässt¹ |
-| Dateien per Drag & Drop **senden** (Server) | ✔ | – | – |
-| Dateien per Drag & Drop **empfangen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
+| Drag & Drop **vom Server** ziehen | ✔ | – | – |
+| Drag & Drop **vom Client** zum Server ziehen | ✔ Explorer | – | ✔ Finder¹ |
+| Gezogene Dateien **ablegen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
+| Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | ✔¹ ² |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔² |
 
 ¹ macOS wird in der CI auf Apple Silicon gebaut und getestet, auch mit der echten Zwischenablage. Erfassung und
 Einspeisung sind auf einem echten Mac noch nicht geprüft. Qross braucht dort die Rechte „Bedienungshilfen“ und
 „Eingabeüberwachung“.
+² „Medientasten immer auf dem Server“ wirkt mit einem Windows-Server. Unter macOS bleiben Medientasten des
+Servers ohnehin dort, unter X11 gehen sie immer an den aktiven Rechner.
 ² Die Oberfläche basiert auf Tauri; gebaut und geprüft wurde sie unter Windows.
 
 **Wie geprüft wurde:**
@@ -82,7 +87,8 @@ Einspeisung sind auf einem echten Mac noch nicht geprüft. Qross braucht dort di
   mit zwei echten Rechnern getestet.
 
 **Bedienung:**
-- **Rollen-Taste** hält den Cursor auf dem aktuellen Bildschirm fest, z. B. für Spiele.
+- **Rollen-Taste** hält den Cursor auf dem aktuellen Bildschirm fest, z. B. für Spiele. Die Taste ist frei
+  wählbar (Einstellungen bzw. `[keys] lock` in `qross.toml`).
 - **Strg+Alt+Shift+Esc** holt Maus und Tastatur sofort zurück (macOS: Strg+Option+Shift+Esc).
 
 ## Download
@@ -109,6 +115,9 @@ Die Programme sind nicht von Microsoft bzw. Apple beglaubigt, deshalb fragt das 
   Für die Kommandozeile entsprechend `xattr -d com.apple.quarantine qross` im entpackten Ordner.
 
 Was sich in jeder Version geändert hat, steht im [Changelog](CHANGELOG.md) und in der App unter „Neuigkeiten“.
+Ab Version 0.4.0 aktualisiert sich die App selbst: Sie prüft beim Start und täglich, lädt Updates im
+Hintergrund, prüft ihre Signatur und installiert sie, wenn gerade niemand Maus und Tastatur braucht
+(abschaltbar unter Einstellungen → Updates). Mit „Mit dem System starten“ läuft Qross nach der Anmeldung im Tray.
 
 ## Einrichten
 
@@ -143,6 +152,8 @@ Hinweise:
 - `qross discover` listet alle Qross-Server im LAN, `qross client <adresse>` verbindet gezielt.
 - `[switching]` in `qross.toml`: `corner_size` (Ecken-Totzone in Pixeln, Standard 8) und `delay_ms`
   (so lange gegen die Kante drücken, bevor gewechselt wird, Standard 0).
+- `[keys]` in `qross.toml`: `lock` (Fang-Taste, z. B. `"Ctrl+Alt+KeyL"`, leer = aus), `media` (`"active"` oder
+  `"local"`) und `[keys.remap.<rechner>]` zum Umbelegen. Tastennamen wie `KeyboardEvent.code` im Browser.
 - `[clipboard] max_file_mb` in `qross.toml` bzw. `qross client --clipboard-max-mb`: kopierte Dateien bis zu
   dieser Gesamtgröße beim Wechsel mitgeben (Standard 1000, 0 = aus). Sie liegen danach im Cache
   (`%LOCALAPPDATA%\Qross\clipboard`) und werden nach einem Tag aufgeräumt.

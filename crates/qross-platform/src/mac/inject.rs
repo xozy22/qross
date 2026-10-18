@@ -27,6 +27,8 @@ pub struct MacInjector {
     /// Letzter Klick: Taste, Zeitpunkt, Zähler (für Doppel-/Dreifachklick)
     last_click: Option<(MouseButton, Instant, i64)>,
     wheel_rest: (i32, i32),
+    /// Stand der Drag-Zwischenablage beim Drücken der linken Maustaste
+    drag_mark: Option<isize>,
 }
 
 // SAFETY: Der Injector wird einmal in den Einspeise-Thread verschoben und nur dort benutzt.
@@ -45,6 +47,7 @@ impl MacInjector {
             flags: CGEventFlags::CGEventFlagNull,
             last_click: None,
             wheel_rest: (0, 0),
+            drag_mark: None,
         })
     }
 
@@ -71,7 +74,31 @@ impl MacInjector {
     }
 }
 
+impl MacInjector {
+    fn tap_escape(&self) {
+        const KVK_ESCAPE: u16 = 0x35;
+        for down in [true, false] {
+            self.post(CGEvent::new_keyboard_event(self.source.clone(), KVK_ESCAPE, down).ok());
+        }
+    }
+}
+
 impl Injector for MacInjector {
+    fn take_dragged_files(&mut self, _x: i32, _y: i32) -> Vec<std::path::PathBuf> {
+        // Nur ein Drag, der nach dem Drücken der Taste begonnen hat, zählt.
+        let Some(mark) = self.drag_mark.filter(|_| self.buttons[MouseButton::Left as usize]) else { return Vec::new() };
+        if super::drag::change_count() == mark {
+            return Vec::new();
+        }
+        let files = super::drag::dragged_files();
+        if !files.is_empty() {
+            // Esc bricht den Drag im Finder ab – die Dateien wandern stattdessen zum Server.
+            self.tap_escape();
+            self.drag_mark = None;
+        }
+        files
+    }
+
     fn inject(&mut self, event: &Inject) {
         match *event {
             Inject::MoveTo { x, y } => {
@@ -89,6 +116,9 @@ impl Injector for MacInjector {
             }
             Inject::Button { button, down } => {
                 self.buttons[button as usize] = down;
+                if button == MouseButton::Left {
+                    self.drag_mark = down.then(super::drag::change_count);
+                }
                 let (kind, cg_button, number) = match (button, down) {
                     (MouseButton::Left, true) => (CGEventType::LeftMouseDown, CGMouseButton::Left, 0),
                     (MouseButton::Left, false) => (CGEventType::LeftMouseUp, CGMouseButton::Left, 0),
@@ -133,6 +163,9 @@ impl Injector for MacInjector {
                 }
             }
             Inject::Key { key, down } => {
+                if super::media::post(key, down) {
+                    return;
+                }
                 let Some(code) = mac_from_hid(key) else {
                     tracing::debug!(?key, "Taste ohne macOS-Zuordnung");
                     return;

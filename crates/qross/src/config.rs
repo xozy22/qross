@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use qross_core::keys::{parse_key_map, Hotkey, KeyConfig, KeyOptions, MediaKeys};
 use qross_core::server::SwitchOptions;
 use qross_core::LinkConfig;
 use qross_proto::DEFAULT_PORT;
@@ -25,6 +27,50 @@ pub struct ServerFile {
     pub discovery: bool,
     #[serde(default)]
     pub clipboard: ClipboardSection,
+    #[serde(default)]
+    pub keys: KeysSection,
+}
+
+/// Abschnitt `[keys]`: Fang-Taste, Medientasten, Umbelegung je Rechner.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct KeysSection {
+    /// Taste oder Kombination wie „ScrollLock“ oder „Ctrl+Alt+KeyL“; leer = aus
+    #[serde(default = "default_lock")]
+    pub lock: String,
+    #[serde(default)]
+    pub media: MediaKeys,
+    /// Name des Rechners → { gedrückte Taste = gesendete Taste }
+    #[serde(default)]
+    pub remap: HashMap<String, HashMap<String, String>>,
+}
+
+impl Default for KeysSection {
+    fn default() -> Self {
+        Self { lock: default_lock(), media: MediaKeys::default(), remap: HashMap::new() }
+    }
+}
+
+fn default_lock() -> String {
+    Hotkey::SCROLL_LOCK.to_string()
+}
+
+impl KeysSection {
+    pub fn config(&self) -> Result<KeyConfig> {
+        let lock = match self.lock.trim() {
+            "" => None,
+            text => Some(text.parse::<Hotkey>().map_err(|e| anyhow::anyhow!("[keys] lock: {e}"))?),
+        };
+        let remap = self
+            .remap
+            .iter()
+            .map(|(name, entries)| {
+                let map = parse_key_map(entries).map_err(|e| anyhow::anyhow!("[keys.remap.{name}]: {e}"))?;
+                Ok((name.clone(), map))
+            })
+            .collect::<Result<_>>()?;
+        Ok(KeyConfig { options: KeyOptions { lock, media: self.media }, remap })
+    }
 }
 
 /// Abschnitt `[clipboard]`: kopierte Dateien.
@@ -116,6 +162,21 @@ mod tests {
         assert_eq!(file.switching.options(), SwitchOptions { corner_size: 8, delay: Duration::from_millis(0) });
         assert!(file.discovery);
         assert_eq!(file.clipboard.file_limit(), 1_000_000_000);
+        let keys = file.keys.config().unwrap();
+        assert_eq!(keys.options.lock, Some(Hotkey::SCROLL_LOCK));
+        assert_eq!(keys.options.media, MediaKeys::Active);
+        assert_eq!(keys.remap["laptop"].len(), 1, "Beispiel: Alt und Windows-Taste am Mac");
+    }
+
+    #[test]
+    fn keys_section_is_checked() {
+        let file: ServerFile = toml::from_str("[keys]\nlock = \"\"\nmedia = \"local\"").unwrap();
+        let keys = file.keys.config().unwrap();
+        assert_eq!((keys.options.lock, keys.options.media), (None, MediaKeys::Local));
+        let file: ServerFile = toml::from_str("[keys]\nlock = \"Ctrl+Gibtsnicht\"").unwrap();
+        assert!(file.keys.config().is_err());
+        let file: ServerFile = toml::from_str("[keys.remap.laptop]\nAltLeft = \"Falsch\"").unwrap();
+        assert!(file.keys.config().unwrap_err().to_string().contains("laptop"));
     }
 
     #[test]

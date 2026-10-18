@@ -1,6 +1,8 @@
 //! Eingaben über `SendInput` einspeisen.
 
 use std::mem::size_of;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use qross_core::Inject;
 use qross_proto::{KeyCode, MouseButton};
@@ -64,6 +66,31 @@ impl Injector for WinInjector {
 
     fn drop_folder(&mut self, x: i32, y: i32) -> Option<std::path::PathBuf> {
         super::shell::folder_at(x, y)
+    }
+
+    fn take_dragged_files(&mut self, x: i32, y: i32) -> Vec<PathBuf> {
+        if let Err(e) = super::dnd::start() {
+            tracing::debug!("{e:#}");
+            return Vec::new();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        if !super::dnd::probe(x, y, false, move |files| {
+            let _ = tx.send(files);
+        }) {
+            return Vec::new();
+        }
+        // Der laufende OLE-Drag bemerkt das Drop-Ziel erst bei einer Mausbewegung – daher
+        // auf der Stelle „wackeln“, bis die Prüfung antwortet (sie gibt nach 400 ms auf).
+        let files = (0..10)
+            .find_map(|_| {
+                self.inject(&Inject::MoveTo { x, y });
+                rx.recv_timeout(Duration::from_millis(60)).ok()
+            })
+            .unwrap_or_default();
+        if !files.is_empty() {
+            tap_escape();
+        }
+        files
     }
 }
 

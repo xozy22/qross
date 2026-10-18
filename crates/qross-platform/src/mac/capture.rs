@@ -1,12 +1,15 @@
 //! Erfassung über einen aktiven CGEventTap. Lokal läuft alles durch (nur Kanten werden
 //! gemeldet); im Remote-Modus wird alles verschluckt, der Cursor vom Maus-Eingang entkoppelt
 //! (`CGAssociateMouseAndMouseCursorPosition(false)`) und die Bewegung aus den Delta-Feldern gelesen.
+//!
+//! Medientasten sind unter macOS Systemereignisse, die dieser Tap nicht abfängt – sie wirken
+//! deshalb immer auf dem Mac selbst.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -18,6 +21,7 @@ use core_graphics::event::{
     EventField,
 };
 use core_graphics::geometry::CGPoint;
+use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions};
 use qross_core::CaptureEvent;
 use qross_proto::{Edge, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
@@ -35,6 +39,9 @@ struct Shared {
     remote: AtomicBool,
     tap_disabled: AtomicBool,
     events: UnboundedSender<CaptureEvent>,
+    keys: Mutex<KeyOptions>,
+    /// Dateien vom Client warten: das nächste Loslassen meldet `LocalDrop`
+    await_drop: AtomicBool,
 }
 
 #[derive(Default)]
@@ -44,10 +51,18 @@ struct TapState {
     /// Vor dem Wechsel lokal gedrückte Tasten – ihr Loslassen geht lokal durch
     local_keys: HashSet<u16>,
     local_buttons: [bool; 5],
+    /// Erkennt die Fang-Taste
+    hotkey: HotkeyTracker,
 }
 
 pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> {
-    let shared = Arc::new(Shared { remote: AtomicBool::new(false), tap_disabled: AtomicBool::new(false), events });
+    let shared = Arc::new(Shared {
+        remote: AtomicBool::new(false),
+        tap_disabled: AtomicBool::new(false),
+        events,
+        keys: Mutex::new(KeyOptions::default()),
+        await_drop: AtomicBool::new(false),
+    });
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let worker = shared.clone();
     thread::Builder::new().name("qross-mac-tap".into()).spawn(move || run(worker, ready_tx))?;
@@ -145,9 +160,29 @@ fn handle(s: &Shared, state: &RefCell<TapState>, kind: CGEventType, event: &CGEv
         } else {
             st.pressed.remove(&code);
         }
+        // Fang-Taste: hält den Cursor auf dem aktuellen Bildschirm fest bzw. gibt ihn frei
+        let options = *s.keys.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(key), Some(lock)) = (hid_from_mac(code), options.lock.as_ref()) {
+            let result = st.hotkey.on_key(key, down, Some(lock));
+            if code == KVK_CAPS_LOCK {
+                // Caps Lock meldet nur das Drücken
+                st.hotkey.on_key(key, false, Some(lock));
+            }
+            if result == HotkeyEvent::Triggered {
+                send(CaptureEvent::ToggleLock);
+            }
+            if result != HotkeyEvent::None {
+                return if remote || lock.swallow_locally() { CallbackResult::Drop } else { CallbackResult::Keep };
+            }
+        }
     }
 
     if !remote {
+        if matches!(kind, LeftMouseUp | RightMouseUp | OtherMouseUp) && s.await_drop.swap(false, Ordering::AcqRel) {
+            // Dateien vom Client: hier losgelassen = hier ablegen
+            let p = event.location();
+            send(CaptureEvent::LocalDrop { x: p.x as i32, y: p.y as i32 });
+        }
         if let Some((code, down)) = key_change {
             if down && code != KVK_CAPS_LOCK {
                 st.local_keys.insert(code);
@@ -268,6 +303,14 @@ fn set_detached(detached: bool) {
 struct MacCapture(Arc<Shared>);
 
 impl Capture for MacCapture {
+    fn set_key_options(&self, options: KeyOptions) {
+        *self.0.keys.lock().unwrap_or_else(|e| e.into_inner()) = options;
+    }
+
+    fn await_local_drop(&self) {
+        self.0.await_drop.store(true, Ordering::Release);
+    }
+
     fn capture_remote(&self) {
         self.0.remote.store(true, Ordering::Release);
         let b = CGDisplay::main().bounds();

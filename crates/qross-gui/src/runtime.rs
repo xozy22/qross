@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use qross_core::CaptureEvent;
 use qross_gui::clipboard_files;
+use qross_gui::lifecycle::AppState;
 use qross_gui::{Role, Settings};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::clipfiles::FilesNotice;
@@ -146,6 +147,8 @@ pub struct Runtime {
     dismissed: Mutex<Vec<(String, String)>>,
     /// Seit wann kopierte Dateien von einem Rechner ankommen (für die Systembenachrichtigung)
     receiving_since: Mutex<HashMap<String, Instant>>,
+    /// Was über einen Programmlauf hinaus gilt (laufende Rolle, letzte Update-Prüfung …)
+    app_state: Mutex<AppState>,
 }
 
 /// Ab dieser Dauer meldet sich „Dateien sind bereit“ auch als Systembenachrichtigung.
@@ -159,7 +162,6 @@ impl Runtime {
     pub fn new(app: AppHandle, data_dir: PathBuf, settings: Settings) -> Self {
         Self {
             app,
-            data_dir,
             settings: Mutex::new(settings),
             status: Mutex::new(Status::default()),
             running: tokio::sync::Mutex::new(None),
@@ -167,6 +169,21 @@ impl Runtime {
             generation: AtomicU64::new(0),
             dismissed: Mutex::new(Vec::new()),
             receiving_since: Mutex::new(HashMap::new()),
+            app_state: Mutex::new(AppState::load(&data_dir)),
+            data_dir,
+        }
+    }
+
+    pub fn app_state(&self) -> AppState {
+        self.app_state.lock().unwrap().clone()
+    }
+
+    /// Ändert den App-Zustand und speichert ihn sofort.
+    pub fn update_app_state(&self, change: impl FnOnce(&mut AppState)) {
+        let mut state = self.app_state.lock().unwrap();
+        change(&mut state);
+        if let Err(e) = state.save(&self.data_dir) {
+            warn!("App-Zustand nicht gespeichert: {e:#}");
         }
     }
 
@@ -217,6 +234,7 @@ impl Runtime {
         match result {
             Ok(r) => {
                 *running = Some(r);
+                self.update_app_state(|s| s.last_running = Some(settings.role));
                 Ok(None)
             }
             Err(e) => {
@@ -228,7 +246,14 @@ impl Runtime {
         }
     }
 
+    /// Stoppen durch den Nutzer: beim nächsten Start nicht fortsetzen.
     pub async fn stop(&self) {
+        self.update_app_state(|s| s.last_running = None);
+        self.stop_for_exit().await;
+    }
+
+    /// Stoppen, weil die App endet (Beenden, Update): die Rolle bleibt zum Fortsetzen gemerkt.
+    pub async fn stop_for_exit(&self) {
         let mut running = self.running.lock().await;
         if let Some(old) = running.take() {
             self.generation.fetch_add(1, Ordering::SeqCst);
@@ -284,6 +309,7 @@ impl Runtime {
     async fn start_server(self: &Arc<Self>, settings: &Settings, generation: u64) -> Result<Running> {
         let s = &settings.server;
         let layout = s.validate().map_err(|e| anyhow!(e))?;
+        let keys = s.keys.config().map_err(|e| anyhow!(e))?;
         let identity = self.identity()?;
         info!("Fingerprint dieses Servers: {}", identity.fingerprint());
 
@@ -312,7 +338,8 @@ impl Runtime {
             .with_notices(notice_tx)
             .with_switch_options(s.switch_options())
             .with_discovery(s.discovery)
-            .with_clipboard_file_limit(settings.clipboard_file_limit());
+            .with_clipboard_file_limit(settings.clipboard_file_limit())
+            .with_keys(keys);
         let stop = server.stop_handle();
         let platform = ServerPlatform {
             capture,
@@ -583,7 +610,7 @@ impl Runtime {
             return;
         }
         if system && !crate::window_in_front(&self.app) {
-            crate::notify(&self.app, &message);
+            crate::notify(&self.app, &message.title, message.text.as_deref().unwrap_or_default());
         }
         let _ = self.app.emit("clipboard-files", &message);
     }

@@ -6,7 +6,9 @@
 //! sein eigenes, in sich stimmiges Koordinatensystem meldet.
 
 mod capture;
+mod drag;
 mod inject;
+mod media;
 
 use std::sync::Arc;
 

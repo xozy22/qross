@@ -15,6 +15,9 @@
         <span id="versionText">v–</span>
         <span class="new-dot" aria-hidden="true"></span>
       </button>
+      <button type="button" id="settingsBtn" class="icon-btn header-icon" title="Einstellungen" aria-label="Einstellungen" aria-haspopup="dialog" aria-controls="settings">
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
     </div>
     <div class="segmented" role="radiogroup" aria-label="Rolle dieses Rechners">
       <button type="button" role="radio" data-role="server">Server</button>
@@ -102,14 +105,6 @@
           </label>
         </section>
 
-        <section class="panel-section">
-          <h2>Zwischenablage</h2>
-          <label class="clip-limit">Kopierte Dateien mitgeben bis
-            <span class="unit-input"><input type="number" data-clip-limit min="0" max="100000" step="100" inputmode="numeric"><span>MB</span></span>
-          </label>
-          <p class="hint" data-clip-hint></p>
-        </section>
-
         <details class="panel-section">
           <summary>Konfiguration als Datei</summary>
           <pre id="tomlPreview" class="toml"></pre>
@@ -161,10 +156,6 @@
           <span class="track"><span class="thumb"></span></span>
           <span>Testmodus: Eingaben nur protokollieren, nicht ausführen</span>
         </label>
-        <label class="field-wide clip-limit">Kopierte Dateien mitgeben bis
-          <span class="unit-input"><input type="number" data-clip-limit min="0" max="100000" step="100" inputmode="numeric"><span>MB</span></span>
-          <span class="hint" data-clip-hint></span>
-        </label>
         <div class="client-actions">
           <button type="button" id="checkServer" class="btn ghost">Fingerprint des Servers prüfen</button>
         </div>
@@ -204,9 +195,9 @@
     </form>
   </dialog>
 
-  <dialog id="news" class="news" aria-labelledby="newsTitle">
-    <div class="news-inner">
-      <div class="news-head">
+  <dialog id="news" class="sheet news" aria-labelledby="newsTitle">
+    <div class="sheet-inner">
+      <div class="sheet-head">
         <div>
           <h2 id="newsTitle">Neuigkeiten</h2>
           <p class="hint">Was sich in jeder Version von Qross geändert hat.</p>
@@ -216,6 +207,153 @@
         </button>
       </div>
       <ol id="newsList" class="timeline" tabindex="-1"></ol>
+    </div>
+  </dialog>
+
+  <dialog id="settings" class="sheet settings" aria-labelledby="settingsTitle">
+    <div class="sheet-inner">
+      <div class="sheet-head">
+        <div>
+          <h2 id="settingsTitle">Einstellungen</h2>
+          <p class="hint">Gelten für diesen Rechner.</p>
+        </div>
+        <button type="button" id="settingsClose" class="icon-btn" aria-label="Einstellungen schließen">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>
+        </button>
+      </div>
+      <div class="settings-body">
+        <nav class="settings-nav" aria-label="Bereiche der Einstellungen">
+          <button type="button" data-section="set-general">Allgemein</button>
+          <button type="button" data-section="set-keys">Tastatur</button>
+          <button type="button" data-section="set-updates">Updates</button>
+          <button type="button" data-section="set-clipboard">Zwischenablage</button>
+          <button type="button" data-section="set-about">Info</button>
+        </nav>
+        <div class="settings-content" id="settingsContent">
+          <!-- Neue Bereiche: <section class="settings-section"> anhängen und in der Navigation eintragen -->
+          <section class="settings-section" id="set-general" aria-labelledby="setGeneralTitle">
+            <h3 id="setGeneralTitle">Allgemein</h3>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">Mit dem System starten</span>
+                <span class="hint" id="autostartHint">Qross startet bei der Anmeldung unsichtbar im Tray.</span>
+              </span>
+              <span class="switch"><input type="checkbox" role="switch" id="prefAutostart"><span class="track"><span class="thumb"></span></span></span>
+            </label>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">Server oder Client beim Start fortsetzen</span>
+                <span class="hint">Lief beim Beenden ein Server oder Client, startet er beim nächsten Start wieder, auch nach einem Update.</span>
+              </span>
+              <span class="switch"><input type="checkbox" role="switch" id="prefResume"><span class="track"><span class="thumb"></span></span></span>
+            </label>
+          </section>
+
+          <section class="settings-section" id="set-keys" aria-labelledby="setKeysTitle">
+            <h3 id="setKeysTitle">Tastatur</h3>
+            <p class="keys-note" id="keysClientNote" hidden>Wirkt auf dem Server, denn dort werden Maus und Tastatur erfasst. Dieser Rechner ist gerade als Client eingestellt.</p>
+            <fieldset class="keys-block" id="keysBlock">
+              <legend class="sr-only">Tastatur-Einstellungen des Servers</legend>
+              <div class="setting static">
+                <span class="setting-text">
+                  <span class="setting-title">Fang-Taste</span>
+                  <span class="hint">Hält den Cursor auf dem aktuellen Bildschirm fest, z. B. für Spiele.</span>
+                </span>
+                <span class="hotkey">
+                  <kbd class="keycap" id="lockLabel">Rollen</kbd>
+                  <button type="button" id="lockChange" class="btn small ghost">Ändern</button>
+                </span>
+              </div>
+              <div class="hotkey-more">
+                <span class="hint record-hint" id="lockRecordHint" hidden>Drück die neue Taste oder Kombination. Eine einzelne Zusatztaste wie Strg rechts zählt beim Loslassen. Esc bricht ab.</span>
+                <button type="button" id="lockDefault" class="btn small ghost">Standard (Rollen)</button>
+                <button type="button" id="lockOff" class="btn small ghost">Aus</button>
+              </div>
+
+              <label class="setting">
+                <span class="setting-text">
+                  <span class="setting-title">Medientasten</span>
+                  <span class="hint" id="mediaHint"></span>
+                </span>
+                <select id="mediaMode">
+                  <option value="active">An den Rechner mit dem Cursor</option>
+                  <option value="local">Immer auf diesem Rechner</option>
+                </select>
+              </label>
+
+              <div class="remap">
+                <span class="setting-text">
+                  <span class="setting-title">Tasten umbelegen</span>
+                  <span class="hint">Je Rechner: Was du hier drückst, kommt dort als andere Taste an.</span>
+                </span>
+                <div class="remap-bar">
+                  <label class="remap-pc">Rechner <select id="remapPc"></select></label>
+                  <span class="remap-presets">
+                    <button type="button" class="btn small ghost" data-preset="alt-meta">Alt und Windows/Cmd tauschen</button>
+                    <button type="button" class="btn small ghost" data-preset="caps-ctrl">Feststelltaste als Strg</button>
+                  </span>
+                </div>
+                <ul class="remap-list" id="remapList" aria-live="polite"></ul>
+                <div class="remap-add">
+                  <span class="keypick">
+                    <select id="addFrom" aria-label="Gedrückte Taste"></select>
+                    <button type="button" class="btn small ghost" data-record="addFrom">Aufnehmen</button>
+                  </span>
+                  <span class="arrow" aria-hidden="true">→</span>
+                  <span class="keypick">
+                    <select id="addTo" aria-label="Gesendete Taste"></select>
+                    <button type="button" class="btn small ghost" data-record="addTo">Aufnehmen</button>
+                  </span>
+                  <button type="button" id="addRule" class="btn small">Regel hinzufügen</button>
+                </div>
+              </div>
+            </fieldset>
+          </section>
+
+          <section class="settings-section" id="set-updates" aria-labelledby="setUpdatesTitle">
+            <h3 id="setUpdatesTitle">Updates</h3>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">Automatisch aktualisieren</span>
+                <span class="hint">Qross sucht beim Start und täglich nach neuen Versionen, lädt sie im Hintergrund und installiert sie, wenn Maus und Tastatur gerade nicht gebraucht werden.</span>
+              </span>
+              <span class="switch"><input type="checkbox" role="switch" id="prefAutoUpdate"><span class="track"><span class="thumb"></span></span></span>
+            </label>
+            <div class="update-box">
+              <p class="update-status" id="updateStatus" role="status"></p>
+              <div class="update-actions">
+                <button type="button" id="updateCheck" class="btn small ghost">Jetzt nach Updates suchen</button>
+                <button type="button" id="updateInstall" class="btn small accept" hidden>Jetzt aktualisieren</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-section" id="set-clipboard" aria-labelledby="setClipboardTitle">
+            <h3 id="setClipboardTitle">Zwischenablage</h3>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">Kopierte Dateien mitgeben bis</span>
+                <span class="hint" data-clip-hint></span>
+              </span>
+              <span class="unit-input"><input type="number" data-clip-limit min="0" max="100000" step="100" inputmode="numeric" aria-label="Grenze für kopierte Dateien in MB"><span>MB</span></span>
+            </label>
+          </section>
+
+          <section class="settings-section" id="set-about" aria-labelledby="setAboutTitle">
+            <h3 id="setAboutTitle">Info</h3>
+            <dl class="about">
+              <dt>Version</dt>
+              <dd id="aboutVersion"></dd>
+              <dt>Datenordner</dt>
+              <dd><code id="aboutDataDir"></code><button type="button" id="openDataDir" class="btn small ghost">Öffnen</button></dd>
+            </dl>
+            <div class="about-actions">
+              <button type="button" id="aboutNews" class="btn small ghost">Neuigkeiten</button>
+              <button type="button" id="aboutProject" class="btn small ghost">Qross auf GitHub</button>
+            </div>
+          </section>
+        </div>
+      </div>
     </div>
   </dialog>
 

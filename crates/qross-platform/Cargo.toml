@@ -17,7 +17,7 @@ tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.14", features = ["xtest"] }
+x11rb = { version = "0.14", features = ["xtest", "xkb"] }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
@@ -27,6 +27,11 @@ x11rb = { version = "0.14", features = ["xtest"] }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 core-foundation = "0.10"
 core-graphics = { version = "0.25", features = ["highsierra"] }
+# Medientasten (NX_SYSDEFINED) lassen sich nur über NSEvent erzeugen
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "NSPasteboard", "NSPasteboardItem", "objc2-core-graphics"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventTypes"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSString", "NSURL", "objc2-core-foundation"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
