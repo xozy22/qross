@@ -8,7 +8,7 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
-## [Unreleased]
+## [0.7.0] - 2026-10-18
 
 ### Neu
 
@@ -253,6 +253,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.7.0]: https://github.com/xozy22/qross/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/xozy22/qross/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/xozy22/qross/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/xozy22/qross/compare/v0.3.1...v0.4.0
