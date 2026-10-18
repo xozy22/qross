@@ -46,7 +46,7 @@ cat <<'EOF'
 Die Programme sind nicht von Microsoft bzw. Apple beglaubigt, deshalb fragt das System beim ersten Start nach:
 
 - **Windows:** SmartScreen meldet sich, dann „Weitere Informationen → Trotzdem ausführen“.
-- **macOS:** Qross aus dem DMG in „Programme“ ziehen und öffnen. Meldet macOS, dass es die App nicht überprüfen kann, unter **Systemeinstellungen → Datenschutz & Sicherheit** ganz unten „Dennoch öffnen“ wählen und danach dort „Bedienungshilfen“ und „Eingabeüberwachung“ für Qross erlauben. Alternativ im Terminal: `xattr -dr com.apple.quarantine /Applications/Qross.app`
+- **macOS:** Qross aus dem DMG in „Programme“ ziehen und öffnen. Meldet macOS, dass es die App nicht überprüfen kann, unter **Systemeinstellungen → Datenschutz & Sicherheit** ganz unten „Dennoch öffnen“ wählen und danach dort „Bedienungshilfen“ und „Eingabeüberwachung“ für Qross erlauben. Alternativ im Terminal: `xattr -dr com.apple.quarantine /Applications/Qross.app`. Kommen nach einem Update Maus oder Tastatur nicht an, zeigt Qross einen Hinweis; mehr unter [Rechte über Updates behalten](https://github.com/xozy22/qross#macos-rechte-über-updates-behalten).
 
 Prüfsummen: `SHA256SUMS.txt` · Alle Versionen: [CHANGELOG.md](https://github.com/xozy22/qross/blob/main/CHANGELOG.md)
 EOF

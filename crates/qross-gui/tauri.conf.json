@@ -39,7 +39,7 @@
     "createUpdaterArtifacts": true,
     "macOS": {
       "minimumSystemVersion": "13.0",
-      "signingIdentity": "-"
+      "signingIdentity": "Qross Code Signing"
     }
   },
   "plugins": {

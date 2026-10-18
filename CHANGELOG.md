@@ -8,6 +8,26 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [Unreleased]
+
+### Neu
+
+- **macOS: Hinweis bei fehlenden Rechten:** Fehlen Qross „Bedienungshilfen“ oder „Eingabeüberwachung“, zeigt
+  es das oben im Fenster an, mit einem Knopf, der Qross in die Liste der Systemeinstellungen einträgt und die
+  passende Seite öffnet. Bisher kamen Maus und Tastatur dann einfach nicht an.
+
+### Behoben
+
+- **macOS: Rechte bleiben nach Updates erhalten:** Qross ist jetzt mit einem eigenen, dauerhaften Zertifikat
+  signiert statt nur ad hoc. Bisher galt jede neue Version für macOS als andere App: Qross blieb unter
+  „Bedienungshilfen“ und „Eingabeüberwachung“ eingeschaltet, die Rechte wirkten aber nicht mehr.
+
+### Wichtig
+
+- Mac-Nutzer müssen die Rechte nach diesem Update ein letztes Mal neu erteilen: Qross unter Systemeinstellungen
+  → Datenschutz & Sicherheit → Bedienungshilfen (und, als Server, Eingabeüberwachung) mit „−“ entfernen und
+  über den Hinweis in Qross neu eintragen. Ab dann bleiben sie über Updates erhalten.
+
 ## [0.5.0] - 2026-10-18
 
 ### Neu

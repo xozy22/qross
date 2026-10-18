@@ -99,7 +99,8 @@ fn run(shared: Arc<Shared>, ready: Sender<Result<(), String>>) {
     );
     let Ok(tap) = tap else {
         let _ = ready.send(Err("CGEventTap nicht erlaubt – Qross unter Systemeinstellungen → Datenschutz & \
-                                Sicherheit für „Bedienungshilfen“ und „Eingabeüberwachung“ freigeben"
+                                Sicherheit für „Bedienungshilfen“ und „Eingabeüberwachung“ freigeben. Ist es \
+                                dort schon eingeschaltet, den Eintrag entfernen und neu hinzufügen"
             .into()));
         return;
     };

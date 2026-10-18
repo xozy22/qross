@@ -120,6 +120,44 @@ Die Programme sind nicht von Microsoft bzw. Apple beglaubigt, deshalb fragt das 
 
   Für die Kommandozeile entsprechend `xattr -d com.apple.quarantine qross` im entpackten Ordner.
 
+### macOS: Rechte über Updates behalten
+
+macOS merkt sich „Bedienungshilfen“ und „Eingabeüberwachung“ zusammen mit der Signatur der App, genauer mit
+ihrer designierten Anforderung. Bis 0.5.0 war Qross nur ad hoc signiert, dort steckt in dieser Anforderung eine
+Prüfsumme genau dieses Builds. Jedes Update galt deshalb als andere App: Qross blieb in der Liste eingeschaltet,
+die Rechte wirkten aber nicht mehr, und Maus und Tastatur kamen nicht an.
+
+Ab der ersten Version nach 0.5.0 ist Qross mit einem eigenen, dauerhaften Zertifikat („Qross Code Signing“)
+signiert. Die Anforderung nennt dann nur noch den Bundle-Identifier und das Zertifikat, und die Rechte bleiben
+über Updates erhalten. Beim Update von 0.5.0 oder älter müssen sie ein letztes Mal neu erteilt werden:
+
+1. Qross starten. Fehlt ein Recht, zeigt Qross oben im Fenster einen Hinweis.
+2. Unter **Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen** Qross auswählen und mit „−“
+   entfernen. Der alte Eintrag bleibt sonst eingeschaltet, wirkt aber nicht.
+3. Im Hinweis von Qross „Freigeben …“ wählen und Qross in der Liste einschalten.
+4. Läuft dieser Mac als Server, dasselbe unter **Eingabeüberwachung**. macOS bietet danach an, Qross neu zu öffnen.
+
+Statt Schritt 2 geht auch das Terminal, danach Qross neu starten:
+
+```bash
+tccutil reset Accessibility app.qross.desktop
+```
+
+```bash
+tccutil reset ListenEvent app.qross.desktop
+```
+
+Das Zertifikat ist selbst signiert, nicht von Apple ausgestellt. Gatekeeper fragt deshalb beim ersten Start wie
+bisher nach („kann nicht überprüft werden“, freizugeben unter Datenschutz & Sicherheit). Welche Anforderung eine
+installierte Version hat, zeigt:
+
+```bash
+codesign -d -r- /Applications/Qross.app
+```
+
+Signiert mit dem Qross-Zertifikat nennt die Ausgabe `certificate root = H"12208ca2cc71fcbb560201275b2eaec6a8afdabb"`
+(SHA-1 des Zertifikats), ad hoc signiert dagegen `cdhash H"…"`.
+
 Was sich in jeder Version geändert hat, steht im [Changelog](CHANGELOG.md) und in der App unter „Neuigkeiten“.
 Ab Version 0.4.0 aktualisiert sich die App selbst: Sie prüft beim Start und täglich, lädt Updates im
 Hintergrund, prüft ihre Signatur und installiert sie, wenn gerade niemand Maus und Tastatur braucht
@@ -207,6 +245,28 @@ docker run --rm -v "%CD%:/src" -v qross-cargo:/usr/local/cargo/registry -v qross
 Diagnose für Drag & Drop: `cargo run -p qross-platform --example folder_at -- <x> <y>` zeigt den Ablageordner
 an einer Bildschirmposition. `cargo run -p qross-platform --example clipboard_check` prüft die echte
 Zwischenablage dieses Rechners mit allen Formaten und stellt den vorherigen Inhalt danach wieder her.
+
+### Releases und Signaturen
+
+Ein Release entsteht per Tag `v*` über `.github/workflows/release.yml`. Der Workflow braucht diese Secrets:
+
+| Secret | Wofür |
+|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Signatur der Update-Pakete für den Updater der App |
+| `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD` | Selbst signiertes Code-Signing-Zertifikat „Qross Code Signing“ (p12 als Base64) für das macOS-App-Paket |
+
+Die Schlüssel liegen außerdem lokal in `%USERPROFILE%\.tauri` (`qross.key`, `qross-macos-signing.p12`, jeweils
+mit Passwortdatei), nie im Repository. Das macOS-Zertifikat heißt bewusst nicht `APPLE_CERTIFICATE`: Unter
+diesem Namen importiert Tauri selbst und nimmt nur Zertifikate von Apple an. Es gilt bis 2056 und darf nicht
+ausgetauscht werden, sonst verlieren alle Mac-Nutzer beim nächsten Update ihre Rechte. Der Job „macOS-Paket auf
+frischem Mac prüfen“ bricht ein Release deshalb ab, wenn die neue Version die designierte Anforderung der
+zuletzt veröffentlichten nicht erfüllt.
+
+Testlauf ohne Veröffentlichung, gebaut wird der Stand des Branches:
+
+```bash
+gh workflow run release.yml --ref main -f tag=v0.5.0 -f test_run=true
+```
 
 ## Lizenz
 

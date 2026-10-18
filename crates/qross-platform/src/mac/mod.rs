@@ -9,6 +9,7 @@ mod capture;
 mod drag;
 mod inject;
 mod media;
+mod permissions;
 
 use std::sync::Arc;
 
@@ -20,7 +21,9 @@ use qross_proto::Rect;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::arboard_clipboard::ArboardClipboard;
-use crate::{Capture, Clipboard, Injector};
+use crate::{Capture, Clipboard, Injector, Permission};
+
+pub use permissions::{granted as has_permission, request as request_permission};
 
 pub fn init_process() {}
 
@@ -55,6 +58,14 @@ pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Ca
 }
 
 pub fn injector() -> Result<Box<dyn Injector>> {
+    // Ohne das Recht verwirft macOS eingespeiste Ereignisse stillschweigend.
+    if !has_permission(Permission::Accessibility) {
+        tracing::warn!(
+            "„Bedienungshilfen“ ist für Qross nicht erlaubt – eingespeiste Maus- und Tastaturereignisse kommen \
+             nicht an. Unter Systemeinstellungen → Datenschutz & Sicherheit freigeben; ist Qross dort schon \
+             eingeschaltet, den Eintrag entfernen und neu hinzufügen."
+        );
+    }
     Ok(Box::new(inject::MacInjector::new()?))
 }
 

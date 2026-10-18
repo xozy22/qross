@@ -13,6 +13,7 @@ use std::sync::Arc;
 use qross_gui::changelog::{self, Release};
 use qross_gui::lifecycle;
 use qross_gui::{Role, Settings, EXPORT_FILE, GRID_COLS, GRID_ROWS};
+use qross_platform::Permission;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
@@ -165,6 +166,47 @@ fn open_data_dir(app: AppHandle, rt: Rt<'_>) -> Result<(), String> {
 #[tauri::command]
 fn open_project_page(app: AppHandle) -> Result<(), String> {
     app.opener().open_url(PROJECT_URL, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Rechte unter macOS → Datenschutz & Sicherheit; Windows und Linux haben immer alle.
+#[derive(Serialize)]
+struct Permissions {
+    accessibility: bool,
+    input_monitoring: bool,
+}
+
+#[tauri::command]
+fn permissions() -> Permissions {
+    Permissions {
+        accessibility: qross_platform::has_permission(Permission::Accessibility),
+        input_monitoring: qross_platform::has_permission(Permission::InputMonitoring),
+    }
+}
+
+/// Trägt Qross in die Liste des Rechts ein (macOS fragt beim ersten Mal selbst nach) und öffnet die
+/// passende Seite der Systemeinstellungen. `permission`: `accessibility` oder `input_monitoring`.
+#[tauri::command]
+fn open_permission_settings(app: AppHandle, permission: String) -> Result<(), String> {
+    let (permission, pane) = match permission.as_str() {
+        "accessibility" => (Permission::Accessibility, "Privacy_Accessibility"),
+        "input_monitoring" => (Permission::InputMonitoring, "Privacy_ListenEvent"),
+        other => return Err(format!("unbekanntes Recht: {other}")),
+    };
+    qross_platform::request_permission(permission);
+    let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Fehlende Rechte gleich beim Start ins Protokoll schreiben, nicht erst beim ersten Ereignis.
+fn log_permissions() {
+    let missing: Vec<&str> = [(Permission::Accessibility, "Bedienungshilfen"), (Permission::InputMonitoring, "Eingabeüberwachung")]
+        .into_iter()
+        .filter(|&(permission, _)| !qross_platform::has_permission(permission))
+        .map(|(_, name)| name)
+        .collect();
+    if !missing.is_empty() {
+        warn!("macOS erlaubt Qross noch nicht: {}", missing.join(", "));
+    }
 }
 
 #[tauri::command]
@@ -364,6 +406,7 @@ fn main() {
         }
     };
     info!("Daten in {}", data_dir.display());
+    log_permissions();
 
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
@@ -406,6 +449,8 @@ fn main() {
             install_update,
             open_data_dir,
             open_project_page,
+            permissions,
+            open_permission_settings,
         ])
         .setup(move |app| {
             logs.attach(app.handle().clone());

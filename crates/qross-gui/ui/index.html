@@ -34,6 +34,17 @@
     </button>
   </header>
 
+  <!-- Nur macOS: fehlende Rechte unter Datenschutz & Sicherheit (siehe renderPermissions) -->
+  <section id="permissions" class="permissions" role="alert" aria-labelledby="permTitle" hidden>
+    <svg class="ico perm-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9.5 17h-19z"/><path d="M12 10v4.5M12 17.5v.01"/></svg>
+    <div class="perm-body">
+      <h2 id="permTitle">macOS hat Qross Maus und Tastatur noch nicht freigegeben</h2>
+      <p class="hint">Ohne diese Rechte kommen Eingaben nicht an, ohne dass macOS einen Fehler meldet. Freigeben unter Systemeinstellungen → Datenschutz &amp; Sicherheit.</p>
+      <ul id="permList" class="perm-list"></ul>
+      <p class="hint">Ist Qross dort schon eingeschaltet, gilt der Eintrag nicht für diese Version, etwa nach einem Update von 0.5.0 oder älter. Dann Qross dort mit „−“ entfernen und hier über „Freigeben …“ neu eintragen.</p>
+    </div>
+  </section>
+
   <main>
     <!-- Server -->
     <section id="serverView" class="view server-view">

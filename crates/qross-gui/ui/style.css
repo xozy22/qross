@@ -31,7 +31,7 @@ html, body { height: 100%; margin: 0; }
 
 body {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   grid-template-columns: minmax(0, 1fr);
   background: var(--ink-0);
   color: var(--text);
@@ -177,6 +177,40 @@ code { font-family: var(--mono); font-size: 12.5px; }
 .btn.danger { color: var(--coral); }
 .btn.accept { background: var(--teal); border-color: transparent; color: #0b2a25; font-weight: 650; }
 .btn.accept:hover { background: #6aeed6; }
+
+/* ------------------------------------------------------------ Rechte (macOS) */
+
+/* Feste Zeilen: Ist der Hinweis versteckt, bleibt Zeile 2 leer und der Hauptbereich behält seine Höhe. */
+.topbar { grid-row: 1; }
+.permissions { grid-row: 2; }
+main { grid-row: 3; }
+.drawer { grid-row: 4; }
+
+.permissions {
+  display: flex;
+  gap: 14px;
+  margin: 14px 22px 0;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 182, 72, .35);
+  border-radius: 14px;
+  background: var(--amber-soft);
+}
+.perm-ico { width: 22px; height: 22px; color: var(--amber); margin-top: 1px; }
+.perm-body { min-width: 0; flex: 1; }
+.permissions h2 { margin: 0; color: var(--amber); }
+.perm-list { list-style: none; margin: 12px 0 4px; padding: 0; display: grid; gap: 8px; }
+.perm-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--ink-1);
+}
+.perm-text { display: grid; min-width: 0; }
+.perm-text .hint { margin-top: 2px; }
+.perm-item .btn { flex: none; }
 
 /* ------------------------------------------------------------ Hauptbereich */
 
@@ -1067,6 +1101,9 @@ dialog.settings { width: min(780px, calc(100vw - 32px)); height: min(640px, calc
   }
   .brand { grid-area: brand; }
   .brand .brand-name { display: none; }
+  .permissions { margin: 10px 14px 0; padding: 12px; }
+  .perm-ico { display: none; }
+  .perm-item { flex-direction: column; align-items: stretch; }
   .sheet-head { padding: 18px 14px 12px 18px; }
   .settings-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .settings-nav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; }

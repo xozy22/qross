@@ -104,6 +104,37 @@ pub trait Clipboard: Send {
     }
 }
 
+/// Recht, das macOS für Eingaben verlangt (Systemeinstellungen → Datenschutz & Sicherheit).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Permission {
+    /// „Bedienungshilfen“: Eingaben einspeisen (Client) und abfangen (Server)
+    Accessibility,
+    /// „Eingabeüberwachung“: Maus und Tastatur mitlesen (Server)
+    InputMonitoring,
+}
+
+/// Hat Qross dieses Recht? Windows und Linux kennen solche Rechte nicht und liefern immer `true`.
+pub fn has_permission(permission: Permission) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        mac::has_permission(permission)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = permission;
+        true
+    }
+}
+
+/// Bittet das System um das Recht. macOS trägt Qross dafür in die Liste ein und fragt beim ersten
+/// Mal selbst nach; anderswo passiert nichts.
+pub fn request_permission(permission: Permission) {
+    #[cfg(target_os = "macos")]
+    mac::request_permission(permission);
+    #[cfg(not(target_os = "macos"))]
+    let _ = permission;
+}
+
 /// Einmal beim Programmstart aufrufen (z. B. DPI-Awareness unter Windows).
 pub fn init_process() {
     imp::init_process();

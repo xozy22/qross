@@ -3,6 +3,9 @@ name: Release
 # Ein Release entsteht durch einen Tag, z. B.:
 #   git tag v0.1.0 && git push origin v0.1.0
 # oder manuell über „Run workflow“ mit einem bestehenden Tag.
+# Testlauf ohne Veröffentlichung: „Run workflow“ auf einem Branch mit „Testlauf“; gebaut und geprüft
+# wird dann der Stand des Branches, der Tag liefert nur Version und Release-Notizen.
+#   gh workflow run release.yml --ref <branch> -f tag=v0.5.0 -f test_run=true
 on:
   push:
     tags: ["v*"]
@@ -11,6 +14,10 @@ on:
       tag:
         description: "Bestehender Tag, z. B. v0.1.0"
         required: true
+      test_run:
+        description: "Testlauf: den gewählten Branch bauen und prüfen, nichts veröffentlichen"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -76,7 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ inputs.test_run && github.sha || env.TAG }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -110,6 +117,43 @@ jobs:
       - name: Kommandozeile bauen
         run: cargo build --release --locked -p qross --target ${{ matrix.target }}
 
+      # Eigenes, selbst signiertes Zertifikat statt ad hoc: Die designierte Anforderung (Identifier und
+      # Zertifikat) bleibt über Builds gleich, also behält macOS „Bedienungshilfen“ und
+      # „Eingabeüberwachung“ nach einem Update. Ad hoc steckt darin der cdhash, der sich mit jedem Build
+      # ändert. Tauris eigener Import (APPLE_CERTIFICATE) erkennt nur Zertifikate von Apple, deshalb
+      # kommt es hier in eine eigene Keychain; signiert wird mit dem Namen aus bundle.macOS.signingIdentity.
+      # Das Zertifikat erst nach Rückfrage austauschen: Mit einem neuen verlieren alle Mac-Nutzer die Rechte.
+      - name: Signierzertifikat importieren (macOS)
+        if: runner.os == 'macOS'
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERTIFICATE}" ]; then
+            if [ "${{ inputs.test_run }}" != "true" ]; then
+              echo "::error::Secret MACOS_CERTIFICATE fehlt – ad hoc signiert verlören Mac-Nutzer nach dem Update ihre Rechte"
+              exit 1
+            fi
+            echo "::warning::Secret MACOS_CERTIFICATE fehlt – das App-Paket wird nur ad hoc signiert"
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          keychain="${RUNNER_TEMP}/qross-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "${CERTIFICATE}" | base64 --decode > "${RUNNER_TEMP}/qross-signing.p12"
+          security create-keychain -p "${password}" "${keychain}"
+          security set-keychain-settings -lut 3600 "${keychain}"
+          security unlock-keychain -p "${password}" "${keychain}"
+          security import "${RUNNER_TEMP}/qross-signing.p12" -k "${keychain}" -f pkcs12 \
+            -P "${CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+          rm "${RUNNER_TEMP}/qross-signing.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${password}" "${keychain}" > /dev/null
+          security list-keychains -d user -s "${keychain}" $(security list-keychains -d user | tr -d '"')
+          # Ohne -v: Ein selbst signiertes Zertifikat gilt dem System nicht als vertrauenswürdig,
+          # codesign nimmt es trotzdem.
+          security find-identity -p codesigning "${keychain}"
+
       # Mit dem Schlüssel entstehen zusätzlich die signierten Update-Pakete (*.sig) für den Updater der App.
       - name: App bauen (Tauri)
         working-directory: crates/qross-gui
@@ -118,21 +162,56 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx --yes @tauri-apps/cli@2 build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
+      - name: Signier-Keychain entfernen (macOS)
+        if: always() && runner.os == 'macOS'
+        run: security delete-keychain "${RUNNER_TEMP}/qross-signing.keychain-db" 2> /dev/null || true
+
+      # Tauri signiert das DMG mit, sobald die Identität nicht „-“ ist. Ein signiertes, aber nicht
+      # beglaubigtes DMG sperrt Gatekeeper aber schon beim Öffnen, vor der App darin
+      # (https://github.com/tauri-apps/tauri/issues/12288). Ohne Signatur fragt macOS nur einmal, bei der App.
+      - name: DMG-Signatur entfernen (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          for dmg in target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
+            if codesign --display "$dmg" > /dev/null 2>&1; then
+              codesign --remove-signature "$dmg"
+              echo "Signatur entfernt: $dmg"
+            fi
+          done
+
       # Ohne gültige Signatur des ganzen App-Pakets meldet macOS nach dem Download „beschädigt“
       # statt „nicht verifizierter Entwickler“ (das sich in den Einstellungen freigeben lässt).
-      - name: macOS-Signatur prüfen (App und DMG)
+      - name: macOS-Signatur prüfen (App, DMG, Update-Paket)
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           bundle="target/${{ matrix.target }}/release/bundle"
-          codesign --verify --deep --strict --verbose=2 "${bundle}/macos/Qross.app"
-          codesign --display --verbose=2 "${bundle}/macos/Qross.app" 2>&1 | grep -E "^(Identifier|Format|Signature|Sealed Resources)"
+          app="${bundle}/macos/Qross.app"
+          codesign --verify --deep --strict --verbose=2 "${app}"
+          codesign --display --verbose=4 "${app}" 2>&1 \
+            | grep -E "^(Identifier|Format|CodeDirectory|CDHash|Signature|Authority|TeamIdentifier|Sealed Resources)"
+          # Designierte Anforderung: Daran bindet macOS die Rechte unter Datenschutz & Sicherheit.
+          requirement="$(codesign --display -r- "${app}" 2> /dev/null)"
+          echo "${requirement}"
+          if [ "${APPLE_SIGNING_IDENTITY:-}" != "-" ] && ! grep -q 'certificate' <<< "${requirement}"; then
+            echo "::error::App-Paket nicht mit dem Zertifikat signiert – Mac-Nutzer verlören bei jedem Update die Rechte"
+            exit 1
+          fi
+          if codesign --display "${bundle}"/dmg/*.dmg > /dev/null 2>&1; then
+            echo "::error::Das DMG ist signiert – Gatekeeper sperrte es schon beim Öffnen"
+            exit 1
+          fi
           mount="$(mktemp -d)"
           # Das DMG zeigt beim Öffnen die Lizenz; ohne Zustimmung bricht hdiutil das Einhängen ab.
           (yes || true) | hdiutil attach -nobrowse -readonly -mountpoint "$mount" "${bundle}"/dmg/*.dmg > /dev/null
           codesign --verify --deep --strict --verbose=2 "${mount}/Qross.app"
           spctl --assess --type execute --verbose=2 "${mount}/Qross.app" || true
           hdiutil detach "$mount" > /dev/null
+          # Das Update-Paket enthält dasselbe App-Paket, das der Updater einspielt.
+          update="$(mktemp -d)"
+          tar -xzf "${bundle}/macos/Qross.app.tar.gz" -C "$update"
+          codesign --verify --deep --strict --verbose=2 "${update}/Qross.app"
 
       - name: Artefakte sammeln
         shell: bash
@@ -167,9 +246,110 @@ jobs:
           path: release/*
           if-no-files-found: error
 
+  # Wie beim Nutzer: ein Mac, der das Zertifikat nie gesehen hat, mit dem DMG aus dem Release.
+  macos-check:
+    name: macOS-Paket auf frischem Mac prüfen
+    needs: build
+    runs-on: macos-26
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: qross-aarch64-apple-darwin
+          path: release
+
+      - name: Signatur und designierte Anforderung
+        run: |
+          set -euo pipefail
+          codesign --display release/*.dmg 2>&1 || true
+          mount="$(mktemp -d)"
+          (yes || true) | hdiutil attach -nobrowse -readonly -mountpoint "$mount" release/*.dmg > /dev/null
+          ditto "${mount}/Qross.app" check/Qross.app
+          hdiutil detach "$mount" > /dev/null
+          codesign --verify --deep --strict --verbose=2 check/Qross.app
+          codesign --display --verbose=4 check/Qross.app 2>&1 \
+            | grep -E "^(Identifier|CodeDirectory|CDHash|Signature|Authority|TeamIdentifier)"
+          codesign --display -r- check/Qross.app 2> /dev/null
+
+      # Wie macOS nach einem Update: Erfüllt die neue Version die designierte Anforderung der zuletzt
+      # veröffentlichten? Nur dann gelten erteilte Rechte weiter (Apple TN3127).
+      - name: Rechte bleiben nach dem Update erhalten
+        run: |
+          set -euo pipefail
+          gh release download --repo "${{ github.repository }}" --pattern '*.dmg' --dir previous
+          mount="$(mktemp -d)"
+          (yes || true) | hdiutil attach -nobrowse -readonly -mountpoint "$mount" previous/*.dmg > /dev/null
+          codesign --display -r previous.req "${mount}/Qross.app" 2> /dev/null
+          hdiutil detach "$mount" > /dev/null
+          sed -i '' -E 's/^#? *designated => //' previous.req
+          echo "Letzte Version ($(ls previous)): $(cat previous.req)"
+          if grep -q 'cdhash' previous.req; then
+            echo "::notice::Die letzte Version ist nur ad hoc signiert. Mac-Nutzer müssen die Rechte nach diesem Update ein letztes Mal neu erteilen."
+          elif codesign --verify --verbose=2 -R previous.req check/Qross.app; then
+            echo "Die neue Version erfüllt die Anforderung der letzten: Die Rechte bleiben erhalten."
+          else
+            message="Die neue Version erfüllt die Anforderung der letzten nicht – Mac-Nutzer verlören nach dem Update ihre Rechte"
+            if [ "${{ inputs.test_run }}" != "true" ]; then
+              echo "::error::${message}"
+              exit 1
+            fi
+            echo "::warning::${message}"
+          fi
+
+      # Startet die App kurz: Signatur und Hardened Runtime ohne Team-ID werden von macOS angenommen,
+      # und die Rechteprüfung läuft auf echtem macOS.
+      - name: Startprobe
+        run: |
+          set -uo pipefail
+          QROSS_DATA_DIR="$(mktemp -d)" check/Qross.app/Contents/MacOS/qross-gui > start.log 2>&1 &
+          pid=$!
+          sleep 15
+          alive=no
+          if kill -0 "$pid" 2> /dev/null; then
+            alive=yes
+            kill "$pid"
+          fi
+          wait "$pid" 2> /dev/null
+          cat start.log
+          if [ "$alive" != yes ]; then
+            echo "::error::Qross hat sich beim Start beendet"
+            exit 1
+          fi
+
+      # Gatekeeper wie nach einem Download aus dem Browser (Quarantäne-Attribut). Zum Vergleich die
+      # bisherige Ad-hoc-Signatur (0.3.1 bis 0.5.0) und ein absichtlich beschädigtes Paket.
+      - name: Gatekeeper-Vergleich
+        run: |
+          set -uo pipefail
+          spctl --status
+          for variant in zertifikat adhoc beschaedigt; do
+            ditto check/Qross.app "gatekeeper/${variant}/Qross.app"
+          done
+          codesign --force --deep --options runtime -s - gatekeeper/adhoc/Qross.app
+          resource="$(find gatekeeper/beschaedigt/Qross.app/Contents/Resources -type f | head -n 1)"
+          printf 'x' >> "$resource"
+          for variant in zertifikat adhoc beschaedigt; do
+            app="gatekeeper/${variant}/Qross.app"
+            xattr -w com.apple.quarantine "0083;$(printf '%x' "$(date +%s)");Safari;" "$app"
+            echo "==================== ${variant}"
+            codesign --verify --deep --strict "$app" 2>&1 && echo "codesign: gültig"
+            spctl --assess --type execute -vvv "$app" 2>&1
+            syspolicy_check distribution "$app" 2>&1 | head -n 20
+            # Echter erster Start: Gatekeeper entscheidet und zeigt seinen Dialog.
+            open "$app" 2>&1
+            sleep 6
+            log show --last 8s --style compact \
+              --predicate 'process == "syspolicyd" OR process == "CoreServicesUIAgent"' 2> /dev/null \
+              | grep -i -E 'qross|prompt|malware|damaged|broken|verif|reject|allow|scan' | tail -n 25
+            killall CoreServicesUIAgent qross-gui 2> /dev/null
+          done
+          exit 0
+
   publish:
     name: GitHub-Release veröffentlichen
-    needs: [notes, build]
+    needs: [notes, build, macos-check]
+    if: ${{ !inputs.test_run }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
