@@ -27,6 +27,13 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 
 ### Behoben
 
+- **Windows: Erfassung übersteht Lastspitzen:** Brauchte der Server-PC kurz zu lange für eine Eingabe, entfernte
+  Windows die Eingabe-Hooks ohne jede Meldung. Qross bekam danach keine Eingaben mehr und wechselte bis zum
+  Neustart nicht mehr. Ein Wächter merkt das jetzt nach etwa zwei Sekunden, setzt die Hooks neu und schreibt es
+  mit Zähler ins Log. Läuft der Cursor gerade auf einem Client, lässt Qross dort alle Tasten und Maustasten los,
+  damit nichts hängen bleibt. Sperrbildschirm, UAC, Fenster mit Administratorrechten und der Ruhezustand lösen
+  keinen Fehlalarm aus. Vorbeugend wartet der Hook selbst nie mehr: Ereignisse gehen über eine sperrfreie
+  Warteschlange an den Server-Kern, und der Hook-Thread läuft mit höchster Priorität, auch im Hintergrund.
 - **macOS: Autostart aus dem DMG:** Startete Qross das erste Mal direkt aus dem DMG oder aus der
   Quarantäne-Kopie, zeigte der Autostart danach ins Leere. Jetzt trägt es sich erst ein, wenn es im Ordner
   „Programme“ läuft, und sagt in den Einstellungen, warum.
