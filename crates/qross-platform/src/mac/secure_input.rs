@@ -3,7 +3,10 @@
 //! Ob sie an ist, sagt `IsSecureEventInputEnabled` (Carbon); das gilt systemweit, egal welcher
 //! Prozess sie eingeschaltet hat. Wer sie hält, steht nicht dokumentiert unter
 //! `kCGSSessionSecureInputPID` in der Beschreibung der Sitzung – dieselbe Angabe, die
-//! `ioreg -l -w 0 | grep SecureInput` zeigt.
+//! `ioreg -l -w 0 | grep SecureInput` zeigt. Schaltet sie ein Prozess ein, der kein Programm mit
+//! Fenstern ist (etwa ein Kommandozeilenwerkzeug), trägt macOS dort das Programm ein, das gerade
+//! vorn ist (in der CI: Finder). Für Terminal, Browser, Passwortmanager und loginwindow ist es das
+//! Programm selbst.
 
 use std::ffi::c_void;
 
@@ -93,7 +96,7 @@ mod tests {
         }
     }
 
-    /// Ein Test für alles: Parallel laufende Tests sähen sonst den Zustand der anderen.
+    /// Ein- und Ausschalten in einem Test: Parallel laufende Tests sähen sonst den Zustand der anderen.
     #[test]
     fn detects_secure_input_of_this_process() {
         let before = state();
@@ -107,14 +110,23 @@ mod tests {
         let on = Enabled::new();
         let held = state().expect("nach EnableSecureEventInput an");
         eprintln!("gehalten von {}", held.describe());
-        assert_eq!(held.pid, Some(std::process::id()), "kCGSSessionSecureInputPID");
-        let app = held.app.expect("Programmname");
-        let exe = std::env::current_exe().unwrap();
-        let exe = exe.file_name().unwrap().to_string_lossy();
-        // `proc_name` kürzt auf 32 Zeichen
-        assert!(!app.is_empty() && exe.starts_with(&app), "Programm „{app}“, erwartet „{exe}“");
+        // Dieser Test ist kein Programm mit Fenstern: macOS nennt dann das Programm vorn (in der CI
+        // der Finder), nicht ihn selbst. Es muss aber ein laufender Prozess mit Namen sein.
+        let pid = held.pid.expect("kCGSSessionSecureInputPID in der Sitzungsbeschreibung");
+        let app = held.app.as_deref().expect("Programmname zum Halter");
+        assert!(pid > 0 && !app.is_empty(), "{}", held.describe());
 
         drop(on);
         assert_eq!(state(), None, "nach DisableSecureEventInput wieder aus");
+    }
+
+    #[test]
+    fn names_a_process_by_its_executable() {
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe.file_name().unwrap().to_string_lossy();
+        let app = app_of(std::process::id()).expect("Name des eigenen Prozesses");
+        // Kein Bündel: der Dateiname (`proc_name` kürzt auf 32 Zeichen)
+        assert!(!app.is_empty() && exe.starts_with(&app), "Programm „{app}“, erwartet „{exe}“");
+        assert_eq!(app_of(i32::MAX as u32), None, "kein solcher Prozess");
     }
 }
