@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qross_core::{CaptureEvent, Inject, Layout, LinkConfig};
-use qross_net::client::{self, ClientConfig, ClientPlatform};
+use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::clipfiles;
 use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform};
 use qross_net::{Identity, TrustStore};
@@ -544,4 +544,90 @@ async fn changed_monitors_are_reported_again() {
     .await;
     let injected = s.injected.clone();
     wait_for("Enter nach der Änderung", || injected.0.lock().unwrap().contains(&Inject::MoveTo { x: 1, y: 490 })).await;
+}
+
+/// Wartet auf die nächste Meldung, die `pick` annimmt.
+async fn next_notice<N, T>(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<N>,
+    what: &str,
+    mut pick: impl FnMut(N) -> Option<T>,
+) -> T {
+    let wait = async {
+        loop {
+            let notice = rx.recv().await.unwrap_or_else(|| panic!("Meldungen beendet vor: {what}"));
+            if let Some(found) = pick(notice) {
+                return found;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), wait)
+        .await
+        .unwrap_or_else(|_| panic!("Zeitüberschreitung beim Warten auf: {what}"))
+}
+
+#[tokio::test]
+async fn connection_quality_is_measured_on_both_sides() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let (server_tx, mut server_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server = Server::bind(config, &server_id, trust).unwrap().with_notices(server_tx);
+    let addr = server.local_addr().unwrap();
+    let (_events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(RecordingCapture::default()),
+        events: events_rx,
+        clipboard: Box::new(SharedClipboard::default()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+    }));
+    let (client_tx, mut client_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client_task = tokio::spawn(client::run_with_notices(
+        ClientConfig {
+            name: "laptop".into(),
+            server: addr.to_string(),
+            server_fingerprint: Some(server_id.fingerprint()),
+            clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+        },
+        client_id,
+        TrustStore::in_memory(),
+        ClientPlatform {
+            injector: Box::new(RecordingInjector::default()),
+            clipboard: Box::new(SharedClipboard::default()),
+            screen: Box::new(|| LAPTOP),
+            monitors: Box::new(Vec::new),
+        },
+        client_tx,
+    ));
+
+    let (name, at_server) = next_notice(&mut server_rx, "Messpunkt beim Server", |n| match n {
+        ServerNotice::Quality { name, quality } => Some((name, quality)),
+        _ => None,
+    })
+    .await;
+    assert_eq!(name, "laptop");
+    let client_quality = |n: ClientNotice| match n {
+        ClientNotice::Quality(q) => Some(q),
+        _ => None,
+    };
+    let first = next_notice(&mut client_rx, "Messpunkt beim Client", client_quality).await;
+    let second = next_notice(&mut client_rx, "zweiter Messpunkt beim Client", client_quality).await;
+    let third = next_notice(&mut client_rx, "dritter Messpunkt beim Client", client_quality).await;
+
+    for q in [at_server, first, second, third] {
+        assert!(q.rtt_ms > 0.0 && q.rtt_ms < 1000.0, "{q:?}");
+        assert_eq!(q.loss_pct, 0.0, "auf Loopback geht nichts verloren: {q:?}");
+        assert!(q.jitter_ms >= 0.0, "{q:?}");
+    }
+    // Ohne Eingaben laufen jede Sekunde Keep-alives in beide Richtungen; über zwei Sekunden
+    // muss also Durchsatz zu sehen sein.
+    assert!(second.tx_bytes_per_s + third.tx_bytes_per_s > 0, "{second:?} {third:?}");
+    assert!(second.rx_bytes_per_s + third.rx_bytes_per_s > 0, "{second:?} {third:?}");
+    server_task.abort();
+    client_task.abort();
 }

@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Notify, Ready};
 use crate::files::{FileOutcome, Receiver, Staging};
+use crate::quality::{self, Quality};
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
 use crate::tls::{peer_fingerprint, server_config};
@@ -88,6 +89,8 @@ pub enum ServerNotice {
     ClientScreenChanged { name: String, screen: Rect, monitors: Vec<Rect> },
     /// Bildschirm des Servers selbst, nach `Listening` und bei Änderungen
     LocalScreenChanged { screen: Rect, monitors: Vec<Rect> },
+    /// Verbindungsqualität zu einem Client, etwa jede Sekunde (siehe [`quality`]).
+    Quality { name: String, quality: Quality },
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -135,6 +138,8 @@ struct ClientHandle {
     /// Zuletzt gemeldete Fläche und Monitore (für die Oberfläche)
     screen: Rect,
     monitors: Vec<Rect>,
+    /// Misst die Verbindungsqualität, solange der Client verbunden ist (nur mit Oberfläche)
+    _quality: Option<quality::Monitor>,
 }
 
 impl Server {
@@ -200,6 +205,14 @@ impl Server {
         if let Some(tx) = &self.notices {
             let _ = tx.send(notice);
         }
+    }
+
+    /// Meldet die Verbindungsqualität eines Clients, sofern jemand zuhört.
+    fn monitor_quality(&self, conn: &Connection, name: &str) -> Option<quality::Monitor> {
+        let (tx, name) = (self.notices.clone()?, name.to_owned());
+        Some(quality::monitor(conn.clone(), move |quality| {
+            let _ = tx.send(ServerNotice::Quality { name: name.clone(), quality });
+        }))
     }
 
     fn notify_action(&self, action: &Action) {
@@ -286,7 +299,15 @@ impl Server {
                             Ok(()) => {
                                 self.notify(ServerNotice::ClientConnected { name: name.clone(), addr, screen });
                                 let input = spawn_input_writer(conn.clone(), name.clone());
-                                let handle = ClientHandle { id: conn.stable_id(), conn, input, screen, monitors: Vec::new() };
+                                let quality = self.monitor_quality(&conn, &name);
+                                let handle = ClientHandle {
+                                    id: conn.stable_id(),
+                                    conn,
+                                    input,
+                                    screen,
+                                    monitors: Vec::new(),
+                                    _quality: quality,
+                                };
                                 clients.insert(name.clone(), handle);
                                 clip_synced.lock().unwrap().remove(&name);
                                 let _ = reply.send(Ok(self.config.name.clone()));

@@ -13,6 +13,7 @@ use qross_gui::lifecycle::AppState;
 use qross_gui::{Role, Settings};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::clipfiles::FilesNotice;
+use qross_net::quality::Quality;
 use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, StopHandle};
 use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{LogInjector, MemoryClipboard};
@@ -123,6 +124,17 @@ pub struct FoundServer {
     pub swaps_modifiers: bool,
     /// `known`, `unknown` oder `mismatch` gegenüber dem gespeicherten Fingerprint
     pub trust: &'static str,
+}
+
+/// Messpunkt der Verbindungsqualität für das Fenster (Ereignis `quality`).
+#[derive(Serialize, Clone, Debug)]
+pub struct QualityEvent {
+    /// Server: Name des Clients; Client: `None` (die Verbindung zum Server)
+    pub peer: Option<String>,
+    /// „Sehr gut“, „Gut“, „Mäßig“ oder „Schlecht“
+    pub label: &'static str,
+    #[serde(flatten)]
+    pub quality: Quality,
 }
 
 pub fn platform_name(platform: Platform) -> &'static str {
@@ -443,6 +455,7 @@ impl Runtime {
             ServerNotice::LocalScreenChanged { screen, monitors } => self.update(|s| {
                 s.local_screen = Some(LocalScreen { width: screen.width, height: screen.height, monitors });
             }),
+            ServerNotice::Quality { name, quality } => self.emit_quality(Some(name), quality),
         }
     }
 
@@ -604,10 +617,17 @@ impl Runtime {
             ClientNotice::CursorEntered => self.update(|s| s.cursor_here = true),
             ClientNotice::CursorLeft => self.update(|s| s.cursor_here = false),
             ClientNotice::ClipboardFiles(notice) => self.on_files_notice(notice),
+            ClientNotice::Quality(quality) => self.emit_quality(None, quality),
         }
     }
 
     // ---------------------------------------------------------------- beide
+
+    /// Messpunkt der Verbindungsqualität direkt ans Fenster (etwa 1×/s je Verbindung, deshalb
+    /// nicht über den Status, der jedes Mal auch das Tray neu zeichnet).
+    fn emit_quality(&self, peer: Option<String>, quality: Quality) {
+        let _ = self.app.emit("quality", QualityEvent { peer, label: quality.level.label(), quality });
+    }
 
     /// Kopierte Dateien: Hinweis im Fenster und, wenn es im Hintergrund ist, eine
     /// Systembenachrichtigung für „bereit“ (nach längerer Übertragung) und „zu groß“.

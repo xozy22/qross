@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Incoming, Notify, Ready};
 use crate::files::{self, FileOutcome, Receiver, Staging};
+use crate::quality::{self, Quality};
 use crate::streams::{read_kind, send_drag_message};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
@@ -115,6 +116,8 @@ pub enum ClientNotice {
     CursorLeft,
     /// Kopierte Dateien in der Zwischenablage (senden, empfangen, einfügbar, zu groß)
     ClipboardFiles(FilesNotice),
+    /// Verbindungsqualität zum Server, etwa jede Sekunde (siehe [`quality`]).
+    Quality(Quality),
 }
 
 type Notices<'a> = Option<&'a mpsc::UnboundedSender<ClientNotice>>;
@@ -276,6 +279,12 @@ async fn session(
         debug!(?monitors, "Monitore an den Server gemeldet");
         write_frame(&mut control, &Control::Monitors(monitors.clone())).await?;
     }
+    // Läuft bis zum Ende dieser Sitzung
+    let _quality = notices.cloned().map(|tx| {
+        quality::monitor(conn.clone(), move |q| {
+            let _ = tx.send(ClientNotice::Quality(q));
+        })
+    });
 
     let mut receiver = Receiver::new(Staging::create(&files::drag_staging_base())?);
 
