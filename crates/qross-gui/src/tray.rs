@@ -1,5 +1,9 @@
 //! Tray-Icon: zeigt den Zustand als farbigen Punkt und im Tooltip.
+//!
+//! Nicht jedes System zeigt Tray-Icons an (z. B. GNOME ohne AppIndicator-Erweiterung). Dann
+//! beendet Schließen die App, statt das Fenster unerreichbar zu verstecken.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use qross_gui::Role;
@@ -7,14 +11,90 @@ use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Wry};
+use tracing::{info, warn};
 
 use crate::runtime::{Phase, Runtime, Status};
 
 const TRAY_ID: &str = "main";
 
 static TOGGLE: OnceLock<MenuItem<Wry>> = OnceLock::new();
+static AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-pub fn create(app: &AppHandle) -> tauri::Result<()> {
+/// Ist ein Tray-Icon sichtbar, über das sich das versteckte Fenster zurückholen lässt?
+pub fn available() -> bool {
+    AVAILABLE.load(Ordering::Relaxed)
+}
+
+/// Legt das Tray-Icon an, sofern das System eines anzeigen kann. Fehler beenden die App nicht.
+pub fn init(app: &AppHandle) {
+    if !host_present() {
+        info!("Kein Tray verfügbar – Schließen beendet Qross");
+        return;
+    }
+    // Unter Linux wird libappindicator erst jetzt geladen und kann dabei mit einem Panic scheitern.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create(app))) {
+        Ok(Ok(())) => AVAILABLE.store(true, Ordering::Relaxed),
+        Ok(Err(e)) => warn!("Tray-Icon nicht verfügbar ({e}) – Schließen beendet Qross"),
+        Err(_) => warn!("Tray-Icon nicht verfügbar – Schließen beendet Qross"),
+    }
+}
+
+fn host_present() -> bool {
+    // Zum Ausprobieren des Verhaltens ohne Tray (nur Debug-Builds)
+    if cfg!(debug_assertions) && std::env::var_os("QROSS_NO_TRAY").is_some() {
+        return false;
+    }
+    platform_host_present()
+}
+
+/// Linux: Tray-Icons laufen über StatusNotifierItem. Ohne `org.kde.StatusNotifierWatcher` auf dem
+/// Session-Bus zeigt niemand das Icon an. Lässt sich das nicht prüfen, gilt: kein Tray.
+#[cfg(target_os = "linux")]
+fn platform_host_present() -> bool {
+    use std::process::Command;
+
+    let gdbus = Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.DBus",
+            "--object-path",
+            "/org/freedesktop/DBus",
+            "--method",
+            "org.freedesktop.DBus.NameHasOwner",
+            "org.kde.StatusNotifierWatcher",
+        ])
+        .output();
+    if let Ok(out) = gdbus {
+        if out.status.success() {
+            return String::from_utf8_lossy(&out.stdout).contains("true");
+        }
+    }
+    let dbus_send = Command::new("dbus-send")
+        .args([
+            "--session",
+            "--dest=org.freedesktop.DBus",
+            "--type=method_call",
+            "--print-reply",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus.NameHasOwner",
+            "string:org.kde.StatusNotifierWatcher",
+        ])
+        .output();
+    match dbus_send {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).contains("boolean true"),
+        _ => false,
+    }
+}
+
+/// Windows und macOS haben immer einen Infobereich bzw. eine Menüleiste.
+#[cfg(not(target_os = "linux"))]
+fn platform_host_present() -> bool {
+    true
+}
+
+fn create(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Qross öffnen", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "Starten", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Beenden", true, None::<&str>)?;
@@ -41,14 +121,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
                     }
                 });
             }
-            "quit" => {
-                let app = app.clone();
-                let rt = app.state::<Arc<Runtime>>().inner().clone();
-                tauri::async_runtime::spawn(async move {
-                    rt.stop().await;
-                    app.exit(0);
-                });
-            }
+            "quit" => crate::quit(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

@@ -32,6 +32,16 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
+/// Stoppt Server bzw. Client (gibt Maus und Tastatur frei) und beendet die App.
+pub fn quit(app: &AppHandle) {
+    let app = app.clone();
+    let rt = app.state::<Arc<Runtime>>().inner().clone();
+    tauri::async_runtime::spawn(async move {
+        rt.stop().await;
+        app.exit(0);
+    });
+}
+
 #[derive(Serialize)]
 struct Snapshot {
     settings: Settings,
@@ -142,13 +152,6 @@ fn trust_server(rt: Rt<'_>, address: String, fingerprint: String) -> Result<(), 
     rt.trust_server(&address, &fingerprint).map_err(|e| format!("{e:#}"))
 }
 
-#[tauri::command]
-fn hide_window(app: AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-    }
-}
-
 /// Adresse der Netzwerkkarte mit der Standardroute. `connect` auf einem UDP-Socket sendet nichts.
 fn local_ip() -> Option<String> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -200,19 +203,23 @@ fn main() {
             probe_server,
             discover_servers,
             trust_server,
-            hide_window,
         ])
         .setup(move |app| {
             logs.attach(app.handle().clone());
             app.manage(Arc::new(Runtime::new(app.handle().clone(), data_dir.clone(), settings.clone())));
-            tray::create(app.handle())?;
+            tray::init(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Schließen versteckt das Fenster nur; beendet wird über das Tray-Menü.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                if tray::available() {
+                    // Mit Tray versteckt Schließen das Fenster nur; beendet wird über das Tray-Menü.
+                    let _ = window.hide();
+                } else {
+                    // Ohne Tray wäre ein verstecktes Fenster nicht mehr erreichbar.
+                    quit(window.app_handle());
+                }
             }
         })
         .run(tauri::generate_context!())
