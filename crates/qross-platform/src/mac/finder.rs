@@ -335,12 +335,13 @@ impl Reader {
         };
         let mut content = None;
         self.walk(window, 0, &mut view, &mut content);
-        // Die Einträge kosten am meisten; ohne Pfadleiste geht es nicht ohne sie.
+        // Die Einträge kosten am meisten; ohne Pfadleiste geht es nicht ohne sie. Ohne erkannte
+        // Inhaltsansicht (etwa eine andere Version des Finders) aus dem ganzen Fenster: Einträge der
+        // Seitenleiste stören nicht, denn es zählt nur ein Ordner, der so heißt wie das Fenster.
         let resolved = finder_folder(&view, |_| Vec::new(), |path| path.is_dir()).is_some();
         if !resolved {
-            if let Some(content) = content {
-                self.collect_items(&content, 0, &mut view.items);
-            }
+            let content = content.unwrap_or_else(|| window.clone());
+            self.collect_items(&content, 0, &mut view.items);
         }
         view
     }
@@ -389,7 +390,7 @@ impl Reader {
         }
         let role = element.role();
         let children: Vec<AxElement> = match role.as_str() {
-            "AXScrollBar" => return,
+            "AXScrollBar" | "AXToolbar" | "AXTabGroup" => return,
             "AXBrowser" => {
                 let columns = element.elements("AXColumns");
                 columns.into_iter().rev().take(COLUMNS).collect()
