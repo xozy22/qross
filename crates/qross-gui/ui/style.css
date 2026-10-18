@@ -69,8 +69,9 @@ code { font-family: var(--mono); font-size: 12.5px; }
   background: var(--ink-0);
 }
 
-.brand { display: flex; align-items: center; gap: 10px; font: 650 18px/1 var(--font-display); letter-spacing: -.01em; }
-.brand img { border-radius: 8px; }
+.brand { display: flex; align-items: center; gap: 11px; font: 650 18px/1 var(--font-display); letter-spacing: -.01em; }
+/* Das Logo bringt eigene abgerundete Ecken mit; 36 px bleiben unter der Höhe des Umschalters (41 px). */
+.brand img { display: block; width: 36px; height: 36px; flex: none; }
 
 .segmented {
   display: inline-flex;
