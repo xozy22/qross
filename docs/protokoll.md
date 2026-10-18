@@ -1,11 +1,11 @@
-# Qross-Protokoll, Version 2
+# Qross-Protokoll, Version 3
 
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
 
 ## Transport
 
-- **QUIC** (`quinn`) über UDP, Standardport **24900**, ALPN `qross/2`, ausschließlich TLS 1.3
+- **QUIC** (`quinn`) über UDP, Standardport **24900**, ALPN `qross/3`, ausschließlich TLS 1.3
 - Beide Seiten weisen sich mit einem **selbstsignierten Zertifikat** aus (gegenseitige Authentifizierung).
   Vertrauen entsteht über den SHA-256-Fingerprint des Zertifikats:
   - Der Server nimmt nur Clients an, die er per `qross trust <name> <fingerprint>` freigegeben hat.
@@ -21,7 +21,7 @@ Implementierung: `crates/qross-proto`.
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel` |
 | Datagramm | Server → Client | **nein** | `MouseMove` |
-| Clipboard (je Übertragung ein eigener Stream, Priorität −10) | ⇄ | ja | `Clipboard::Text` |
+| Clipboard (je Übertragung ein eigener Stream, Priorität −10) | ⇄ | ja | `Clipboard::Data { text, html, png }` |
 | Datei (je Datei ein eigener Stream, Priorität −10) | Server → Client | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
 
 Jeder unidirektionale Stream beginnt mit einem Byte `StreamKind` (1 = Input, 2 = Clipboard, 3 = Datei).
@@ -30,7 +30,7 @@ große Schwachpunkt von Synergy.
 
 ## Kodierung
 
-- Stream-Frames: `u32` Länge (big-endian) + [postcard](https://postcard.jamesmunns.com/)-kodierte Nachricht, maximal 32 MiB
+- Stream-Frames: `u32` Länge (big-endian) + [postcard](https://postcard.jamesmunns.com/)-kodierte Nachricht, maximal 64 MiB
 - Datagramme: reines postcard (`enum Datagram`), eine Mausbewegung braucht ca. 8–12 Bytes
 
 ## Ablauf
@@ -47,6 +47,14 @@ große Schwachpunkt von Synergy.
    `MouseMove`-Datagramme mit dieser `epoch` und steigender `seq`.
 5. Verlässt der Cursor den Client: `Leave`. Der Client lässt alle Tasten los und schickt sein Clipboard,
    falls es sich geändert hat.
+
+## Zwischenablage
+
+Übertragen werden alle vorhandenen Darstellungen gleichzeitig: Text, HTML-Ausschnitt und Bild als PNG.
+Der Empfänger stellt sie wieder gemeinsam bereit, sodass jedes Programm sein bevorzugtes Format findet.
+Unter Windows sind das Unicode-Text, „HTML Format“, „PNG“ und zusätzlich ein DIB für ältere Programme.
+Lesen und PNG-Kodierung laufen in einem eigenen Thread, damit große Screenshots die Maus nicht ausbremsen.
+Bilder über der Frame-Grenze werden weggelassen, Text und HTML gehen trotzdem mit.
 
 ## Drag & Drop von Dateien
 
@@ -84,6 +92,6 @@ Zeichen und reservierte Namen werden ersetzt.
 
 - Drag & Drop in Gegenrichtung (Client → Server) und als Quelle unter Linux/macOS
 - Relative Mausbewegung für Spiele
-- Clipboard: Bilder/HTML; Dateien per Kopieren/Einfügen
+- Zwischenablage: RTF; Dateien per Kopieren/Einfügen
 - Bildschirmschoner-Sync, Strg+Alt+Entf, Secure Desktop (UAC)
 - Wayland (libei/InputCapture-Portal)

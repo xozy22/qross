@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use qross_core::Inject;
+use qross_proto::ClipboardData;
 
 use crate::{Capture, Clipboard, Injector};
 
@@ -35,17 +36,17 @@ impl Injector for RecordingInjector {
 
 #[derive(Default)]
 pub struct MemoryClipboard {
-    text: Option<String>,
+    data: Option<ClipboardData>,
     seq: u64,
 }
 
 impl Clipboard for MemoryClipboard {
-    fn text(&mut self) -> Option<String> {
-        self.text.clone()
+    fn read(&mut self) -> Option<ClipboardData> {
+        self.data.clone()
     }
 
-    fn set_text(&mut self, text: &str) -> anyhow::Result<()> {
-        self.text = Some(text.to_owned());
+    fn write(&mut self, data: &ClipboardData) -> anyhow::Result<()> {
+        self.data = (!data.is_empty()).then(|| data.clone());
         self.seq += 1;
         Ok(())
     }
@@ -60,12 +61,12 @@ impl Clipboard for MemoryClipboard {
 pub struct SharedClipboard(pub Arc<Mutex<MemoryClipboard>>);
 
 impl Clipboard for SharedClipboard {
-    fn text(&mut self) -> Option<String> {
-        self.0.lock().unwrap().text()
+    fn read(&mut self) -> Option<ClipboardData> {
+        self.0.lock().unwrap().read()
     }
 
-    fn set_text(&mut self, text: &str) -> anyhow::Result<()> {
-        self.0.lock().unwrap().set_text(text)
+    fn write(&mut self, data: &ClipboardData) -> anyhow::Result<()> {
+        self.0.lock().unwrap().write(data)
     }
 
     fn sequence(&mut self) -> u64 {

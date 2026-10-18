@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::Datagram;
 
 /// Obergrenze für einen Frame (schützt vor Speicherangriffen über das Längenfeld).
-pub const MAX_FRAME_LEN: usize = 32 * 1024 * 1024;
+pub const MAX_FRAME_LEN: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {

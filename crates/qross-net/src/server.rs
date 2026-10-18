@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -11,13 +11,15 @@ use qross_core::server::{Action, ServerEvent, ServerState, SwitchOptions};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard};
 use qross_proto::{
-    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, Control, Datagram, Input, Platform, Rect,
+    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, Input,
+    Platform, Rect,
     StreamKind, PROTOCOL_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::clipboard::ClipboardHub;
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_clipboard};
 use crate::tls::{peer_fingerprint, server_config};
@@ -93,7 +95,7 @@ enum NetEvent {
         reply: oneshot::Sender<Result<String, String>>,
     },
     ScreenChanged { name: String, id: usize, screen: Rect },
-    Clipboard { name: String, id: usize, text: String },
+    Clipboard { name: String, id: usize, data: ClipboardData },
     Closed { name: String, id: usize },
 }
 
@@ -161,11 +163,13 @@ impl Server {
         }
     }
 
-    pub async fn run(mut self, mut platform: ServerPlatform) -> Result<()> {
+    pub async fn run(mut self, platform: ServerPlatform) -> Result<()> {
         let (net_tx, mut net_rx) = mpsc::unbounded_channel();
         tokio::spawn(accept_loop(self.endpoint.clone(), net_tx));
 
-        let mut local_screen = (platform.screen)();
+        let ServerPlatform { capture, mut events, clipboard, screen } = platform;
+        let clipboard = ClipboardHub::spawn(clipboard);
+        let mut local_screen = screen();
         let mut state = ServerState::new(self.config.name.clone(), self.config.layout.clone(), local_screen);
         state.set_switch_options(self.switching);
         let _discovery = self.discovery.then(|| {
@@ -174,19 +178,19 @@ impl Server {
         });
         let mut clients: HashMap<String, ClientHandle> = HashMap::new();
         // Clipboard-Sequenznummer, die ein Client zuletzt bekommen hat
-        let mut clip_synced: HashMap<String, u64> = HashMap::new();
+        let clip_synced: ClipSynced = Arc::new(Mutex::new(HashMap::new()));
         let mut screen_poll = tokio::time::interval(Duration::from_secs(2));
         info!("Server „{}“ lauscht auf {}", self.config.name, self.local_addr()?);
         self.notify(ServerNotice::Listening { addr: self.local_addr()? });
 
         loop {
             let actions = tokio::select! {
-                event = platform.events.recv() => match event {
+                event = events.recv() => match event {
                     Some(CaptureEvent::MouseDelta { mut dx, mut dy }) => {
                         // Schon wartende Bewegungen zusammenfassen (z. B. 8-kHz-Mäuse oder kurz
                         // ausgelasteter Rechner): ein Datagramm statt vieler, ohne Wartezeit.
                         let mut next = None;
-                        while let Ok(event) = platform.events.try_recv() {
+                        while let Ok(event) = events.try_recv() {
                             match event {
                                 CaptureEvent::MouseDelta { dx: x, dy: y } => {
                                     dx = dx.saturating_add(x);
@@ -215,7 +219,7 @@ impl Server {
                                 self.notify(ServerNotice::ClientConnected { name: name.clone(), addr, screen });
                                 let input = spawn_input_writer(conn.clone(), name.clone());
                                 clients.insert(name.clone(), ClientHandle { id: conn.stable_id(), conn, input });
-                                clip_synced.remove(&name);
+                                clip_synced.lock().unwrap().remove(&name);
                                 let _ = reply.send(Ok(self.config.name.clone()));
                                 info!("Client „{name}“ verbunden ({}×{})", screen.width, screen.height);
                                 state.handle(ServerEvent::ClientConnected { name, screen })
@@ -238,14 +242,18 @@ impl Server {
                     NetEvent::ScreenChanged { name, id, screen } if is_current(&clients, &name, id) => {
                         state.handle(ServerEvent::ClientScreenChanged { name, screen })
                     }
-                    NetEvent::Clipboard { name, id, text } if is_current(&clients, &name, id) => {
-                        match platform.clipboard.set_text(&text) {
-                            Ok(()) => {
+                    NetEvent::Clipboard { name, id, data } if is_current(&clients, &name, id) => {
+                        info!("Zwischenablage von „{name}“: {}", data.summary());
+                        let (clipboard, synced) = (clipboard.clone(), clip_synced.clone());
+                        tokio::spawn(async move {
+                            match clipboard.write(data).await {
                                 // Nicht an denselben Client zurückschicken
-                                clip_synced.insert(name, platform.clipboard.sequence());
+                                Ok(seq) => {
+                                    synced.lock().unwrap().insert(name, seq);
+                                }
+                                Err(e) => warn!("Zwischenablage von „{name}“ nicht übernommen: {e:#}"),
                             }
-                            Err(e) => warn!("Clipboard von „{name}“ nicht übernommen: {e:#}"),
-                        }
+                        });
                         Vec::new()
                     }
                     NetEvent::Closed { name, id } if is_current(&clients, &name, id) => {
@@ -257,7 +265,7 @@ impl Server {
                     _ => Vec::new(),
                 },
                 _ = screen_poll.tick() => {
-                    let now = (platform.screen)();
+                    let now = screen();
                     if now == local_screen {
                         Vec::new()
                     } else {
@@ -269,7 +277,7 @@ impl Server {
             };
             for action in actions {
                 self.notify_action(&action);
-                apply(action, &mut platform, &clients, &mut clip_synced);
+                apply(action, &*capture, &clipboard, &clients, &clip_synced);
             }
         }
     }
@@ -329,16 +337,20 @@ fn is_current(clients: &HashMap<String, ClientHandle>, name: &str, id: usize) ->
     clients.get(name).is_some_and(|c| c.id == id)
 }
 
+/// Je Client die zuletzt übertragene Clipboard-Sequenznummer
+type ClipSynced = Arc<Mutex<HashMap<String, u64>>>;
+
 fn apply(
     action: Action,
-    platform: &mut ServerPlatform,
+    capture: &dyn Capture,
+    clipboard: &ClipboardHub,
     clients: &HashMap<String, ClientHandle>,
-    clip_synced: &mut HashMap<String, u64>,
+    clip_synced: &ClipSynced,
 ) {
     match action {
-        Action::CaptureRemote => platform.capture.capture_remote(),
+        Action::CaptureRemote => capture.capture_remote(),
         Action::ReleaseCapture { x, y } => {
-            platform.capture.release(x, y);
+            capture.release(x, y);
             info!("Cursor zurück auf diesem Rechner");
         }
         Action::Send { to, input } => {
@@ -358,17 +370,21 @@ fn apply(
             }
         }
         Action::SyncClipboard { to } => {
-            let seq = platform.clipboard.sequence();
-            if clip_synced.get(&to) == Some(&seq) {
-                return;
-            }
-            clip_synced.insert(to.clone(), seq);
-            if let (Some(client), Some(text)) = (clients.get(&to), platform.clipboard.text()) {
-                tokio::spawn(send_clipboard(client.conn.clone(), text));
-            }
+            let Some(client) = clients.get(&to) else { return };
+            let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), client.conn.clone());
+            // Lesen und PNG-Kodierung im Clipboard-Thread; die Ereignisschleife läuft weiter.
+            tokio::spawn(async move {
+                let known = synced.lock().unwrap().get(&to).copied();
+                let (seq, data) = clipboard.changed_since(known).await;
+                synced.lock().unwrap().insert(to.clone(), seq);
+                if let Some(data) = data {
+                    info!("Zwischenablage → „{to}“: {}", data.summary());
+                    send_clipboard(conn, data).await;
+                }
+            });
         }
-        Action::ProbeDrag { x, y } => platform.capture.probe_drag(x, y),
-        Action::CancelLocalDrag => platform.capture.cancel_local_drag(),
+        Action::ProbeDrag { x, y } => capture.probe_drag(x, y),
+        Action::CancelLocalDrag => capture.cancel_local_drag(),
         Action::StartFileDrag { to, transfer, files } => {
             if let Some(client) = clients.get(&to) {
                 tokio::spawn(start_file_drag(client.conn.clone(), client.input.clone(), to, transfer, files));
@@ -492,8 +508,8 @@ async fn receive_clipboards(conn: Connection, name: String, id: usize, tx: mpsc:
                 if read_kind(&mut stream).await? != StreamKind::Clipboard {
                     bail!("Client darf nur Clipboard-Streams öffnen");
                 }
-                if let Some(ClipboardMsg::Text(text)) = read_frame(&mut stream).await? {
-                    let _ = tx.send(NetEvent::Clipboard { name, id, text });
+                if let Some(ClipboardMsg::Data(data)) = read_frame(&mut stream).await? {
+                    let _ = tx.send(NetEvent::Clipboard { name, id, data });
                 }
                 Ok(())
             }

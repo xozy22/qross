@@ -7,6 +7,7 @@
 //!   Use) oder prüft gegen einen fest vorgegebenen Wert.
 
 pub mod client;
+mod clipboard;
 pub mod discovery;
 pub mod files;
 mod identity;

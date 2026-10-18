@@ -2,6 +2,7 @@
 //! Clipboard und Bildschirmgröße. Aktuell ist Windows implementiert; andere Plattformen
 //! liefern einen klaren Fehler, bis sie nachgezogen werden.
 
+pub mod clipformat;
 pub mod dryrun;
 pub mod keymap_linux;
 pub mod keymap_mac;
@@ -34,7 +35,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use qross_core::{CaptureEvent, Inject};
-use qross_proto::Rect;
+use qross_proto::{ClipboardData, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Steuerung der Eingabe-Erfassung auf dem Server.
@@ -60,10 +61,20 @@ pub trait Injector: Send {
 }
 
 pub trait Clipboard: Send {
-    fn text(&mut self) -> Option<String>;
-    fn set_text(&mut self, text: &str) -> anyhow::Result<()>;
+    /// Alle verfügbaren Darstellungen: Text, HTML, Bild (als PNG). `None`, wenn leer.
+    fn read(&mut self) -> Option<ClipboardData>;
+    /// Ersetzt den Inhalt; alle vorhandenen Darstellungen werden gleichzeitig bereitgestellt.
+    fn write(&mut self, data: &ClipboardData) -> anyhow::Result<()>;
     /// Ändert sich bei jeder Änderung des Clipboards (auch durch andere Programme).
     fn sequence(&mut self) -> u64;
+
+    fn text(&mut self) -> Option<String> {
+        self.read().and_then(|data| data.text)
+    }
+
+    fn set_text(&mut self, text: &str) -> anyhow::Result<()> {
+        self.write(&ClipboardData::from_text(text))
+    }
 }
 
 /// Einmal beim Programmstart aufrufen (z. B. DPI-Awareness unter Windows).

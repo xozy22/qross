@@ -12,7 +12,8 @@ use qross_core::client::{ClientState, Transition};
 use qross_core::Inject;
 use qross_platform::{Clipboard, Injector};
 use qross_proto::{
-    decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, Control, Datagram, Input, MouseMove, Rect,
+    decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, Input,
+    MouseMove, Rect,
     Platform, ScreenInfo, StreamKind, DEFAULT_PORT, PROTOCOL_VERSION,
 };
 use quinn::{Connection, Endpoint, RecvStream};
@@ -20,6 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::files::{self, FileOutcome, Receiver, Staging};
+use crate::clipboard::ClipboardHub;
 use crate::streams::{read_kind, send_clipboard};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
@@ -61,7 +63,7 @@ impl std::error::Error for Fatal {}
 enum FromServer {
     Move(MouseMove),
     Input(Input),
-    Clipboard(String),
+    Clipboard(ClipboardData),
     File(FileOutcome),
 }
 
@@ -140,7 +142,8 @@ async fn run_inner(
     platform: ClientPlatform,
     notices: Notices<'_>,
 ) -> Result<()> {
-    let ClientPlatform { mut injector, mut clipboard, screen } = platform;
+    let ClientPlatform { mut injector, clipboard, screen } = platform;
+    let clipboard = ClipboardHub::spawn(clipboard);
 
     // Eigener Thread, damit SendInput nie die Netzwerk-Tasks blockiert.
     let (inject_tx, inject_rx) = std::sync::mpsc::channel::<ToInjector>();
@@ -165,7 +168,7 @@ async fn run_inner(
     let mut retry = RETRY_MIN;
     loop {
         let started = std::time::Instant::now();
-        let result = session(&config, &tls, &mut trust, &inject_tx, clipboard.as_mut(), &*screen, notices).await;
+        let result = session(&config, &tls, &mut trust, &inject_tx, &clipboard, &*screen, notices).await;
         retry = if started.elapsed() > STABLE_SESSION { RETRY_MIN } else { (retry * 2).min(RETRY_MAX) };
         match result {
             Ok(()) => {
@@ -187,7 +190,7 @@ async fn session(
     tls: &quinn::ClientConfig,
     trust: &mut TrustStore,
     inject: &Sender<ToInjector>,
-    clipboard: &mut dyn Clipboard,
+    clipboard: &ClipboardHub,
     screen: &(dyn Fn() -> Rect + Send + Sync),
     notices: Notices<'_>,
 ) -> Result<()> {
@@ -240,7 +243,8 @@ async fn session(
         info!("Strg und Cmd werden getauscht (Server: {server_platform:?})");
     }
     state.set_swap_ctrl_cmd(swap);
-    let mut clip_synced = clipboard.sequence();
+    // Zuletzt abgeglichene Clipboard-Sequenznummer (auch aus Hintergrund-Aufgaben aktualisiert)
+    let clip_synced = Arc::new(std::sync::Mutex::new(clipboard.sequence().await));
     // Für das Log: Bewegungen seit dem letzten Enter und letzte Position
     let mut moves = 0u32;
     let mut last_pos = (0, 0);
@@ -291,21 +295,30 @@ async fn session(
                                     last_pos.0, last_pos.1
                                 );
                                 // Beim Verlassen das eigene Clipboard mitgeben, falls es sich geändert hat.
-                                let seq = clipboard.sequence();
-                                if seq != clip_synced {
-                                    clip_synced = seq;
-                                    if let Some(text) = clipboard.text() {
-                                        tokio::spawn(send_clipboard(conn.clone(), text));
+                                let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), conn.clone());
+                                tokio::spawn(async move {
+                                    let known = *synced.lock().unwrap();
+                                    let (seq, data) = clipboard.changed_since(Some(known)).await;
+                                    *synced.lock().unwrap() = seq;
+                                    if let Some(data) = data {
+                                        info!("Zwischenablage → Server: {}", data.summary());
+                                        send_clipboard(conn, data).await;
                                     }
-                                }
+                                });
                             }
                             None => {}
                         }
                     }
-                    FromServer::Clipboard(text) => match clipboard.set_text(&text) {
-                        Ok(()) => clip_synced = clipboard.sequence(),
-                        Err(e) => warn!("Clipboard nicht übernommen: {e:#}"),
-                    },
+                    FromServer::Clipboard(data) => {
+                        info!("Zwischenablage vom Server: {}", data.summary());
+                        let (clipboard, synced) = (clipboard.clone(), clip_synced.clone());
+                        tokio::spawn(async move {
+                            match clipboard.write(data).await {
+                                Ok(seq) => *synced.lock().unwrap() = seq,
+                                Err(e) => warn!("Zwischenablage nicht übernommen: {e:#}"),
+                            }
+                        });
+                    }
                     FromServer::File(outcome) => receiver.on_file(outcome),
                 },
                 _ = screen_poll.tick() => {
@@ -420,8 +433,8 @@ async fn read_server_stream(
             }
         }
         StreamKind::Clipboard => {
-            if let Some(ClipboardMsg::Text(text)) = read_frame(stream).await? {
-                let _ = tx.send(FromServer::Clipboard(text));
+            if let Some(ClipboardMsg::Data(data)) = read_frame(stream).await? {
+                let _ = tx.send(FromServer::Clipboard(data));
             }
         }
         StreamKind::File => {

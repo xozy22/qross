@@ -37,6 +37,7 @@ die Bildschirmkante, ohne dass Maus und Tastatur ins Stocken geraten.
 | Transport | TCP + TLS, ein Kanal für alles | QUIC: Maus als Datagramm, Tasten, Clipboard und Dateien auf getrennten Streams |
 | Cursor bei 1 % / 5 % Paketverlust (p99)¹ | 36 ms / 588 ms | 4 ms / 4,5 ms |
 | Eingaben während eines 2-MB-Clipboards (p99)¹ | 116 ms (0 % Verlust) / 248 ms (1 %) | 32 ms / 5 ms, keine Ruckler über 50 ms |
+| Screenshots & formatierter Text in der Zwischenablage | ja | ja, als PNG bzw. HTML, ohne die Eingaben auszubremsen |
 | Dateien per Drag & Drop | über dieselbe Verbindung wie die Eingaben | eigener Stream je Datei, SHA-256-geprüft, auch GB-große Dateien und Ordner |
 | Vertrauen | TLS mit Fingerprint-Bestätigung | gegenseitige Zertifikate: der Server gibt Clients explizit frei, der Client merkt sich den Server |
 | Versehentliches Wechseln an Ecken | Ecken-Schutz muss konfiguriert werden | Ecken-Totzone ab Werk, optionale Wechselverzögerung |
@@ -53,7 +54,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 |---|---|---|---|
 | Server: Eingaben erfassen, Kanten pro Monitor | ✔ | ✔ | ✔¹ |
 | Client: Eingaben einspeisen | ✔ | ✔ | ✔¹ |
-| Text-Clipboard in beide Richtungen | ✔ | ✔ | ✔¹ |
+| Zwischenablage in beide Richtungen: Text, HTML, Bilder (z. B. Screenshots) | ✔ | ✔ | ✔¹ |
 | Cursor auf dem Server ausblenden | ✔ | ✔ | soweit macOS es zulässt¹ |
 | Dateien per Drag & Drop **senden** (Server) | ✔ | – | – |
 | Dateien per Drag & Drop **empfangen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
@@ -65,7 +66,9 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
-  (Wechsel, Eingaben, Clipboard, Drag & Drop mit 8 MB und Ordnern, Ablehnung unbekannter Clients, LAN-Suche).
+  (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, Ablehnung
+  unbekannter Clients, LAN-Suche).
+- Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB).
 - Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
 - Windows: Bau- und Smoke-Tests sowie die Explorer-Ordnererkennung. Hooks und Einspeisung wurden noch nicht
   mit zwei echten Rechnern getestet.

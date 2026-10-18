@@ -9,7 +9,7 @@ use qross_net::server::{Server, ServerConfig, ServerPlatform};
 use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, RecordingCapture, RecordingInjector, SharedClipboard};
 use qross_platform::Clipboard;
-use qross_proto::{Edge, KeyCode, MouseButton, Rect};
+use qross_proto::{ClipboardData, Edge, KeyCode, MouseButton, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
@@ -195,6 +195,46 @@ async fn files_are_dragged_to_client() {
     );
     assert!(log.contains(&Inject::MoveTo { x: 51, y: 399 }), "Drop an der Cursorposition");
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Ein „Screenshot“ als PNG (Farbverlauf, damit die Kompression etwas zu tun hat)
+fn screenshot_png(width: u32, height: u32) -> Vec<u8> {
+    let pixels = (0..width * height)
+        .flat_map(|i| {
+            let (x, y) = (i % width, i / width);
+            [(x * 255 / width) as u8, (y * 255 / height) as u8, ((x ^ y) & 0xFF) as u8, 255]
+        })
+        .collect();
+    qross_platform::clipformat::rgba_to_png(&qross_platform::clipformat::Rgba { width, height, pixels }).unwrap()
+}
+
+#[tokio::test]
+async fn images_and_html_travel_through_the_clipboard() {
+    let mut s = start(true, None);
+    let from_server = ClipboardData {
+        text: Some("Grüße".into()),
+        html: Some("<p><b>Grüße</b> aus Qross</p>".into()),
+        png: Some(screenshot_png(800, 450)),
+    };
+    s.server_clip.write(&from_server).unwrap();
+
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    let client_clip = s.client_clip.clone();
+    wait_for("Bild und HTML beim Client", || client_clip.clone().read().as_ref() == Some(&from_server)).await;
+
+    // Ein reines Bild (z. B. Win+Shift+S) zurück zum Server
+    let from_client = ClipboardData { png: Some(screenshot_png(320, 200)), ..ClipboardData::default() };
+    s.client_clip.write(&from_client).unwrap();
+    let injected = s.injected.clone();
+    wait_for("Enter beim Client", || injected.0.lock().unwrap().contains(&Inject::MoveTo { x: 1, y: 399 })).await;
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let server_clip = s.server_clip.clone();
+    wait_for("Bild beim Server", || server_clip.clone().read().as_ref() == Some(&from_client)).await;
 }
 
 #[tokio::test]

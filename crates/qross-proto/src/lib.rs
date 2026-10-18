@@ -17,9 +17,9 @@ pub use frame::{decode_datagram, encode_datagram, read_frame, write_frame, Frame
 pub use geometry::{Edge, Rect};
 pub use input::{KeyCode, MouseButton};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 /// ALPN-Kennung im TLS-Handshake
-pub const ALPN: &[u8] = b"qross/2";
+pub const ALPN: &[u8] = b"qross/3";
 /// UDP-Port (bewusst nicht Synergys 24800, damit beide parallel laufen können)
 pub const DEFAULT_PORT: u16 = 24900;
 /// UDP-Port der Server-Suche im LAN
@@ -127,9 +127,50 @@ pub enum Datagram {
     MouseMove(MouseMove),
 }
 
+/// Nachricht auf einem Clipboard-Stream.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Clipboard {
-    Text(String),
+    Data(ClipboardData),
+}
+
+/// Inhalt der Zwischenablage. Oft liegen mehrere Darstellungen gleichzeitig vor (z. B. Text und
+/// HTML aus dem Browser); übertragen werden alle, der Empfänger stellt alle bereit.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClipboardData {
+    pub text: Option<String>,
+    /// HTML-Ausschnitt (ohne Windows-CF_HTML-Kopf)
+    pub html: Option<String>,
+    /// Bild, PNG-kodiert
+    pub png: Option<Vec<u8>>,
+}
+
+impl ClipboardData {
+    pub fn from_text(text: impl Into<String>) -> Self {
+        Self { text: Some(text.into()), ..Self::default() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none() && self.html.is_none() && self.png.is_none()
+    }
+
+    /// Kurzbeschreibung fürs Log, z. B. „Text, Bild (1,2 MB)“
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.text.is_some() {
+            parts.push("Text".to_owned());
+        }
+        if self.html.is_some() {
+            parts.push("HTML".to_owned());
+        }
+        if let Some(png) = &self.png {
+            parts.push(format!("Bild ({:.1} MB)", png.len() as f64 / 1_000_000.0).replace('.', ","));
+        }
+        if parts.is_empty() {
+            "leer".to_owned()
+        } else {
+            parts.join(", ")
+        }
+    }
 }
 
 /// Erstes Byte jedes unidirektionalen Streams.
