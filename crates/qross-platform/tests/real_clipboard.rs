@@ -4,6 +4,14 @@
 //! Passwortmanager, und nur mit `QROSS_CLIPBOARD_TEST=1`; den Rest prüft
 //! `cargo run -p qross-platform --example clipboard_check`.
 
+use std::sync::{Mutex, MutexGuard};
+
+/// Die Tests teilen sich die eine Zwischenablage des Systems und laufen deshalb nacheinander.
+fn exclusive() -> MutexGuard<'static, ()> {
+    static CLIPBOARD: Mutex<()> = Mutex::new(());
+    CLIPBOARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn enabled() -> bool {
     let ci = !cfg!(windows) && std::env::var_os("CI").is_some_and(|v| v == "true");
     let on = ci || std::env::var_os("QROSS_CLIPBOARD_TEST").is_some();
@@ -20,7 +28,7 @@ mod arboard_systems {
     use qross_platform::clipformat::{png_to_rgba, rgba_to_png, Rgba};
     use qross_proto::ClipboardData;
 
-    use super::enabled;
+    use super::{enabled, exclusive};
 
     /// macOS liefert Pfade aufgelöst zurück (`/var` → `/private/var`).
     fn canonical(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -32,6 +40,7 @@ mod arboard_systems {
         if !enabled() {
             return;
         }
+        let _clipboard = exclusive();
         let mut clipboard = qross_platform::clipboard();
 
         let before = clipboard.sequence();
@@ -72,6 +81,7 @@ mod arboard_systems {
         if !enabled() {
             return;
         }
+        let _clipboard = exclusive();
         let mut clipboard = qross_platform::clipboard();
         clipboard.set_text("Notiz").unwrap();
         assert_eq!(clipboard.concealed(), None, "normaler Text");
@@ -119,7 +129,7 @@ mod windows {
     };
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 
-    use super::enabled;
+    use super::{enabled, exclusive};
 
     const CF_UNICODETEXT: u32 = 13;
 
@@ -160,6 +170,7 @@ mod windows {
         if !enabled() {
             return;
         }
+        let _clipboard = exclusive();
         let mut clipboard = qross_platform::clipboard();
         let backup = clipboard.read();
 
