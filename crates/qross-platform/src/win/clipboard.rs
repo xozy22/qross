@@ -1,6 +1,7 @@
 //! Zwischenablage unter Windows: Text (CF_UNICODETEXT), HTML („HTML Format“), Bilder
 //! („PNG“ von Browsern/Office, sonst CF_DIBV5/CF_DIB, z. B. von Win+Shift+S) und kopierte
-//! Dateien (CF_HDROP, z. B. Strg+C im Explorer).
+//! Dateien (CF_HDROP, z. B. Strg+C im Explorer). Passwortmanager markieren vertrauliche Inhalte
+//! mit eigenen Formaten (siehe `concealed`).
 //!
 //! Die Zwischenablage ist systemweit gesperrt, solange sie offen ist. Deshalb werden nur die
 //! Rohdaten kopiert; Umwandlungen (DIB → PNG usw.) passieren danach.
@@ -23,7 +24,7 @@ use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, Gl
 use crate::clipformat::{
     build_cf_html, build_dropfiles, cf_html_fragment, dib_to_rgba, parse_dropfiles, png_to_rgba, rgba_to_dib, rgba_to_png,
 };
-use crate::Clipboard;
+use crate::{concealed, Clipboard};
 
 const CF_UNICODETEXT: u32 = 13;
 const CF_DIB: u32 = 8;
@@ -41,10 +42,13 @@ struct WinClipboard;
 
 /// Formate, die Windows nicht fest vergibt, sondern zur Laufzeit registriert
 fn registered(name: &'static str, slot: &'static OnceLock<u32>) -> u32 {
-    *slot.get_or_init(|| {
-        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        unsafe { RegisterClipboardFormatW(wide.as_ptr()) }
-    })
+    *slot.get_or_init(|| register(name))
+}
+
+/// Nummer eines registrierten Formats; derselbe Name liefert immer dieselbe Nummer (0: Fehler).
+fn register(name: &str) -> u32 {
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe { RegisterClipboardFormatW(wide.as_ptr()) }
 }
 
 fn html_format() -> u32 {
@@ -169,6 +173,19 @@ impl Clipboard for WinClipboard {
 
     fn sequence(&mut self) -> u64 {
         unsafe { GetClipboardSequenceNumber() as u64 }
+    }
+
+    /// Formate der Passwortmanager (siehe `concealed::WINDOWS`). Ist die Zwischenablage gerade
+    /// belegt, zählt schon das Vorhandensein eines Formats – im Zweifel vertraulich.
+    fn concealed(&mut self) -> Option<&'static str> {
+        let open = Open::acquire();
+        concealed::find(concealed::WINDOWS, |name| {
+            let format = register(name);
+            if format == 0 || unsafe { IsClipboardFormatAvailable(format) } == 0 {
+                return None;
+            }
+            Some(open.as_ref().and_then(|_| unsafe { raw(format) }))
+        })
     }
 }
 

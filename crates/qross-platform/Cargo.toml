@@ -20,6 +20,8 @@ tracing.workspace = true
 x11rb = { version = "0.14", features = ["randr", "xkb", "xtest"] }
 # wayland-data-control: Zwischenablage ohne Fenster unter KDE, Sway, Hyprland; sonst über XWayland
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
+# Markierungen der Passwortmanager unter Wayland lesen (dieselbe Version, die arboard mitbringt)
+wl-clipboard-rs = "0.9"
 # Wayland: Desktop-Portale (RemoteDesktop, InputCapture) und libei (reines Rust, keine C-Bibliotheken).
 # „screencast“ braucht ashpd intern für remote_desktop; Qross nutzt keine Bildschirmübertragung.
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "remote_desktop", "input_capture", "screencast"] }

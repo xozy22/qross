@@ -296,8 +296,10 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
     let server_changed = settings.server.needs_restart(&old.server);
     // Rechte je Rechner übernimmt ein laufender Server ohne Neustart.
     let sharing_changed = settings.server.effective_sharing() != old.server.effective_sharing();
-    // Kopierte Dateien und Spielemodus gelten für beide Rollen
-    let limit_changed = settings.clipboard_files_mb != old.clipboard_files_mb || settings.game_mode != old.game_mode;
+    // Kopierte Dateien, vertrauliche Inhalte und Spielemodus gelten für beide Rollen
+    let limit_changed = settings.clipboard_files_mb != old.clipboard_files_mb
+        || settings.clipboard_share_concealed != old.clipboard_share_concealed
+        || settings.game_mode != old.game_mode;
     match status.role {
         Some(role) if role != settings.role => rt.stop().await,
         Some(Role::Server) if (server_changed || limit_changed) && settings.server.validate().is_ok() => {

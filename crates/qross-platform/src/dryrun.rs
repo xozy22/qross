@@ -66,6 +66,16 @@ pub struct MemoryClipboard {
     data: Option<ClipboardData>,
     files: Vec<PathBuf>,
     seq: u64,
+    /// Markierung eines Passwortmanagers zum aktuellen Inhalt
+    concealed: Option<&'static str>,
+}
+
+impl MemoryClipboard {
+    /// Markiert den aktuellen Inhalt wie ein Passwortmanager (`marker` z. B. aus
+    /// `concealed::WINDOWS`); der nächste `write` hebt das auf.
+    pub fn conceal(&mut self, marker: &'static str) {
+        self.concealed = Some(marker);
+    }
 }
 
 impl Clipboard for MemoryClipboard {
@@ -76,6 +86,7 @@ impl Clipboard for MemoryClipboard {
     fn write(&mut self, data: &ClipboardData) -> anyhow::Result<()> {
         self.data = (!data.is_empty()).then(|| data.clone());
         self.files.clear();
+        self.concealed = None;
         self.seq += 1;
         Ok(())
     }
@@ -92,6 +103,10 @@ impl Clipboard for MemoryClipboard {
         self.write(data)?;
         self.files = files.to_vec();
         Ok(())
+    }
+
+    fn concealed(&mut self) -> Option<&'static str> {
+        self.concealed
     }
 }
 
@@ -118,6 +133,10 @@ impl Clipboard for SharedClipboard {
 
     fn write_files(&mut self, files: &[PathBuf], data: &ClipboardData) -> anyhow::Result<()> {
         self.0.lock().unwrap().write_files(files, data)
+    }
+
+    fn concealed(&mut self) -> Option<&'static str> {
+        self.0.lock().unwrap().concealed()
     }
 }
 

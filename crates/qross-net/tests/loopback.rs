@@ -143,6 +143,7 @@ fn start_client_screen(
         server: addr.to_string(),
         server_fingerprint: Some(pin.unwrap_or_else(|| server_id.fingerprint())),
         clipboard_file_limit: file_limit,
+        share_concealed: false,
     };
     let (client_tx, client_rx) = tokio::sync::mpsc::unbounded_channel();
     let client_notices = collect(client_rx);
@@ -411,6 +412,75 @@ async fn images_and_html_travel_through_the_clipboard() {
     s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
     let server_clip = s.server_clip.clone();
     wait_for("Bild beim Server", || server_clip.clone().read().as_ref() == Some(&from_client)).await;
+}
+
+/// Kopiert wie ein Passwortmanager: Inhalt plus Markierung
+fn copy_secret(clipboard: &SharedClipboard, text: &str, marker: &'static str) {
+    let mut inner = clipboard.0.lock().unwrap();
+    inner.write(&ClipboardData::from_text(text)).unwrap();
+    inner.conceal(marker);
+}
+
+/// Wie `enter_laptop`, auch wenn der Cursor schon einmal dort war
+async fn reenter_laptop(s: &Setup) {
+    s.capture.0.lock().unwrap().clear();
+    s.injected.0.lock().unwrap().clear();
+    enter_laptop(s).await;
+}
+
+/// Vom Laptop zurück zum Server und warten, bis der Cursor dort ist
+async fn leave_laptop(s: &Setup) {
+    s.capture.0.lock().unwrap().clear();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("Rückkehr zum Server", || released(&capture)).await;
+}
+
+#[tokio::test]
+async fn concealed_clipboard_content_stays_on_its_computer() {
+    let mut s = start(true, None);
+    s.server_clip.set_text("Notiz").unwrap();
+    enter_laptop(&s).await;
+    let (server_clip, client_clip) = (s.server_clip.clone(), s.client_clip.clone());
+    wait_for("Notiz beim Client", || client_clip.clone().text().as_deref() == Some("Notiz")).await;
+
+    // Auf dem Server ein Passwort aus KeePassXC kopiert, dann zum Laptop
+    leave_laptop(&s).await;
+    copy_secret(&s.server_clip, "Passwort vom Server", "ExcludeClipboardContentFromMonitorProcessing");
+    reenter_laptop(&s).await;
+    let notices = s.notices.clone();
+    wait_for("Hinweis beim Server", || notices.lock().unwrap().iter().any(|n| matches!(n, ServerNotice::ClipboardConcealed)))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.client_clip.text().as_deref(), Some("Notiz"), "das Passwort kommt nicht an");
+
+    // Der Laptop schickt seinen alten Stand nicht zurück: Das Passwort bleibt auf dem Server.
+    leave_laptop(&s).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.server_clip.text().as_deref(), Some("Passwort vom Server"));
+
+    // Umgekehrt: auf dem Laptop ein Passwort kopiert (KDE-Hinweis), zurück zum Server
+    reenter_laptop(&s).await;
+    copy_secret(&s.client_clip, "Passwort vom Laptop", "x-kde-passwordManagerHint");
+    leave_laptop(&s).await;
+    let client_notices = s.client_notices.clone();
+    wait_for("Hinweis beim Client", || {
+        client_notices.lock().unwrap().iter().any(|n| matches!(n, ClientNotice::ClipboardConcealed))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.server_clip.text().as_deref(), Some("Passwort vom Server"), "das Passwort vom Laptop kommt nicht an");
+
+    // Der nächste normale Inhalt wird in beide Richtungen wieder geteilt.
+    reenter_laptop(&s).await;
+    s.client_clip.set_text("Link vom Laptop").unwrap();
+    leave_laptop(&s).await;
+    wait_for("Link beim Server", || server_clip.clone().text().as_deref() == Some("Link vom Laptop")).await;
+    s.server_clip.set_text("Gruß vom Server").unwrap();
+    reenter_laptop(&s).await;
+    wait_for("Gruß beim Client", || client_clip.clone().text().as_deref() == Some("Gruß vom Server")).await;
+    let hints = s.notices.lock().unwrap().iter().filter(|n| matches!(n, ServerNotice::ClipboardConcealed)).count();
+    assert_eq!(hints, 1, "ein Hinweis je zurückgehaltenem Inhalt");
 }
 
 /// Quellordner mit einer größeren Datei und einem Ordner samt Unterordner und leerem Ordner
@@ -725,6 +795,7 @@ async fn connection_quality_is_measured_on_both_sides() {
             server: addr.to_string(),
             server_fingerprint: Some(server_id.fingerprint()),
             clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+            share_concealed: false,
         },
         client_id,
         TrustStore::in_memory(),
@@ -972,6 +1043,7 @@ async fn client_reports_with(welcome_version: u16, injector: RecordingInjector) 
             server: addr.to_string(),
             server_fingerprint: Some(server_id.fingerprint()),
             clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+            share_concealed: false,
         },
         Identity::generate().unwrap(),
         TrustStore::in_memory(),
@@ -1529,6 +1601,7 @@ fn start_typing(mode: KeyMode, injected: RecordingInjector) -> Setup {
         server: addr.to_string(),
         server_fingerprint: Some(server_id.fingerprint()),
         clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+        share_concealed: false,
     };
     let (client_tx, client_rx) = tokio::sync::mpsc::unbounded_channel();
     let client_transfers = Transfers::new();

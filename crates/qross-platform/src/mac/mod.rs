@@ -11,6 +11,7 @@ mod game;
 mod inject;
 mod layout;
 mod media;
+mod pasteboard;
 mod permissions;
 
 use std::sync::Arc;
@@ -26,6 +27,7 @@ use crate::arboard_clipboard::ArboardClipboard;
 use crate::{Capture, Clipboard, Injector, Permission};
 
 pub use game::game_state;
+pub(crate) use pasteboard::concealed;
 pub use permissions::{granted as has_permission, request as request_permission};
 
 pub fn init_process() {}

@@ -34,6 +34,13 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
   Deutsch, Mac US): Y und Z, Umlaute, @, €, Klammern, tote Tasten wie ^ und ´ sowie alle AltGr-Zeichen. Kürzel
   wie Strg+Z gehen nach dem Zeichen und bleiben dort „Rückgängig“, Pfeile, F-Tasten und Co. bleiben Tasten.
   Standard bleibt „Tastenposition“, wie sie Spiele brauchen. In `qross.toml`: `[keys.mode]`.
+- **Passwörter bleiben, wo sie kopiert wurden:** Inhalte, die ein Passwortmanager wie KeePassXC als vertraulich
+  markiert, teilt Qross nicht mit anderen Rechnern, weder als Text noch als Bild oder Dateiliste, in keiner
+  Richtung. Drüben bleibt der vorige Inhalt, und der nächste normale Inhalt wird wieder geteilt. Qross erkennt
+  die Markierungen von Windows (Verlauf, Cloud-Zwischenablage, Zwischenablage-Programme), macOS
+  (`org.nspasteboard.ConcealedType` und `TransientType`) und Linux (`x-kde-passwordManagerHint`). Ein kurzer
+  Hinweis im Fenster und im Protokoll sagt, wenn etwas zurückgehalten wurde, ohne den Inhalt zu zeigen.
+  Abschaltbar unter Einstellungen → Zwischenablage bzw. mit `[clipboard] share_concealed = true`.
 
 ### Behoben
 

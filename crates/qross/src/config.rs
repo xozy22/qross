@@ -156,18 +156,21 @@ impl KeysSection {
     }
 }
 
-/// Abschnitt `[clipboard]`: kopierte Dateien.
+/// Abschnitt `[clipboard]`: kopierte Dateien und vertrauliche Inhalte.
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ClipboardSection {
     /// Kopierte Dateien bis zu dieser Gesamtgröße in MB beim Wechsel mitgeben (0 = nie)
     #[serde(default = "default_max_file_mb")]
     pub max_file_mb: u64,
+    /// Inhalte, die ein Passwortmanager als vertraulich markiert, trotzdem teilen
+    #[serde(default)]
+    pub share_concealed: bool,
 }
 
 impl Default for ClipboardSection {
     fn default() -> Self {
-        Self { max_file_mb: default_max_file_mb() }
+        Self { max_file_mb: default_max_file_mb(), share_concealed: false }
     }
 }
 
@@ -246,6 +249,7 @@ mod tests {
         assert_eq!(file.switching.options(), SwitchOptions { corner_size: 8, delay: Duration::from_millis(0) });
         assert!(file.discovery);
         assert_eq!(file.clipboard.file_limit(), 1_000_000_000);
+        assert!(!file.clipboard.share_concealed);
         let keys = file.keys.config().unwrap();
         assert_eq!(keys.options.lock, Some(Hotkey::SCROLL_LOCK));
         assert_eq!(keys.options.media, MediaKeys::Active);
@@ -335,5 +339,14 @@ mod tests {
     fn copied_files_can_be_switched_off() {
         let file: ServerFile = toml::from_str("[clipboard]\nmax_file_mb = 0").unwrap();
         assert_eq!(file.clipboard.file_limit(), 0);
+    }
+
+    #[test]
+    fn concealed_content_stays_unless_shared_explicitly() {
+        let file: ServerFile = toml::from_str("name = \"pc\"").unwrap();
+        assert!(!file.clipboard.share_concealed);
+        let file: ServerFile = toml::from_str("[clipboard]\nshare_concealed = true").unwrap();
+        assert!(file.clipboard.share_concealed);
+        assert_eq!(file.clipboard.file_limit(), qross_net::clipfiles::DEFAULT_LIMIT);
     }
 }

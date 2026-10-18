@@ -1574,6 +1574,7 @@ function renderSettings() {
   $("#prefResume").checked = state.settings.resume_role;
   $("#prefAutoUpdate").checked = state.settings.auto_update;
   $("#prefGameMode").checked = state.settings.game_mode;
+  $("#prefKeepSecrets").checked = !state.settings.clipboard_share_concealed;
   $("#aboutVersion").textContent = state.version;
   $("#aboutDataDir").textContent = prefs.data_dir;
   renderClipLimit();
@@ -2146,6 +2147,11 @@ function setupSettings() {
   });
   $("#prefGameMode").addEventListener("change", (e) => {
     state.settings.game_mode = e.target.checked;
+    saveSoon.flush();
+  });
+  $("#prefKeepSecrets").addEventListener("change", (e) => {
+    state.settings.clipboard_share_concealed = !e.target.checked;
+    updatePreview();
     saveSoon.flush();
   });
   $("#updateCheck").addEventListener("click", () => invoke("check_updates"));

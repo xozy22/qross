@@ -65,6 +65,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Client: Eingaben einspeisen | ✔ | ✔ | ✔ GNOME ≥ 45, KDE ≥ 6.1, sonst über XWayland | ✔¹ |
 | Zwischenablage in beide Richtungen: Text, HTML, Bilder (z. B. Screenshots) | ✔ | ✔ | ✔ KDE, wlroots direkt; GNOME über XWayland | ✔¹ |
 | Dateien kopieren und einfügen, in beide Richtungen | ✔ Explorer | ✔ Dateimanager mit `text/uri-list` (Nautilus, Dolphin) | wie Zwischenablage | ✔ Finder¹ |
+| Passwörter nicht teilen: was Passwortmanager als vertraulich markieren, bleibt auf dem Rechner | ✔ Formate für Verlauf, Cloud und Zwischenablage-Programme | ✔ `x-kde-passwordManagerHint` (KeePassXC) | wie Zwischenablage | ✔ `ConcealedType`, `TransientType`¹ |
 | Cursor auf dem Server ausblenden | ✔ | ✔ | Sache des Compositors | soweit macOS es zulässt¹ |
 | Drag & Drop **vom Server** ziehen | ✔ | – | – | – |
 | Drag & Drop **vom Client** zum Server ziehen | ✔ Explorer | – | – | ✔ Finder¹ |
@@ -103,12 +104,12 @@ geprüft.
   Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, Fortschritt und Abbrechen von Sender und
   Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5,
   Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Rechte je Rechner für jede
-  Art und Richtung samt sofortiger Änderung und einem älteren Client, der es trotzdem versucht, Ablehnung
-  unbekannter Clients, LAN-Suche).
+  Art und Richtung samt sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene
+  vertrauliche Inhalte, Ablehnung unbekannter Clients, LAN-Suche).
 - Windows-Tastaturlayouts: echter Test mit dem deutschen und dem US-Layout (AltGr, tote Tasten, Kürzel), soweit
   sie auf dem Rechner eingerichtet sind.
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
-  die der Explorer anschließend selbst einfügt.
+  die der Explorer anschließend selbst einfügt, und mit den Formaten, mit denen Passwortmanager markieren.
 - Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
 - Wayland: Einspeisen über libei gegen eine EIS-Gegenstelle im Test und gegen mutter ohne Bildschirm
   (eigener CI-Job, noch experimentell). Portal, Freigabe-Dialog und Erfassen sind nur übersetzt, nicht
@@ -255,6 +256,8 @@ Hinweise:
 - `[clipboard] max_file_mb` in `qross.toml` bzw. `qross client --clipboard-max-mb`: kopierte Dateien bis zu
   dieser Gesamtgröße beim Wechsel mitgeben (Standard 1000, 0 = aus). Sie liegen danach im Cache
   (`%LOCALAPPDATA%\Qross\clipboard`) und werden nach einem Tag aufgeräumt.
+- `[clipboard] share_concealed` in `qross.toml` bzw. `qross client --share-concealed`: auch Inhalte teilen, die
+  ein Passwortmanager als vertraulich markiert (Standard `false`: sie bleiben auf dem Rechner).
 - Solange kein Client verbunden ist, verhält sich der Server völlig unauffällig.
 - `qross client --dry-run` protokolliert Eingaben nur. Damit lässt sich testen, ohne einen zweiten Rechner fernzusteuern.
 - `--log-file <datei>` und `-v` für ausführliche Logs.

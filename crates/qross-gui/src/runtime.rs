@@ -469,6 +469,7 @@ impl Runtime {
             .with_switch_options(s.switch_options())
             .with_discovery(s.discovery)
             .with_clipboard_file_limit(settings.clipboard_file_limit())
+            .with_share_concealed(settings.clipboard_share_concealed)
             .with_keys(keys)
             .with_game_mode(settings.game_mode)
             .with_sharing(s.effective_sharing());
@@ -590,6 +591,7 @@ impl Runtime {
                     c.types_text = true;
                 }
             }),
+            ServerNotice::ClipboardConcealed => self.on_concealed(),
         }
     }
 
@@ -695,6 +697,7 @@ impl Runtime {
             server: c.address.trim().to_owned(),
             server_fingerprint: None,
             clipboard_file_limit: settings.clipboard_file_limit(),
+            share_concealed: settings.clipboard_share_concealed,
         };
         let platform = if c.dry_run {
             info!("Testmodus: Eingaben werden nur protokolliert");
@@ -761,6 +764,7 @@ impl Runtime {
             ClientNotice::Quality(quality) => self.emit_quality(None, quality),
             ClientNotice::Transfer(progress) => self.on_transfer(progress),
             ClientNotice::Sharing(sharing) => self.update(|s| s.sharing = Some(sharing)),
+            ClientNotice::ClipboardConcealed => self.on_concealed(),
         }
     }
 
@@ -819,6 +823,13 @@ impl Runtime {
             crate::notify(&self.app, &message.title, message.text.as_deref().unwrap_or_default());
         }
         let _ = self.app.emit("clipboard-files", &message);
+    }
+
+    /// Ein vertraulich markierter Inhalt blieb hier: dezenter Hinweis im Fenster, ohne den Inhalt.
+    /// Das Protokoll schreibt `qross_net` selbst.
+    fn on_concealed(&self) {
+        let text = "Vertraulicher Inhalt der Zwischenablage bleibt auf diesem Rechner".to_owned();
+        let _ = self.app.emit("app-notice", crate::updates::AppNotice { tone: "info", text, action: None });
     }
 
     fn finished(&self, generation: u64, result: Result<()>) {

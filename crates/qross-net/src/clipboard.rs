@@ -1,5 +1,10 @@
 //! Zwischenablage in einem eigenen Thread. Große Bilder zu lesen und als PNG zu kodieren
 //! dauert spürbar; liefe das in der Ereignisschleife, würde die Maus kurz hängen.
+//!
+//! Inhalte, die ein Passwortmanager als vertraulich markiert (`qross_platform::concealed`),
+//! verlassen den Rechner nicht: Für Gegenstellen sieht es aus, als hätte sich nichts geändert.
+//! Ihr Stand bleibt, wie er war, und sie schicken ihn auch nicht zurück; der nächste normale
+//! Inhalt wird wieder geteilt.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -8,6 +13,7 @@ use anyhow::{anyhow, Result};
 use qross_platform::Clipboard;
 use qross_proto::ClipboardData;
 use tokio::sync::oneshot;
+use tracing::info;
 
 /// Inhalt der lokalen Zwischenablage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,9 +38,16 @@ pub struct ClipboardHub {
 }
 
 impl ClipboardHub {
-    /// Der Thread endet, sobald der letzte `ClipboardHub` verworfen wird.
-    pub fn spawn(mut clipboard: Box<dyn Clipboard>) -> Self {
+    /// Der Thread endet, sobald der letzte `ClipboardHub` verworfen wird. `share_concealed`:
+    /// vertraulich markierte Inhalte trotzdem teilen; sonst ruft der Thread `on_withheld` einmal
+    /// je zurückgehaltenem Inhalt (für einen Hinweis in der Oberfläche).
+    pub fn spawn(
+        mut clipboard: Box<dyn Clipboard>,
+        share_concealed: bool,
+        on_withheld: impl Fn() + Send + 'static,
+    ) -> Self {
         let (jobs, rx) = mpsc::channel::<Job>();
+        let mut guard = Guard { share: share_concealed, withheld: None, on_withheld: Box::new(on_withheld) };
         std::thread::Builder::new()
             .name("qross-clipboard".into())
             .spawn(move || {
@@ -42,7 +55,7 @@ impl ClipboardHub {
                     match job {
                         Job::Changed { known, reply } => {
                             let seq = clipboard.sequence();
-                            let content = if known == Some(seq) { None } else { read(&mut *clipboard) };
+                            let content = if known == Some(seq) { None } else { guard.read(&mut *clipboard, seq) };
                             let _ = reply.send((seq, content));
                         }
                         Job::Write { data, reply } => {
@@ -89,6 +102,43 @@ impl ClipboardHub {
     }
 }
 
+/// Hält vertraulich markierte Inhalte zurück.
+struct Guard {
+    share: bool,
+    /// Sequenznummer des zuletzt zurückgehaltenen Inhalts: ein Hinweis je Inhalt, auch wenn ihn
+    /// mehrere Clients nacheinander abfragen
+    withheld: Option<u64>,
+    on_withheld: Box<dyn Fn() + Send>,
+}
+
+impl Guard {
+    /// Inhalt zur Sequenznummer `seq`; `None` auch, wenn er vertraulich ist.
+    fn read(&mut self, clipboard: &mut dyn Clipboard, seq: u64) -> Option<Content> {
+        if self.share {
+            return read(clipboard);
+        }
+        // Vorher prüfen erspart das Lesen großer Inhalte; danach noch einmal, falls der
+        // Passwortmanager genau dazwischen kopiert hat.
+        let before = clipboard.concealed();
+        let content = if before.is_none() { read(clipboard) } else { None };
+        match before.or_else(|| clipboard.concealed()) {
+            Some(marker) => {
+                self.withhold(seq, marker);
+                None
+            }
+            None => content,
+        }
+    }
+
+    fn withhold(&mut self, seq: u64, marker: &str) {
+        if self.withheld != Some(seq) {
+            self.withheld = Some(seq);
+            info!("Zwischenablage: vertraulicher Inhalt (markiert mit „{marker}“) wird nicht geteilt");
+            (self.on_withheld)();
+        }
+    }
+}
+
 /// Dateien zuerst: Wer im Dateimanager kopiert, will Dateien einfügen.
 fn read(clipboard: &mut dyn Clipboard) -> Option<Content> {
     let paths = clipboard.files();
@@ -97,5 +147,74 @@ fn read(clipboard: &mut dyn Clipboard) -> Option<Content> {
         data.map(Content::Data)
     } else {
         Some(Content::Files { paths, data: data.unwrap_or_default() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use qross_platform::dryrun::SharedClipboard;
+
+    use super::*;
+
+    /// Hub über einer Test-Zwischenablage; zählt die Hinweise auf zurückgehaltene Inhalte.
+    fn hub(share_concealed: bool) -> (ClipboardHub, SharedClipboard, Arc<AtomicUsize>) {
+        let (clipboard, withheld) = (SharedClipboard::default(), Arc::new(AtomicUsize::new(0)));
+        let count = withheld.clone();
+        let hub = ClipboardHub::spawn(Box::new(clipboard.clone()), share_concealed, move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        (hub, clipboard, withheld)
+    }
+
+    /// Schreibt wie ein Passwortmanager: Inhalt plus Markierung
+    fn copy_secret(clipboard: &SharedClipboard, data: &ClipboardData, marker: &'static str) {
+        let mut inner = clipboard.0.lock().unwrap();
+        inner.write(data).unwrap();
+        inner.conceal(marker);
+    }
+
+    #[tokio::test]
+    async fn concealed_content_is_withheld_until_the_next_normal_one() {
+        let (hub, clipboard, withheld) = hub(false);
+        clipboard.clone().set_text("vorher").unwrap();
+        let (seq, content) = hub.changed_since(None).await;
+        assert_eq!(content, Some(Content::Data(ClipboardData::from_text("vorher"))));
+
+        copy_secret(&clipboard, &ClipboardData::from_text("Passwort"), "ExcludeClipboardContentFromMonitorProcessing");
+        let (secret, content) = hub.changed_since(Some(seq)).await;
+        assert_ne!(secret, seq, "die neue Sequenznummer gilt als abgeglichen");
+        assert_eq!(content, None);
+        // Ein zweiter Client fragt nach: wieder nichts, aber kein zweiter Hinweis
+        assert_eq!(hub.changed_since(Some(seq)).await, (secret, None));
+        assert_eq!(hub.changed_since(Some(secret)).await, (secret, None));
+        assert_eq!(withheld.load(Ordering::SeqCst), 1);
+
+        clipboard.clone().set_text("danach").unwrap();
+        let (_, content) = hub.changed_since(Some(secret)).await;
+        assert_eq!(content, Some(Content::Data(ClipboardData::from_text("danach"))));
+        assert_eq!(withheld.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concealed_files_are_withheld_too() {
+        let (hub, clipboard, withheld) = hub(false);
+        {
+            let mut inner = clipboard.0.lock().unwrap();
+            inner.write_files(&[PathBuf::from("/tmp/Tresor.kdbx")], &ClipboardData::default()).unwrap();
+            inner.conceal("org.nspasteboard.ConcealedType");
+        }
+        assert_eq!(hub.changed_since(None).await.1, None);
+        assert_eq!(withheld.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concealed_content_is_shared_when_allowed() {
+        let (hub, clipboard, withheld) = hub(true);
+        copy_secret(&clipboard, &ClipboardData::from_text("Passwort"), "x-kde-passwordManagerHint");
+        assert_eq!(hub.changed_since(None).await.1, Some(Content::Data(ClipboardData::from_text("Passwort"))));
+        assert_eq!(withheld.load(Ordering::SeqCst), 0);
     }
 }
