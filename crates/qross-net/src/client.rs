@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Incoming, Notify, Ready};
 use crate::files::{self, FileOutcome, Receiver, Staging};
+use crate::quality::{self, Quality};
 use crate::streams::read_kind;
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
@@ -103,6 +104,8 @@ pub enum ClientNotice {
     CursorLeft,
     /// Kopierte Dateien in der Zwischenablage (senden, empfangen, einfügbar, zu groß)
     ClipboardFiles(FilesNotice),
+    /// Verbindungsqualität zum Server, etwa jede Sekunde (siehe [`quality`]).
+    Quality(Quality),
 }
 
 type Notices<'a> = Option<&'a mpsc::UnboundedSender<ClientNotice>>;
@@ -253,6 +256,12 @@ async fn session(
         Some(Control::Reject { reason }) => bail!("Server hat die Verbindung abgelehnt: {reason}"),
         other => bail!("unerwartete Antwort vom Server: {other:?}"),
     };
+    // Läuft bis zum Ende dieser Sitzung
+    let _quality = notices.cloned().map(|tx| {
+        quality::monitor(conn.clone(), move |q| {
+            let _ = tx.send(ClientNotice::Quality(q));
+        })
+    });
 
     let staging_base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("Qross").join("incoming");
     let mut receiver = Receiver::new(Staging::create(&staging_base)?);

@@ -814,6 +814,124 @@ dialog.news {
 }
 .news-empty { color: var(--muted); padding: 8px 0 20px; }
 
+/* ------------------------------------------------------------ Verbindungsqualität */
+
+/* Stufe als Farbe (nur an Balken und Linie, Texte bleiben in Textfarben) plus Balkenzahl */
+.qpill, .qpanel { --q: var(--faint); }
+.qpill[data-level="very_good"], .qpanel[data-level="very_good"],
+.qpill[data-level="good"], .qpanel[data-level="good"] { --q: var(--teal); }
+.qpill[data-level="fair"], .qpanel[data-level="fair"] { --q: var(--amber); }
+.qpill[data-level="poor"], .qpanel[data-level="poor"] { --q: var(--coral); }
+
+.qpill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: 500 12px/1.45 var(--font);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.qpill:hover { border-color: var(--line-2); background: var(--ink-3); color: var(--text); }
+.qpill[aria-expanded="true"] { border-color: var(--line-2); color: var(--text); }
+.qbars { width: 14px; height: 12px; flex: none; display: block; }
+.qbars rect { fill: var(--line-2); transition: fill .3s; }
+.qbars rect.on { fill: var(--q); }
+
+.qpanel {
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--ink-0);
+  cursor: default;
+}
+.qhead { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; white-space: nowrap; }
+.qhead .qlevel { font-weight: 600; color: var(--text); }
+.qhead .qreason { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 12px; }
+
+.qchart { position: relative; height: 52px; margin-top: 4px; touch-action: none; }
+.qchart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.qgrid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; vector-effect: non-scaling-stroke; }
+.qgrid.base { stroke-dasharray: none; }
+.qarea { fill: var(--q); opacity: .12; }
+.qline { fill: none; stroke: var(--q); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.qscale {
+  position: absolute;
+  top: -7px;
+  left: 0;
+  padding-right: 6px;
+  background: var(--ink-0);
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.qaxis { display: flex; justify-content: space-between; margin-top: 3px; color: var(--faint); font-size: 10.5px; }
+.qcross { position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -.5px; background: var(--line-2); pointer-events: none; }
+.qdot {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: var(--q);
+  box-shadow: 0 0 0 2px var(--ink-0);
+  pointer-events: none;
+}
+.qtip {
+  position: absolute;
+  top: -30px;
+  transform: translateX(-50%);
+  padding: 3px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--line-2);
+  background: var(--ink-3);
+  color: var(--text);
+  font-size: 11.5px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.qstats { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 10px 14px; }
+.qstat { display: grid; align-content: start; gap: 1px; min-width: 0; }
+.qstat .k { color: var(--muted); font-size: 11.5px; }
+.qstat .v, .qstat .s { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.qstat .v { color: var(--text); font: 600 14px/1.35 var(--font); }
+.qstat .s { color: var(--faint); font-size: 11.5px; }
+.qarrow {
+  width: 11px;
+  height: 11px;
+  margin-right: 4px;
+  vertical-align: -1px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.qpanel .hint { margin: 0; color: var(--faint); font-size: 11.5px; }
+
+/* Server: je Client unter dem Namen, Details über die ganze Zeile */
+.client-list li { flex-wrap: wrap; }
+.client-list .qpill { display: flex; width: fit-content; margin-top: 4px; }
+.client-list .qpanel { flex-basis: 100%; margin: 4px 0 2px; }
+.client-list li:has(> .qpanel:not([hidden])):hover { background: transparent; }
+
+/* Client: unter der Statuszeile */
+.client-quality { display: grid; justify-items: center; margin-top: 14px; }
+.client-quality .qpill { font-size: 13px; padding: 4px 13px 4px 10px; }
+.client-quality .qpanel { width: 100%; max-width: 520px; margin-top: 12px; text-align: left; }
+
 /* ------------------------------------------------------------ Responsiv */
 
 @media (max-width: 1040px) {

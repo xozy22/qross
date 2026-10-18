@@ -116,6 +116,39 @@ Zeichen und reservierte Namen werden ersetzt.
 - Tasten sind **physische Tasten als USB-HID-Usage**. Das Layout des Clients bestimmt das Zeichen.
   Das ist plattformneutral und funktioniert auch mit unterschiedlichen Tastaturlayouts.
 
+## Verbindungsqualität
+
+Die Oberfläche zeigt je Verbindung Latenz, Jitter, Paketverlust und Durchsatz samt einer Stufe an (Server:
+je Client unter „Verbundene Rechner“, Client: im Status). Das braucht **keinen Protokollanteil und keinen
+zusätzlichen Verkehr**: Jede Seite liest nur die Zähler ihrer eigenen QUIC-Verbindung (`quinn::Connection::stats`),
+ältere Gegenstellen merken davon nichts. Weil beide Seiten jede Sekunde ein Keepalive senden, das bestätigt
+werden muss, entstehen auch ohne Eingaben laufend neue Messwerte. Implementierung: `crates/qross-net/src/quality.rs`.
+
+Alle 100 ms werden die Zähler gelesen, jede Sekunde entsteht ein Messpunkt:
+
+- **Latenz**: die geglättete Round-Trip-Time von quinn (RFC 9002, neu = 7/8 · alt + 1/8 · Probe).
+- **Jitter**: mittlerer Betrag der Differenz aufeinanderfolgender RTT-Proben der letzten 10 s (wie der
+  Interarrival-Jitter aus RFC 3550, nur ungewichtet). quinn gibt nur den geglätteten Wert heraus. Kam seit der
+  letzten Abfrage genau ein ACK-Frame an, lässt sich die einzelne Probe zurückrechnen: Probe = 8 · neu − 7 · alt.
+  Bei mehreren ACKs (viel Verkehr) folgt der geglättete Wert den Proben dicht und dient selbst als Probe; dann
+  fällt der Jitter etwas zu niedrig aus.
+- **Verlust**: von quinn als verloren erkannte Pakete in Prozent der gesendeten, über 10 s. Bei wenig Verkehr
+  wird das Fenster bis auf 60 s verlängert, bis mindestens 100 Pakete beisammen sind, sonst machte ein einziges
+  verlorenes Keepalive gleich 5 % aus. Reicht auch das nicht (kurz nach dem Verbinden), wird trotzdem durch 100
+  geteilt. Erkennbar ist nur der Verlust in Senderichtung des eigenen Rechners; beim Server ist das die Richtung,
+  in der Maus und Tastatur laufen.
+- **Durchsatz**: gesendete und empfangene UDP-Bytes pro Sekunde einschließlich QUIC-Overhead, etwa bei
+  Dateiübertragungen.
+
+Die Stufe richtet sich nach dem schlechtesten der drei Werte (Grenzen jeweils ausschließlich):
+
+| Stufe | Latenz | Jitter | Verlust |
+|---|---|---|---|
+| Sehr gut | unter 10 ms | unter 3 ms | unter 0,5 % |
+| Gut | unter 30 ms | unter 10 ms | unter 2 % |
+| Mäßig | unter 80 ms | unter 25 ms | unter 5 % |
+| Schlecht | darüber | darüber | darüber |
+
 ## Noch offen
 
 - Drag & Drop in Gegenrichtung (Client → Server) und als Quelle unter Linux/macOS

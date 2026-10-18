@@ -568,17 +568,22 @@ function renderClients() {
       : "Starte den Server, damit sich andere Rechner verbinden können.";
     list.replaceChildren(el("li", { class: "empty", text }));
   } else {
+    // Die Qualitätsanzeigen werden wiederverwendet; ein Fokus darin bleibt erhalten.
+    const focused = document.activeElement?.closest(".qpill, .qpanel") ? document.activeElement : null;
     list.replaceChildren(
-      ...clients.map((c) =>
-        el(
+      ...clients.map((c) => {
+        const quality = qualityEntry(`client:${c.name}`);
+        return el(
           "li",
           {},
           el("span", { class: "dot" }),
-          el("div", {}, el("strong", { text: c.name }), s.cursor_on === c.name ? el("div", { class: "here", text: "Cursor ist hier" }) : null),
+          el("div", {}, el("strong", { text: c.name }), quality.pill, s.cursor_on === c.name ? el("div", { class: "here", text: "Cursor ist hier" }) : null),
           el("span", { class: "meta" }, `${c.width} × ${c.height}`, el("br"), c.addr),
-        ),
-      ),
+          quality.panel,
+        );
+      }),
     );
+    if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
   }
 
   const pending = serverRunning ? s.pending : [];
@@ -696,6 +701,15 @@ function renderClient() {
   }
   if (phase === "error") message = s.message;
   $("#clientMessage").textContent = message;
+
+  const qualitySlot = $("#clientQuality");
+  qualitySlot.hidden = phase !== "connected";
+  if (phase === "connected") {
+    const quality = qualityEntry("server");
+    if (qualitySlot.firstElementChild !== quality.pill) qualitySlot.replaceChildren(quality.pill, quality.panel);
+  } else if (qualitySlot.firstElementChild) {
+    qualitySlot.replaceChildren();
+  }
   renderFinder();
 }
 
@@ -1083,9 +1097,260 @@ function setupNews() {
   checkForNews();
 }
 
+// ------------------------------------------------------------------ Verbindungsqualität
+
+/** Länge des Verlaufs in Sekunden (ein Messpunkt pro Sekunde) */
+const QUALITY_SECONDS = 60;
+/** Stufe → gefüllte Balken; die Farbe kommt per CSS über `data-level`. */
+const QUALITY_BARS = { very_good: 4, good: 3, fair: 2, poor: 1 };
+/** Einzelwerte, die die Stufe bestimmen (Felder von `rating`) */
+const QUALITY_METRICS = { rtt: "Latenz", jitter: "Jitter", loss: "Verlust" };
+const QUALITY_LIMITS =
+  "Sehr gut: unter 10 ms Latenz, 3 ms Jitter und 0,5 % Verlust. Gut: unter 30 ms, 10 ms und 2 %. Mäßig: unter 80 ms, 25 ms und 5 %. Es zählt der schlechteste Wert.";
+/** Je Verbindung ("server" bzw. "client:Name"): Messpunkte der letzten Minute und die Anzeige dazu */
+const qualities = new Map();
+const SVG_NS = "http://www.w3.org/2000/svg";
+const NBSP = " ";
+const CHART = { w: 240, h: 48 };
+let qualityIds = 0;
+
+function svgEl(tag, attrs = {}) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+}
+
+function decimal(value, digits) {
+  return value.toLocaleString("de-DE", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function formatMs(ms) {
+  if (ms < 0.1) return `<${NBSP}0,1${NBSP}ms`;
+  return `${decimal(ms, ms < 10 ? 1 : 0)}${NBSP}ms`;
+}
+
+function formatPct(pct) {
+  if (pct === 0) return `0${NBSP}%`;
+  if (pct < 0.1) return `<${NBSP}0,1${NBSP}%`;
+  return `${decimal(pct, pct < 10 ? 1 : 0)}${NBSP}%`;
+}
+
+/** Bytes pro Sekunde, in denselben Einheiten wie das Protokoll (1 KB = 1000 B) */
+function formatRate(bytes) {
+  if (bytes < 1000) return `${bytes}${NBSP}B/s`;
+  const units = ["KB/s", "MB/s", "GB/s"];
+  let value = bytes / 1000;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit++;
+  }
+  return `${decimal(value, value < 10 ? 1 : 0)}${NBSP}${units[unit]}`;
+}
+
+/** Obergrenze der Skala (6, 8, 10, 15, 20, 30 … ms), mit etwas Luft über dem höchsten Wert */
+function chartMax(values) {
+  const target = Math.max(5, ...values) * 1.15;
+  const power = 10 ** Math.floor(Math.log10(target));
+  return [1, 1.5, 2, 3, 4, 5, 6, 8, 10].map((m) => m * power).find((v) => v >= target);
+}
+
+/** Pfeil für gesendet (hoch) bzw. empfangen (runter); Unicode-Pfeile erscheinen je nach Schrift farbig. */
+function rateArrow(up) {
+  const node = svgEl("svg", { class: "qarrow", viewBox: "0 0 12 12", "aria-hidden": "true" });
+  node.append(svgEl("path", { d: up ? "M6 10.5V2M2.5 5.5L6 2l3.5 3.5" : "M6 1.5V10M2.5 6.5L6 10l3.5-3.5" }));
+  return node;
+}
+
+function qualityBars() {
+  const node = svgEl("svg", { class: "qbars", viewBox: "0 0 16 14", "aria-hidden": "true" });
+  for (let i = 0; i < 4; i++) node.append(svgEl("rect", { x: i * 4 + 0.5, y: 10 - i * 3, width: 3, height: 4 + i * 3, rx: 1 }));
+  return node;
+}
+
+/** Anzeige einer Verbindung: kompakte Plakette (Stufe + ms) und aufklappbare Details. Die Knoten
+ *  bleiben bestehen und werden nur aktualisiert, damit nichts flackert und Aufgeklapptes offen bleibt. */
+function qualityEntry(key) {
+  let entry = qualities.get(key);
+  if (entry) return entry;
+  const id = `quality-${++qualityIds}`;
+  entry = {
+    samples: [],
+    /** Spalte (0–59) unter dem Mauszeiger im Verlauf */
+    hover: null,
+    max: 10,
+    pillBars: qualityBars(),
+    pillText: el("span", { class: "qms" }),
+    headBars: qualityBars(),
+    level: el("strong", { class: "qlevel", title: QUALITY_LIMITS }),
+    reason: el("span", { class: "qreason" }),
+    scale: el("span", { class: "qscale" }),
+    line: svgEl("path", { class: "qline" }),
+    area: svgEl("path", { class: "qarea" }),
+    cross: el("div", { class: "qcross", hidden: true }),
+    dot: el("div", { class: "qdot", hidden: true }),
+    tip: el("div", { class: "qtip", hidden: true }),
+    values: {},
+  };
+  const plot = svgEl("svg", { viewBox: `0 0 ${CHART.w} ${CHART.h}`, preserveAspectRatio: "none", "aria-hidden": "true" });
+  plot.append(
+    svgEl("line", { class: "qgrid", x1: 0, y1: 0.5, x2: CHART.w, y2: 0.5 }),
+    svgEl("line", { class: "qgrid base", x1: 0, y1: CHART.h - 0.5, x2: CHART.w, y2: CHART.h - 0.5 }),
+    entry.area,
+    entry.line,
+  );
+  entry.chart = el("div", { class: "qchart", role: "img" }, plot, entry.scale, entry.cross, entry.dot, entry.tip);
+  entry.chart.addEventListener("pointermove", (e) => {
+    const rect = entry.chart.getBoundingClientRect();
+    const column = Math.round(((e.clientX - rect.left) / rect.width) * (QUALITY_SECONDS - 1));
+    entry.hover = Math.max(0, Math.min(QUALITY_SECONDS - 1, column));
+    showQualityHover(entry);
+  });
+  entry.chart.addEventListener("pointerleave", () => {
+    entry.hover = null;
+    showQualityHover(entry);
+  });
+
+  const stat = (name, label) => {
+    entry.values[name] = el("span", { class: "v" });
+    entry.values[`${name}Sub`] = el("span", { class: "s" });
+    return el("div", { class: `qstat ${name}` }, el("span", { class: "k", text: label }), entry.values[name], entry.values[`${name}Sub`]);
+  };
+  entry.values.rate = el("span");
+  entry.values.rateSub = el("span");
+  const rate = el(
+    "div",
+    { class: "qstat rate" },
+    el("span", { class: "k", text: "Durchsatz" }),
+    el("span", { class: "v", title: "gesendet" }, rateArrow(true), entry.values.rate),
+    el("span", { class: "v", title: "empfangen" }, rateArrow(false), entry.values.rateSub),
+  );
+  entry.panel = el(
+    "div",
+    { class: "qpanel", id, hidden: true },
+    el("div", { class: "qhead" }, entry.headBars, entry.level, entry.reason),
+    el("div", {}, entry.chart, el("div", { class: "qaxis" }, el("span", { text: "Latenz der letzten 60 s" }), el("span", { text: "jetzt" }))),
+    el("div", { class: "qstats" }, stat("rtt", "Latenz"), stat("jitter", "Jitter"), stat("loss", "Verlust"), rate),
+    el("p", { class: "hint", text: "Aus den Bestätigungen der QUIC-Verbindung, ohne zusätzlichen Netzverkehr. Der Verlust gilt für die Senderichtung dieses Rechners." }),
+  );
+  entry.pill = el("button", { type: "button", class: "qpill", "aria-expanded": "false", "aria-controls": id }, entry.pillBars, entry.pillText);
+  entry.pill.addEventListener("click", () => {
+    entry.panel.hidden = !entry.panel.hidden;
+    entry.pill.setAttribute("aria-expanded", String(!entry.panel.hidden));
+    updateQuality(entry);
+  });
+  qualities.set(key, entry);
+  updateQuality(entry);
+  return entry;
+}
+
+function updateQuality(entry) {
+  const last = entry.samples.at(-1);
+  const bars = last ? QUALITY_BARS[last.level] ?? 0 : 0;
+  for (const node of [entry.pill, entry.panel]) node.dataset.level = last ? last.level : "none";
+  for (const svg of [entry.pillBars, entry.headBars]) {
+    [...svg.children].forEach((rect, i) => rect.classList.toggle("on", i < bars));
+  }
+  const open = !entry.panel.hidden;
+  entry.pillText.textContent = last ? formatMs(last.rtt_ms) : "misst …";
+  entry.pill.title = last ? `Verbindung ${last.label}: ${open ? "Details ausblenden" : "Details anzeigen"}` : "Die Verbindungsqualität wird gemessen";
+  entry.pill.setAttribute("aria-label", last ? `Verbindung ${last.label}, Latenz ${formatMs(last.rtt_ms)}` : "Verbindungsqualität wird gemessen");
+  if (!open) return;
+
+  const v = entry.values;
+  entry.level.textContent = last ? last.label : "Wird gemessen …";
+  // Welche Werte die Stufe bestimmen, z. B. „wegen Latenz und Verlust“
+  const reasons =
+    last && last.level !== "very_good"
+      ? Object.keys(QUALITY_METRICS).filter((k) => last.rating?.[k] === last.level).map((k) => QUALITY_METRICS[k])
+      : [];
+  entry.reason.textContent = reasons.length ? `wegen ${reasons.join(", ").replace(/, ([^,]*)$/, " und $1")}` : "";
+  v.rtt.textContent = last ? formatMs(last.rtt_ms) : "–";
+  v.rttSub.textContent = "hin und zurück";
+  v.jitter.textContent = last ? formatMs(last.jitter_ms) : "–";
+  v.jitterSub.textContent = "Schwankung, 10 s";
+  v.loss.textContent = last ? formatPct(last.loss_pct) : "–";
+  v.lossSub.textContent = last && last.loss_window_s ? `über ${last.loss_window_s} s` : "";
+  v.rate.textContent = last ? formatRate(last.tx_bytes_per_s) : "–";
+  v.rateSub.textContent = last ? formatRate(last.rx_bytes_per_s) : "–";
+  drawQualityChart(entry);
+}
+
+function qualityY(entry, ms) {
+  return CHART.h - 1 - (Math.min(ms, entry.max) / entry.max) * (CHART.h - 4);
+}
+
+function drawQualityChart(entry) {
+  const values = entry.samples.map((q) => q.rtt_ms);
+  const n = values.length;
+  entry.max = chartMax(values);
+  entry.scale.textContent = `${decimal(entry.max, 0)}${NBSP}ms`;
+  if (!n) {
+    entry.line.setAttribute("d", "");
+    entry.area.setAttribute("d", "");
+    entry.chart.setAttribute("aria-label", "Noch kein Verlauf");
+    return;
+  }
+  const step = CHART.w / (QUALITY_SECONDS - 1);
+  const points = values.map((ms, i) => [(QUALITY_SECONDS - n + i) * step, qualityY(entry, ms)]);
+  if (n === 1) points.unshift([points[0][0] - step, points[0][1]]);
+  const d = points.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join("");
+  entry.line.setAttribute("d", d);
+  entry.area.setAttribute("d", `${d}L${points.at(-1)[0].toFixed(1)} ${CHART.h}L${points[0][0].toFixed(1)} ${CHART.h}Z`);
+  entry.chart.setAttribute(
+    "aria-label",
+    `Latenz der letzten ${n} Sekunden: zwischen ${formatMs(Math.min(...values))} und ${formatMs(Math.max(...values))}`,
+  );
+  showQualityHover(entry);
+}
+
+/** Fadenkreuz und Wert unter dem Mauszeiger */
+function showQualityHover(entry) {
+  const n = entry.samples.length;
+  const i = entry.hover == null ? -1 : entry.hover - (QUALITY_SECONDS - n);
+  const hide = i < 0 || i >= n;
+  entry.cross.hidden = entry.dot.hidden = entry.tip.hidden = hide;
+  if (hide) return;
+  const q = entry.samples[i];
+  const left = (entry.hover / (QUALITY_SECONDS - 1)) * 100;
+  entry.cross.style.left = `${left}%`;
+  entry.dot.style.left = `${left}%`;
+  entry.dot.style.top = `${(qualityY(entry, q.rtt_ms) / CHART.h) * 100}%`;
+  const ago = n - 1 - i;
+  const parts = [ago ? `vor ${ago}${NBSP}s` : "jetzt", formatMs(q.rtt_ms), `Jitter ${formatMs(q.jitter_ms)}`];
+  if (q.loss_pct > 0) parts.push(`Verlust ${formatPct(q.loss_pct)}`);
+  entry.tip.textContent = parts.join(" · ");
+  // Innerhalb des Diagramms halten
+  const width = entry.chart.clientWidth;
+  const half = entry.tip.offsetWidth / 2;
+  const x = Math.max(half, Math.min(width - half, (left / 100) * width));
+  entry.tip.style.left = `${x}px`;
+}
+
+function onQuality(q) {
+  const s = state.status;
+  const connected =
+    q.peer == null ? s.role === "client" && s.phase === "connected" : s.role === "server" && s.clients.some((c) => c.name === q.peer);
+  if (!connected) return;
+  const entry = qualityEntry(q.peer == null ? "server" : `client:${q.peer}`);
+  entry.samples.push(q);
+  if (entry.samples.length > QUALITY_SECONDS) entry.samples.shift();
+  updateQuality(entry);
+}
+
+/** Verläufe beendeter Verbindungen verwerfen; eine neue Verbindung beginnt von vorn. */
+function pruneQualities() {
+  const s = state.status;
+  const keep = new Set();
+  if (s.role === "server") for (const c of s.clients) keep.add(`client:${c.name}`);
+  if (s.role === "client" && s.phase === "connected") keep.add("server");
+  for (const key of qualities.keys()) if (!keep.has(key)) qualities.delete(key);
+}
+
 // ------------------------------------------------------------------ Gesamt
 
 function render() {
+  pruneQualities();
   renderTopbar();
   renderServer();
   renderClients();
@@ -1117,6 +1382,7 @@ async function init() {
     render();
   });
   await listen("log", (e) => appendLogs([e.payload]));
+  await listen("quality", (e) => onQuality(e.payload));
   await listen("start-from-tray", () => {
     if (!running()) startFlow();
   });

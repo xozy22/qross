@@ -21,6 +21,7 @@ use tracing::{debug, info, warn};
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Notify, Ready};
 use crate::files::{FileOutcome, Staging};
+use crate::quality::{self, Quality};
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind};
 use crate::tls::{peer_fingerprint, server_config};
@@ -78,6 +79,8 @@ pub enum ServerNotice {
     CursorLocked { locked: bool, screen: String },
     /// Kopierte Dateien in der Zwischenablage (senden, empfangen, einfügbar, zu groß)
     ClipboardFiles(FilesNotice),
+    /// Verbindungsqualität zu einem Client, etwa jede Sekunde (siehe [`quality`]).
+    Quality { name: String, quality: Quality },
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -111,6 +114,8 @@ struct ClientHandle {
     id: usize,
     conn: Connection,
     input: mpsc::UnboundedSender<Input>,
+    /// Misst die Verbindungsqualität, solange der Client verbunden ist (nur mit Oberfläche)
+    _quality: Option<quality::Monitor>,
 }
 
 impl Server {
@@ -168,6 +173,14 @@ impl Server {
         if let Some(tx) = &self.notices {
             let _ = tx.send(notice);
         }
+    }
+
+    /// Meldet die Verbindungsqualität eines Clients, sofern jemand zuhört.
+    fn monitor_quality(&self, conn: &Connection, name: &str) -> Option<quality::Monitor> {
+        let (tx, name) = (self.notices.clone()?, name.to_owned());
+        Some(quality::monitor(conn.clone(), move |quality| {
+            let _ = tx.send(ServerNotice::Quality { name: name.clone(), quality });
+        }))
     }
 
     fn notify_action(&self, action: &Action) {
@@ -243,7 +256,8 @@ impl Server {
                             Ok(()) => {
                                 self.notify(ServerNotice::ClientConnected { name: name.clone(), addr, screen });
                                 let input = spawn_input_writer(conn.clone(), name.clone());
-                                clients.insert(name.clone(), ClientHandle { id: conn.stable_id(), conn, input });
+                                let quality = self.monitor_quality(&conn, &name);
+                                clients.insert(name.clone(), ClientHandle { id: conn.stable_id(), conn, input, _quality: quality });
                                 clip_synced.lock().unwrap().remove(&name);
                                 let _ = reply.send(Ok(self.config.name.clone()));
                                 info!("Client „{name}“ verbunden ({}×{})", screen.width, screen.height);
