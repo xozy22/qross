@@ -22,7 +22,7 @@ use qross_proto::{Edge, KeyCode, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
 use x11rb::connection::Connection;
 use x11rb::protocol::xkb::{self, ConnectionExt as _};
-use x11rb::protocol::xproto::{ConnectionExt as _, Cursor, EventMask, GrabMode, GrabStatus, ModMask, Window};
+use x11rb::protocol::xproto::{ConnectionExt as _, Cursor, EventMask, GrabMode, GrabStatus, KeyButMask, ModMask, Window};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::{CURRENT_TIME, NONE};
@@ -251,7 +251,9 @@ fn run(s: &Shared) -> Result<()> {
                     continue;
                 };
                 if down {
-                    sync_modifiers(&s.conn, &mut hotkey)?;
+                    // Zusatztasten so, wie sie beim Drücken waren: Bis die Erfassung das Ereignis liest
+                    // (alle 4 ms), können sie schon wieder losgelassen sein.
+                    hotkey.sync_modifiers(modifiers_in(e.state));
                 }
                 let options = s.keys.lock().unwrap_or_else(|e| e.into_inner());
                 if let HotkeyEvent::Triggered { event, .. } = hotkey.on_key(key, down, &options) {
@@ -313,8 +315,8 @@ fn run(s: &Shared) -> Result<()> {
     }
 }
 
-/// Gerade gedrückte Zusatztasten vom X-Server übernehmen: Im lokalen Modus sieht die Erfassung
-/// nur die gegriffenen Kürzel, nicht Strg, Alt und Co.
+/// Beim Wechsel in den Remote-Modus die gerade gedrückten Zusatztasten vom X-Server übernehmen:
+/// Im lokalen Modus sieht die Erfassung nur die gegriffenen Kürzel, nicht Strg, Alt und Co.
 fn sync_modifiers(conn: &RustConnection, hotkey: &mut HotkeyTracker) -> Result<()> {
     let keys = conn.query_keymap()?.reply()?.keys;
     hotkey.sync_modifiers(|key: KeyCode| {
@@ -322,6 +324,22 @@ fn sync_modifiers(conn: &RustConnection, hotkey: &mut HotkeyTracker) -> Result<(
         keys.get(code / 8).is_some_and(|byte| byte & (1 << (code % 8)) != 0)
     });
     Ok(())
+}
+
+/// Zusatztasten im Zustand eines Tastenereignisses. Links und rechts sind dort nicht zu
+/// unterscheiden; für den Vergleich mit einem Kürzel genügt das (gezählt wird die linke).
+fn modifiers_in(state: KeyButMask) -> impl Fn(KeyCode) -> bool {
+    let state = u16::from(state);
+    move |key| {
+        let mask = match key.0 {
+            0xE0 => KeyButMask::CONTROL,
+            0xE1 => KeyButMask::SHIFT,
+            0xE2 => KeyButMask::MOD1,
+            0xE3 => KeyButMask::MOD4,
+            _ => return false,
+        };
+        state & u16::from(mask) != 0
+    }
 }
 
 fn button_event(detail: u8, down: bool) -> Option<CaptureEvent> {
