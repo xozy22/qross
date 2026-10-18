@@ -175,6 +175,7 @@ fn collect_keys(conn: &impl Connection, limit: Duration, want: usize) -> Vec<(u8
     keys
 }
 
+#[track_caller]
 fn wait_event(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<CaptureEvent>,
     want: impl Fn(&CaptureEvent) -> bool,
