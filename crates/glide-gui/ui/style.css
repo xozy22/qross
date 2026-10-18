@@ -611,6 +611,7 @@ select {
 .server-row .info .swap { color: var(--teal); }
 .server-row .info .warn { color: var(--coral); }
 .server-row .go { color: var(--indigo); font-weight: 600; font-size: 13px; white-space: nowrap; }
+.server-row.current .go { color: var(--teal); }
 .server-list .empty { color: var(--muted); font-size: 13px; padding: 4px 2px; }
 
 /* ------------------------------------------------------------ Protokoll */

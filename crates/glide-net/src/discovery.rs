@@ -88,16 +88,16 @@ async fn discover_on(wait: Duration, port: u16, lan: bool) -> Result<Vec<Discove
     }
     drop(tx);
 
-    // Je Server (Fingerprint) eine Adresse; LAN-Adressen vor Loopback bevorzugen
+    // Je Server (Fingerprint) die passendste Adresse – er antwortet über jede Schnittstelle
     let mut found: BTreeMap<String, DiscoveredServer> = BTreeMap::new();
     let deadline = tokio::time::sleep(wait);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
             Some(server) = rx.recv() => {
-                let better = found.get(&server.fingerprint).is_none_or(|known| {
-                    is_loopback(known.addr.ip()) && !is_loopback(server.addr.ip())
-                });
+                let better = found
+                    .get(&server.fingerprint)
+                    .is_none_or(|known| address_rank(server.addr.ip()) > address_rank(known.addr.ip()));
                 if better {
                     found.insert(server.fingerprint.clone(), server);
                 }
@@ -111,13 +111,33 @@ async fn discover_on(wait: Duration, port: u16, lan: bool) -> Result<Vec<Discove
     Ok(found.into_values().collect())
 }
 
-fn is_loopback(ip: IpAddr) -> bool {
-    ip.is_loopback()
+/// Wie gut sich eine Adresse für die Verbindung eignet: echte LAN-Netze vor typischen virtuellen
+/// Adaptern (WSL, Hyper-V und Docker nutzen meist 172.16.0.0/12), Link-Local und Loopback zuletzt.
+fn address_rank(ip: IpAddr) -> u8 {
+    let IpAddr::V4(v4) = ip else { return 1 };
+    let [a, b, ..] = v4.octets();
+    match (a, b) {
+        _ if v4.is_loopback() => 0,
+        _ if v4.is_link_local() => 1,
+        (172, 16..=31) => 2,
+        (192, 168) | (10, _) => 4,
+        _ => 3,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_addresses_win_over_virtual_adapters() {
+        let rank = |s: &str| address_rank(s.parse().unwrap());
+        assert!(rank("192.168.10.7") > rank("172.28.240.1"), "LAN vor WSL/Hyper-V");
+        assert!(rank("10.0.0.5") > rank("172.17.0.1"), "LAN vor Docker");
+        assert!(rank("172.28.240.1") > rank("169.254.3.4"));
+        assert!(rank("169.254.3.4") > rank("127.0.0.1"));
+        assert!(rank("192.168.1.2") > rank("8.8.8.8"));
+    }
 
     #[tokio::test]
     async fn server_is_found_via_loopback() {

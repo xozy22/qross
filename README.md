@@ -17,7 +17,7 @@ die Bildschirmkante, ohne dass Maus und Tastatur ins Stocken geraten.
 
 <table>
   <tr>
-    <td align="center"><img src="docs/assets/screenshots/client.png" alt="Client verbunden, Cursor auf diesem Rechner"><br><sub>Client: verbunden, der Cursor ist gerade hier</sub></td>
+    <td align="center"><img src="docs/assets/screenshots/client.png" alt="Client mit gefundenen Servern im Netzwerk"><br><sub>Client: Server im Netzwerk finden und mit einem Klick verbinden</sub></td>
     <td align="center"><img src="docs/assets/screenshots/freigabe.png" alt="Freigabe-Dialog mit Fingerprint"><br><sub>Neuer Rechner: Freigabe erst nach Fingerprint-Vergleich</sub></td>
   </tr>
 </table>
