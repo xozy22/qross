@@ -30,16 +30,17 @@ pub async fn send_clipboard(conn: Connection, mut data: ClipboardData) {
             return;
         }
     }
-    let result: Result<()> = async {
-        let mut stream = conn.open_uni().await?;
-        stream.set_priority(BULK_PRIORITY)?;
-        stream.write_all(&[StreamKind::Clipboard as u8]).await?;
-        write_frame(&mut stream, &Clipboard::Data(data)).await?;
-        stream.finish()?;
-        Ok(())
-    }
-    .await;
-    if let Err(e) = result {
+    if let Err(e) = send_clipboard_message(&conn, &Clipboard::Data(data)).await {
         tracing::warn!("Clipboard konnte nicht gesendet werden: {e:#}");
     }
+}
+
+/// Eine Nachricht auf einem eigenen Clipboard-Stream (niedrige Priorität).
+pub async fn send_clipboard_message(conn: &Connection, message: &Clipboard) -> Result<()> {
+    let mut stream = conn.open_uni().await?;
+    stream.set_priority(BULK_PRIORITY)?;
+    stream.write_all(&[StreamKind::Clipboard as u8]).await?;
+    write_frame(&mut stream, message).await?;
+    stream.finish()?;
+    Ok(())
 }

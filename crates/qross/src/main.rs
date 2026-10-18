@@ -53,6 +53,9 @@ enum Command {
         /// Fingerprint des Servers fest vorgeben, statt ihn beim ersten Kontakt zu speichern
         #[arg(long)]
         server_fingerprint: Option<Fingerprint>,
+        /// Kopierte Dateien bis zu dieser Gesamtgröße in MB zum Server mitgeben (0 = nie)
+        #[arg(long, value_name = "MB", default_value_t = config::default_max_file_mb())]
+        clipboard_max_mb: u64,
         /// Eingaben nur protokollieren statt ausführen (Test auf einem einzigen Rechner)
         #[arg(long)]
         dry_run: bool,
@@ -91,12 +94,17 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Server { config } => run_server(&data_dir, &config).await,
-        Command::Client { server, name, server_fingerprint, dry_run } => {
+        Command::Client { server, name, server_fingerprint, clipboard_max_mb, dry_run } => {
             let server = match server {
                 Some(server) => server,
                 None => find_server().await?,
             };
-            let config = ClientConfig { name: name.unwrap_or_else(hostname), server, server_fingerprint };
+            let config = ClientConfig {
+                name: name.unwrap_or_else(hostname),
+                server,
+                server_fingerprint,
+                clipboard_file_limit: config::mb_to_bytes(clipboard_max_mb),
+            };
             run_client(&data_dir, config, dry_run).await
         }
         Command::Discover => {
@@ -140,7 +148,8 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
 
     let server = Server::bind(ServerConfig { name, listen: file.listen, layout }, &identity, trust)?
         .with_switch_options(file.switching.options())
-        .with_discovery(file.discovery);
+        .with_discovery(file.discovery)
+        .with_clipboard_file_limit(file.clipboard.file_limit());
     let platform = ServerPlatform {
         capture,
         events: events_rx,

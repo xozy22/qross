@@ -4,8 +4,11 @@
 //!   Datei-Kopf), Linux/macOS liefern über `arboard` RGBA-Pixel.
 //! - Windows speichert HTML im Format „CF_HTML“: UTF-8 mit einem Kopf, der Byte-Positionen des
 //!   eigentlichen Ausschnitts enthält. Übertragen wird nur der Ausschnitt.
+//! - Kopierte Dateien liegen unter Windows als „CF_HDROP“ vor: ein `DROPFILES`-Kopf und danach
+//!   die Pfade, durch Nullzeichen getrennt.
 
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 
@@ -185,6 +188,49 @@ pub fn build_cf_html(fragment: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+/// Größe des `DROPFILES`-Kopfs: pFiles, pt.x, pt.y, fNC, fWide (je 4 Bytes)
+const DROPFILES_LEN: usize = 20;
+
+/// Pfade aus einem CF_HDROP-Block (UTF-16 oder, bei sehr alten Programmen, 8-Bit-Zeichen).
+pub fn parse_dropfiles(block: &[u8]) -> Vec<PathBuf> {
+    let (Ok(offset), Ok(wide)) = (u32_at(block, 0), u32_at(block, 16)) else { return Vec::new() };
+    let Some(list) = block.get(offset as usize..) else { return Vec::new() };
+    let names: Vec<String> = if wide != 0 {
+        let units: Vec<u16> = list.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+        units.split(|&u| u == 0).take_while(|s| !s.is_empty()).map(String::from_utf16_lossy).collect()
+    } else {
+        list.split(|&b| b == 0).take_while(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect()
+    };
+    names.into_iter().map(PathBuf::from).collect()
+}
+
+/// CF_HDROP-Block für absolute Pfade (UTF-16, doppelt nullterminiert).
+pub fn build_dropfiles(paths: &[PathBuf]) -> Vec<u8> {
+    let mut block = Vec::with_capacity(DROPFILES_LEN + paths.len() * 128);
+    block.extend_from_slice(&(DROPFILES_LEN as u32).to_le_bytes());
+    block.extend_from_slice(&[0u8; 12]); // pt, fNC
+    block.extend_from_slice(&1u32.to_le_bytes()); // fWide
+    for path in paths {
+        for unit in wide(path).into_iter().chain([0]) {
+            block.extend_from_slice(&unit.to_le_bytes());
+        }
+    }
+    block.extend_from_slice(&[0, 0]);
+    block
+}
+
+fn wide(path: &Path) -> Vec<u16> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str().encode_wide().collect()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().encode_utf16().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +315,27 @@ mod tests {
         assert_eq!(cf_html_fragment(block.as_bytes()).as_deref(), Some("<p>Hallo Wörld</p>"));
         // Ohne Offsets: über die Kommentar-Marken
         assert_eq!(cf_html_fragment(body.as_bytes()).as_deref(), Some("<p>Hallo Wörld</p>"));
+    }
+
+    #[test]
+    fn dropfiles_roundtrip_with_umlauts() {
+        let paths = vec![PathBuf::from(r"C:\Users\Dennis\Bericht Grüße.pdf"), PathBuf::from(r"D:\Ordner")];
+        let block = build_dropfiles(&paths);
+        assert_eq!(&block[..4], &20u32.to_le_bytes());
+        assert_eq!(&block[block.len() - 4..], &[0, 0, 0, 0], "doppelt nullterminiert");
+        assert_eq!(parse_dropfiles(&block), paths);
+    }
+
+    #[test]
+    fn dropfiles_with_8_bit_names_and_broken_blocks() {
+        let mut block = vec![0u8; 20];
+        block[0] = 20;
+        block.extend_from_slice(b"C:\\alt.txt\0C:\\b\0\0");
+        assert_eq!(parse_dropfiles(&block), vec![PathBuf::from(r"C:\alt.txt"), PathBuf::from(r"C:\b")]);
+        assert!(parse_dropfiles(&[1, 2, 3]).is_empty());
+        let mut far = build_dropfiles(&[PathBuf::from("x")]);
+        far[0] = 200;
+        assert!(parse_dropfiles(&far).is_empty(), "Versatz hinter dem Ende");
+        assert!(parse_dropfiles(&build_dropfiles(&[])).is_empty());
     }
 }

@@ -1,6 +1,7 @@
 //! Zwischenablage in einem eigenen Thread. Große Bilder zu lesen und als PNG zu kodieren
 //! dauert spürbar; liefe das in der Ereignisschleife, würde die Maus kurz hängen.
 
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 use anyhow::{anyhow, Result};
@@ -8,11 +9,20 @@ use qross_platform::Clipboard;
 use qross_proto::ClipboardData;
 use tokio::sync::oneshot;
 
+/// Inhalt der lokalen Zwischenablage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Content {
+    Data(ClipboardData),
+    /// Kopierte Dateien und Ordner (lokale Pfade) und was sonst noch dabeiliegt
+    Files { paths: Vec<PathBuf>, data: ClipboardData },
+}
+
 enum Job {
     /// Aktuelle Sequenznummer und – nur wenn sie sich gegenüber `known` geändert hat – der Inhalt
-    Changed { known: Option<u64>, reply: oneshot::Sender<(u64, Option<ClipboardData>)> },
+    Changed { known: Option<u64>, reply: oneshot::Sender<(u64, Option<Content>)> },
     /// Inhalt setzen; Antwort ist die neue Sequenznummer
     Write { data: ClipboardData, reply: oneshot::Sender<Result<u64>> },
+    WriteFiles { files: Vec<PathBuf>, data: ClipboardData, reply: oneshot::Sender<Result<u64>> },
     Sequence { reply: oneshot::Sender<u64> },
 }
 
@@ -32,11 +42,15 @@ impl ClipboardHub {
                     match job {
                         Job::Changed { known, reply } => {
                             let seq = clipboard.sequence();
-                            let data = if known == Some(seq) { None } else { clipboard.read() };
-                            let _ = reply.send((seq, data));
+                            let content = if known == Some(seq) { None } else { read(&mut *clipboard) };
+                            let _ = reply.send((seq, content));
                         }
                         Job::Write { data, reply } => {
                             let result = clipboard.write(&data).map(|()| clipboard.sequence());
+                            let _ = reply.send(result);
+                        }
+                        Job::WriteFiles { files, data, reply } => {
+                            let result = clipboard.write_files(&files, &data).map(|()| clipboard.sequence());
                             let _ = reply.send(result);
                         }
                         Job::Sequence { reply } => {
@@ -49,7 +63,7 @@ impl ClipboardHub {
         Self { jobs }
     }
 
-    pub async fn changed_since(&self, known: Option<u64>) -> (u64, Option<ClipboardData>) {
+    pub async fn changed_since(&self, known: Option<u64>) -> (u64, Option<Content>) {
         let (reply, rx) = oneshot::channel();
         let _ = self.jobs.send(Job::Changed { known, reply });
         rx.await.unwrap_or((known.unwrap_or_default(), None))
@@ -61,9 +75,27 @@ impl ClipboardHub {
         rx.await.map_err(|_| anyhow!("Clipboard-Thread beendet"))?
     }
 
+    /// Legt Dateien (und `data`) in die Zwischenablage; Antwort ist die neue Sequenznummer.
+    pub async fn write_files(&self, files: Vec<PathBuf>, data: ClipboardData) -> Result<u64> {
+        let (reply, rx) = oneshot::channel();
+        self.jobs.send(Job::WriteFiles { files, data, reply }).map_err(|_| anyhow!("Clipboard-Thread beendet"))?;
+        rx.await.map_err(|_| anyhow!("Clipboard-Thread beendet"))?
+    }
+
     pub async fn sequence(&self) -> u64 {
         let (reply, rx) = oneshot::channel();
         let _ = self.jobs.send(Job::Sequence { reply });
         rx.await.unwrap_or_default()
+    }
+}
+
+/// Dateien zuerst: Wer im Dateimanager kopiert, will Dateien einfügen.
+fn read(clipboard: &mut dyn Clipboard) -> Option<Content> {
+    let paths = clipboard.files();
+    let data = clipboard.read();
+    if paths.is_empty() {
+        data.map(Content::Data)
+    } else {
+        Some(Content::Files { paths, data: data.unwrap_or_default() })
     }
 }

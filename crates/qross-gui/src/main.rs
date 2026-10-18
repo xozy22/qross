@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use qross_gui::changelog::{self, Release};
+use qross_gui::clipboard_files::FilesMessage;
 use qross_gui::{Role, Settings, EXPORT_FILE, GRID_COLS, GRID_ROWS};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WindowEvent};
@@ -41,6 +42,29 @@ pub fn quit(app: &AppHandle) {
         rt.stop().await;
         app.exit(0);
     });
+}
+
+/// Hat das Hauptfenster gerade den Fokus? Dann reicht ein Hinweis in der App.
+pub fn window_in_front(app: &AppHandle) -> bool {
+    app.get_webview_window("main").is_some_and(|w| {
+        w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) && !w.is_minimized().unwrap_or(false)
+    })
+}
+
+/// Systembenachrichtigung (Windows-Infocenter, macOS-Mitteilungen, Linux über D-Bus).
+/// Schlägt sie fehl, bleibt es beim Hinweis in der App.
+pub fn notify(app: &AppHandle, message: &FilesMessage) {
+    use tauri_plugin_notification::NotificationExt;
+    tracing::debug!("Systembenachrichtigung: {}", message.title);
+    let result = app
+        .notification()
+        .builder()
+        .title(&message.title)
+        .body(message.text.as_deref().unwrap_or_default())
+        .show();
+    if let Err(e) = result {
+        warn!("Systembenachrichtigung nicht möglich: {e}");
+    }
 }
 
 #[derive(Serialize)]
@@ -87,10 +111,11 @@ fn get_state(rt: Rt<'_>, logs: State<'_, Arc<LogBuffer>>) -> Result<Snapshot, St
 #[tauri::command]
 fn preview_layout(settings: Settings) -> LayoutPreview {
     let s = &settings.server;
-    LayoutPreview { toml: s.to_toml(), error: s.validate().err(), isolated: s.isolated() }
+    LayoutPreview { toml: settings.server_toml(), error: s.validate().err(), isolated: s.isolated() }
 }
 
-/// Speichert die Einstellungen. Ändert sich das Layout eines laufenden Servers, startet er neu.
+/// Speichert die Einstellungen. Was ein laufender Server oder Client erst beim Start übernimmt
+/// (Layout, Port, Wechsel, Grenze für kopierte Dateien), führt zu einem Neustart.
 #[tauri::command]
 async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
     let rt = rt.inner().clone();
@@ -100,7 +125,7 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
     }
     settings.save(&rt.data_dir).map_err(|e| format!("{e:#}"))?;
     if settings.server.validate().is_ok() {
-        if let Err(e) = std::fs::write(rt.data_dir.join(EXPORT_FILE), settings.server.to_toml()) {
+        if let Err(e) = std::fs::write(rt.data_dir.join(EXPORT_FILE), settings.server_toml()) {
             warn!("{EXPORT_FILE} nicht geschrieben: {e}");
         }
     }
@@ -108,10 +133,15 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
 
     let status = rt.status();
     let server_changed = settings.server.needs_restart(&old.server);
+    let limit_changed = settings.clipboard_files_mb != old.clipboard_files_mb;
     match status.role {
         Some(role) if role != settings.role => rt.stop().await,
-        Some(Role::Server) if server_changed && settings.server.validate().is_ok() => {
+        Some(Role::Server) if (server_changed || limit_changed) && settings.server.validate().is_ok() => {
             info!("Einstellungen geändert – Server startet neu");
+            rt.start().await.map_err(|e| format!("{e:#}"))?;
+        }
+        Some(Role::Client) if limit_changed => {
+            info!("Einstellungen geändert – Client verbindet neu");
             rt.start().await.map_err(|e| format!("{e:#}"))?;
         }
         _ => {}
@@ -155,6 +185,30 @@ fn changelog() -> &'static [Release] {
 #[tauri::command]
 async fn discover_servers(rt: Rt<'_>) -> Result<Vec<FoundServer>, String> {
     rt.discover_servers(std::time::Duration::from_millis(1200)).await.map_err(|e| format!("{e:#}"))
+}
+
+/// Nur Debug-Builds: spielt die Meldungen einer Dateiübertragung ab, um Hinweise und
+/// Systembenachrichtigungen ohne zweiten Rechner zu prüfen. `kind`: ready, slow, large, failed.
+#[tauri::command]
+async fn simulate_clipboard_files(rt: Rt<'_>, kind: String) -> Result<(), String> {
+    use qross_net::clipfiles::FilesNotice;
+    if !cfg!(debug_assertions) {
+        return Err("nur in Debug-Builds verfügbar".into());
+    }
+    let rt = rt.inner().clone();
+    let (peer, names) = ("pc".to_owned(), vec!["Bericht.pdf".to_owned()]);
+    match kind.as_str() {
+        "ready" | "slow" => {
+            rt.on_files_notice(FilesNotice::Receiving { peer: peer.clone(), names: names.clone(), bytes: 3_141_592 });
+            let wait = if kind == "slow" { 2500 } else { 300 };
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+            rt.on_files_notice(FilesNotice::Ready { peer, names, bytes: 3_141_592 });
+        }
+        "large" => rt.on_files_notice(FilesNotice::TooLarge { peer, names: vec!["Film.mkv".into()], limit: 1_000_000_000 }),
+        "failed" => rt.on_files_notice(FilesNotice::Failed { peer, reason: "Verbindung getrennt".into() }),
+        other => return Err(format!("unbekannt: {other}")),
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -201,6 +255,7 @@ fn main() {
         ));
     }
     builder
+        .plugin(tauri_plugin_notification::init())
         .manage(logs.clone())
         .invoke_handler(tauri::generate_handler![
             get_state,
@@ -214,6 +269,7 @@ fn main() {
             discover_servers,
             changelog,
             trust_server,
+            simulate_clipboard_files,
         ])
         .setup(move |app| {
             logs.attach(app.handle().clone());

@@ -1,9 +1,11 @@
-//! Zwischenablage unter Windows: Text (CF_UNICODETEXT), HTML („HTML Format“) und Bilder
-//! („PNG“ von Browsern/Office, sonst CF_DIBV5/CF_DIB, z. B. von Win+Shift+S).
+//! Zwischenablage unter Windows: Text (CF_UNICODETEXT), HTML („HTML Format“), Bilder
+//! („PNG“ von Browsern/Office, sonst CF_DIBV5/CF_DIB, z. B. von Win+Shift+S) und kopierte
+//! Dateien (CF_HDROP, z. B. Strg+C im Explorer).
 //!
 //! Die Zwischenablage ist systemweit gesperrt, solange sie offen ist. Deshalb werden nur die
 //! Rohdaten kopiert; Umwandlungen (DIB → PNG usw.) passieren danach.
 
+use std::path::PathBuf;
 use std::ptr::{copy_nonoverlapping, null_mut};
 use std::sync::OnceLock;
 use std::thread::sleep;
@@ -18,12 +20,17 @@ use windows_sys::Win32::System::DataExchange::{
 };
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 
-use crate::clipformat::{build_cf_html, cf_html_fragment, dib_to_rgba, png_to_rgba, rgba_to_dib, rgba_to_png};
+use crate::clipformat::{
+    build_cf_html, build_dropfiles, cf_html_fragment, dib_to_rgba, parse_dropfiles, png_to_rgba, rgba_to_dib, rgba_to_png,
+};
 use crate::Clipboard;
 
 const CF_UNICODETEXT: u32 = 13;
 const CF_DIB: u32 = 8;
+const CF_HDROP: u32 = 15;
 const CF_DIBV5: u32 = 17;
+/// Einfügen kopiert (statt zu verschieben) – so bleiben die Dateien für weiteres Einfügen liegen.
+const DROPEFFECT_COPY: u32 = 1;
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 pub fn clipboard() -> Box<dyn Clipboard> {
@@ -48,6 +55,11 @@ fn html_format() -> u32 {
 fn png_format() -> u32 {
     static SLOT: OnceLock<u32> = OnceLock::new();
     registered("PNG", &SLOT)
+}
+
+fn drop_effect_format() -> u32 {
+    static SLOT: OnceLock<u32> = OnceLock::new();
+    registered("Preferred DropEffect", &SLOT)
 }
 
 /// Offenes Clipboard; wird beim Drop geschlossen.
@@ -140,47 +152,61 @@ impl Clipboard for WinClipboard {
     }
 
     fn write(&mut self, data: &ClipboardData) -> anyhow::Result<()> {
-        // Alles vorbereiten, bevor das Clipboard gesperrt wird
-        let text = data.text.as_ref().map(|t| {
-            t.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect::<Vec<u8>>()
-        });
-        let html = data.html.as_ref().map(|h| {
-            let mut block = build_cf_html(h);
-            block.push(0);
-            block
-        });
-        // Zusätzlich als DIB, damit auch ältere Programme (Paint, Office) das Bild einfügen können
-        let dib = match &data.png {
-            Some(png) => Some(rgba_to_dib(&png_to_rgba(png).context("Bild aus der Gegenstelle ist kein gültiges PNG")?)),
-            None => None,
-        };
+        put(formats(data)?)
+    }
 
-        let formats = [
-            (CF_UNICODETEXT, text),
-            (html_format(), html),
-            (png_format(), data.png.clone()),
-            (CF_DIB, dib),
-        ];
-        let _open = Open::acquire().context("Clipboard ist von einem anderen Programm belegt")?;
-        unsafe {
-            EmptyClipboard();
-            for (format, bytes) in formats {
-                let Some(bytes) = bytes else { continue };
-                if format == 0 {
-                    continue;
-                }
-                let mem = global(&bytes)?;
-                // Bei Erfolg gehört der Speicher dem System.
-                if SetClipboardData(format, mem).is_null() {
-                    GlobalFree(mem);
-                    tracing::debug!("Format {format} nicht gesetzt");
-                }
-            }
-        }
-        Ok(())
+    fn files(&mut self) -> Vec<PathBuf> {
+        let Some(_open) = Open::acquire() else { return Vec::new() };
+        unsafe { raw(CF_HDROP) }.map(|block| parse_dropfiles(&block)).unwrap_or_default()
+    }
+
+    fn write_files(&mut self, files: &[PathBuf], data: &ClipboardData) -> anyhow::Result<()> {
+        let mut formats = formats(data)?;
+        formats.push((CF_HDROP, Some(build_dropfiles(files))));
+        formats.push((drop_effect_format(), Some(DROPEFFECT_COPY.to_le_bytes().to_vec())));
+        put(formats)
     }
 
     fn sequence(&mut self) -> u64 {
         unsafe { GetClipboardSequenceNumber() as u64 }
     }
+}
+
+/// Alle Darstellungen von `data` als (Format, Bytes) – vorbereitet, bevor das Clipboard gesperrt wird.
+fn formats(data: &ClipboardData) -> anyhow::Result<Vec<(u32, Option<Vec<u8>>)>> {
+    let text = data.text.as_ref().map(|t| {
+        t.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect::<Vec<u8>>()
+    });
+    let html = data.html.as_ref().map(|h| {
+        let mut block = build_cf_html(h);
+        block.push(0);
+        block
+    });
+    // Zusätzlich als DIB, damit auch ältere Programme (Paint, Office) das Bild einfügen können
+    let dib = match &data.png {
+        Some(png) => Some(rgba_to_dib(&png_to_rgba(png).context("Bild aus der Gegenstelle ist kein gültiges PNG")?)),
+        None => None,
+    };
+    Ok(vec![(CF_UNICODETEXT, text), (html_format(), html), (png_format(), data.png.clone()), (CF_DIB, dib)])
+}
+
+/// Ersetzt den Inhalt des Clipboards durch die angegebenen Formate.
+fn put(formats: Vec<(u32, Option<Vec<u8>>)>) -> anyhow::Result<()> {
+    let _open = Open::acquire().context("Clipboard ist von einem anderen Programm belegt")?;
+    unsafe {
+        EmptyClipboard();
+        for (format, bytes) in formats {
+            let Some(bytes) = bytes else { continue };
+            if format == 0 {
+                continue;
+            }
+            let mem = global(&bytes)?;
+            // Bei Erfolg gehört der Speicher dem System.
+            if SetClipboardData(format, mem).is_null() {
+                GlobalFree(mem);
+                tracing::debug!("Format {format} nicht gesetzt");
+            }
+        }
+    }
+    Ok(())
 }

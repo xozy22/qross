@@ -37,6 +37,7 @@ impl Injector for RecordingInjector {
 #[derive(Default)]
 pub struct MemoryClipboard {
     data: Option<ClipboardData>,
+    files: Vec<PathBuf>,
     seq: u64,
 }
 
@@ -47,12 +48,23 @@ impl Clipboard for MemoryClipboard {
 
     fn write(&mut self, data: &ClipboardData) -> anyhow::Result<()> {
         self.data = (!data.is_empty()).then(|| data.clone());
+        self.files.clear();
         self.seq += 1;
         Ok(())
     }
 
     fn sequence(&mut self) -> u64 {
         self.seq
+    }
+
+    fn files(&mut self) -> Vec<PathBuf> {
+        self.files.clone()
+    }
+
+    fn write_files(&mut self, files: &[PathBuf], data: &ClipboardData) -> anyhow::Result<()> {
+        self.write(data)?;
+        self.files = files.to_vec();
+        Ok(())
     }
 }
 
@@ -71,6 +83,14 @@ impl Clipboard for SharedClipboard {
 
     fn sequence(&mut self) -> u64 {
         self.0.lock().unwrap().sequence()
+    }
+
+    fn files(&mut self) -> Vec<PathBuf> {
+        self.0.lock().unwrap().files()
+    }
+
+    fn write_files(&mut self, files: &[PathBuf], data: &ClipboardData) -> anyhow::Result<()> {
+        self.0.lock().unwrap().write_files(files, data)
     }
 }
 

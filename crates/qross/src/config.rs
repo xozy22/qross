@@ -23,6 +23,37 @@ pub struct ServerFile {
     /// Auf Suchanfragen im LAN antworten (`qross client` ohne Adresse)
     #[serde(default = "yes")]
     pub discovery: bool,
+    #[serde(default)]
+    pub clipboard: ClipboardSection,
+}
+
+/// Abschnitt `[clipboard]`: kopierte Dateien.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ClipboardSection {
+    /// Kopierte Dateien bis zu dieser Gesamtgröße in MB beim Wechsel mitgeben (0 = nie)
+    #[serde(default = "default_max_file_mb")]
+    pub max_file_mb: u64,
+}
+
+impl Default for ClipboardSection {
+    fn default() -> Self {
+        Self { max_file_mb: default_max_file_mb() }
+    }
+}
+
+impl ClipboardSection {
+    pub fn file_limit(&self) -> u64 {
+        mb_to_bytes(self.max_file_mb)
+    }
+}
+
+pub fn default_max_file_mb() -> u64 {
+    qross_net::clipfiles::DEFAULT_LIMIT / 1_000_000
+}
+
+pub fn mb_to_bytes(mb: u64) -> u64 {
+    mb.saturating_mul(1_000_000)
 }
 
 /// Abschnitt `[switching]`: wann der Cursor den Bildschirm wechselt.
@@ -84,11 +115,19 @@ mod tests {
         qross_core::Layout::from_links(&file.links).unwrap();
         assert_eq!(file.switching.options(), SwitchOptions { corner_size: 8, delay: Duration::from_millis(0) });
         assert!(file.discovery);
+        assert_eq!(file.clipboard.file_limit(), 1_000_000_000);
     }
 
     #[test]
     fn switching_defaults_apply_when_section_is_missing() {
         let file: ServerFile = toml::from_str("name = \"pc\"").unwrap();
         assert_eq!(file.switching.options(), SwitchOptions::RECOMMENDED);
+        assert_eq!(file.clipboard.file_limit(), qross_net::clipfiles::DEFAULT_LIMIT);
+    }
+
+    #[test]
+    fn copied_files_can_be_switched_off() {
+        let file: ServerFile = toml::from_str("[clipboard]\nmax_file_mb = 0").unwrap();
+        assert_eq!(file.clipboard.file_limit(), 0);
     }
 }

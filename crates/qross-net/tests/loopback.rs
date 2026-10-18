@@ -1,10 +1,12 @@
 //! Ende-zu-Ende über echtes QUIC auf Loopback, mit Test-Doubles statt Betriebssystem.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use qross_core::{CaptureEvent, Inject, Layout, LinkConfig};
 use qross_net::client::{self, ClientConfig, ClientPlatform};
+use qross_net::clipfiles;
 use qross_net::server::{Server, ServerConfig, ServerPlatform};
 use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, RecordingCapture, RecordingInjector, SharedClipboard};
@@ -34,6 +36,11 @@ impl Drop for Setup {
 }
 
 fn start(trust_client: bool, pin: Option<qross_net::Fingerprint>) -> Setup {
+    start_with(trust_client, pin, clipfiles::DEFAULT_LIMIT)
+}
+
+/// `file_limit`: Grenze für kopierte Dateien auf beiden Seiten
+fn start_with(trust_client: bool, pin: Option<qross_net::Fingerprint>, file_limit: u64) -> Setup {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
@@ -45,7 +52,7 @@ fn start(trust_client: bool, pin: Option<qross_net::Fingerprint>) -> Setup {
     let layout =
         Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
     let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
-    let server = Server::bind(config, &server_id, trust).unwrap();
+    let server = Server::bind(config, &server_id, trust).unwrap().with_clipboard_file_limit(file_limit);
     let addr = server.local_addr().unwrap();
 
     let capture = RecordingCapture::default();
@@ -64,6 +71,7 @@ fn start(trust_client: bool, pin: Option<qross_net::Fingerprint>) -> Setup {
         name: "laptop".into(),
         server: addr.to_string(),
         server_fingerprint: Some(pin.unwrap_or_else(|| server_id.fingerprint())),
+        clipboard_file_limit: file_limit,
     };
     let client_task = tokio::spawn(client::run(
         client_config,
@@ -235,6 +243,96 @@ async fn images_and_html_travel_through_the_clipboard() {
     s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
     let server_clip = s.server_clip.clone();
     wait_for("Bild beim Server", || server_clip.clone().read().as_ref() == Some(&from_client)).await;
+}
+
+/// Quellordner mit einer größeren Datei und einem Ordner samt Unterordner und leerem Ordner
+fn copied_files(test: &str) -> (PathBuf, Vec<u8>) {
+    let base = std::env::temp_dir().join(format!("qross-clip-{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("Projekt/sub")).unwrap();
+    std::fs::create_dir_all(base.join("Projekt/leer")).unwrap();
+    let report: Vec<u8> = (0..3 * 1024 * 1024u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    std::fs::write(base.join("Bericht.pdf"), &report).unwrap();
+    std::fs::write(base.join("Projekt/sub/notiz.txt"), "Grüße").unwrap();
+    (base, report)
+}
+
+/// Die angekommenen Dateien liegen im Ablageordner für die Zwischenablage und sind vollständig.
+fn assert_pasteable(paths: &[PathBuf], report: &[u8]) {
+    let store = clipfiles::default_store();
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert!(paths.iter().all(|p| p.starts_with(&store)), "{paths:?} liegen nicht in {}", store.display());
+    assert_eq!(paths[0].file_name().unwrap(), "Bericht.pdf");
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), report);
+    assert_eq!(std::fs::read_to_string(paths[1].join("sub/notiz.txt")).unwrap(), "Grüße");
+    assert!(paths[1].join("leer").is_dir(), "leere Ordner kommen mit");
+    let _ = std::fs::remove_dir_all(paths[0].parent().unwrap());
+}
+
+#[tokio::test]
+async fn copied_files_reach_the_client_clipboard() {
+    let mut s = start(true, None);
+    let (source, report) = copied_files("zum-client");
+    let names = ClipboardData::from_text("Bericht.pdf\nProjekt");
+    s.server_clip.write_files(&[source.join("Bericht.pdf"), source.join("Projekt")], &names).unwrap();
+
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    let client_clip = s.client_clip.clone();
+    wait_up_to(Duration::from_secs(20), "Dateien in der Zwischenablage des Clients", || {
+        !client_clip.clone().files().is_empty()
+    })
+    .await;
+    assert_eq!(s.client_clip.read(), Some(names), "Dateinamen als Text kommen mit");
+    assert_pasteable(&s.client_clip.files(), &report);
+    let _ = std::fs::remove_dir_all(&source);
+}
+
+#[tokio::test]
+async fn copied_files_travel_back_to_the_server() {
+    let mut s = start(true, None);
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    let injected = s.injected.clone();
+    wait_for("Enter beim Client", || injected.0.lock().unwrap().contains(&Inject::MoveTo { x: 1, y: 399 })).await;
+
+    // Auf dem Laptop im Dateimanager kopiert, dann zurück zum Server
+    let (source, report) = copied_files("zum-server");
+    s.client_clip.write_files(&[source.join("Bericht.pdf"), source.join("Projekt")], &ClipboardData::default()).unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let server_clip = s.server_clip.clone();
+    wait_up_to(Duration::from_secs(20), "Dateien in der Zwischenablage des Servers", || {
+        !server_clip.clone().files().is_empty()
+    })
+    .await;
+    assert_pasteable(&s.server_clip.files(), &report);
+    let _ = std::fs::remove_dir_all(&source);
+}
+
+#[tokio::test]
+async fn too_large_files_stay_put_but_their_names_arrive() {
+    let mut s = start_with(true, None, 1024 * 1024);
+    let (source, _) = copied_files("zu-gross");
+    s.server_clip.write_files(&[source.join("Bericht.pdf")], &ClipboardData::from_text("Bericht.pdf")).unwrap();
+
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    let client_clip = s.client_clip.clone();
+    wait_for("Dateiname beim Client", || client_clip.clone().text().as_deref() == Some("Bericht.pdf")).await;
+    assert!(s.client_clip.files().is_empty(), "3 MB über der Grenze von 1 MB werden nicht übertragen");
+    let _ = std::fs::remove_dir_all(&source);
 }
 
 #[tokio::test]

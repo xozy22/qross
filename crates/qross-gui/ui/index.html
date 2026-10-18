@@ -102,6 +102,14 @@
           </label>
         </section>
 
+        <section class="panel-section">
+          <h2>Zwischenablage</h2>
+          <label class="clip-limit">Kopierte Dateien mitgeben bis
+            <span class="unit-input"><input type="number" data-clip-limit min="0" max="100000" step="100" inputmode="numeric"><span>MB</span></span>
+          </label>
+          <p class="hint" data-clip-hint></p>
+        </section>
+
         <details class="panel-section">
           <summary>Konfiguration als Datei</summary>
           <pre id="tomlPreview" class="toml"></pre>
@@ -152,6 +160,10 @@
           <input id="clientDryRun" type="checkbox" role="switch">
           <span class="track"><span class="thumb"></span></span>
           <span>Testmodus: Eingaben nur protokollieren, nicht ausführen</span>
+        </label>
+        <label class="field-wide clip-limit">Kopierte Dateien mitgeben bis
+          <span class="unit-input"><input type="number" data-clip-limit min="0" max="100000" step="100" inputmode="numeric"><span>MB</span></span>
+          <span class="hint" data-clip-hint></span>
         </label>
         <div class="client-actions">
           <button type="button" id="checkServer" class="btn ghost">Fingerprint des Servers prüfen</button>

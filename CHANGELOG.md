@@ -8,6 +8,25 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.3.0] - 2026-10-18
+
+### Neu
+
+- **Dateien per Zwischenablage:** Dateien und Ordner im Explorer, Finder oder Dateimanager kopieren, den
+  Cursor auf den anderen Rechner bewegen und dort einfügen. Das klappt in beide Richtungen und über den
+  Server auch von einem Client zum nächsten.
+- Die Übertragung läuft im Hintergrund, Maus und Tastatur bleiben flüssig. Jede Datei wird per SHA-256
+  geprüft, eingefügt werden kann erst, wenn alles vollständig angekommen ist.
+- Bis 1 GB geht das automatisch, die Grenze ist einstellbar (0 = aus). Größere Dateien wie bisher per
+  Drag & Drop ziehen.
+- Die App meldet, sobald die Dateien bereit zum Einfügen sind oder wenn sie zu groß sind. Liegt das Fenster
+  im Hintergrund, kommt eine Systembenachrichtigung.
+
+### Wichtig
+
+- Für Dateien in der Zwischenablage brauchen beide Rechner Qross 0.3.0. Rechner mit 0.2 bleiben verbunden,
+  Text, formatierter Text und Bilder funktionieren mit ihnen weiter.
+
 ## [0.2.1] - 2026-10-18
 
 ### Neu
@@ -76,6 +95,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.3.0]: https://github.com/xozy22/qross/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/xozy22/qross/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/xozy22/qross/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/xozy22/qross/compare/v0.1.1...v0.1.2

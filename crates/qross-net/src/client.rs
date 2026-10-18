@@ -12,17 +12,17 @@ use qross_core::client::{ClientState, Transition};
 use qross_core::Inject;
 use qross_platform::{Clipboard, Injector};
 use qross_proto::{
-    decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, Input,
-    MouseMove, Rect,
-    Platform, ScreenInfo, StreamKind, DEFAULT_PORT, PROTOCOL_VERSION,
+    decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, FileEntry,
+    Input, MouseMove, Platform, Rect, ScreenInfo, StreamKind, DEFAULT_PORT, PROTOCOL_VERSION,
 };
 use quinn::{Connection, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::files::{self, FileOutcome, Receiver, Staging};
 use crate::clipboard::ClipboardHub;
-use crate::streams::{read_kind, send_clipboard};
+use crate::clipfiles::{self, FilesNotice, Incoming, Notify, Ready};
+use crate::files::{self, FileOutcome, Receiver, Staging};
+use crate::streams::read_kind;
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
 
@@ -40,6 +40,9 @@ pub struct ClientConfig {
     pub server: String,
     /// Fest vorgegebener Server-Fingerprint; sonst Trust on First Use
     pub server_fingerprint: Option<Fingerprint>,
+    /// Kopierte Dateien bis zu dieser Gesamtgröße in Bytes mitgeben (0 = nie);
+    /// üblich: `clipfiles::DEFAULT_LIMIT`
+    pub clipboard_file_limit: u64,
 }
 
 pub struct ClientPlatform {
@@ -65,6 +68,15 @@ enum FromServer {
     Input(Input),
     Clipboard(ClipboardData),
     File(FileOutcome),
+    ClipboardFiles { transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
+    ClipboardFile(FileOutcome),
+}
+
+/// Zwischenablage dieses Clients: Zugriff, ankommende kopierte Dateien, Meldungen dazu.
+struct ClipboardSide {
+    hub: ClipboardHub,
+    incoming: Incoming,
+    notify: Notify,
 }
 
 /// Aufträge an den Einspeise-Thread. Die Ablageordner-Abfrage läuft dort, damit sie nach den
@@ -89,6 +101,8 @@ pub enum ClientNotice {
     Disconnected { reason: String },
     CursorEntered,
     CursorLeft,
+    /// Kopierte Dateien in der Zwischenablage (senden, empfangen, einfügbar, zu groß)
+    ClipboardFiles(FilesNotice),
 }
 
 type Notices<'a> = Option<&'a mpsc::UnboundedSender<ClientNotice>>;
@@ -143,7 +157,18 @@ async fn run_inner(
     notices: Notices<'_>,
 ) -> Result<()> {
     let ClientPlatform { mut injector, clipboard, screen } = platform;
-    let clipboard = ClipboardHub::spawn(clipboard);
+    let mut clipboard = ClipboardSide {
+        hub: ClipboardHub::spawn(clipboard),
+        incoming: Incoming::new(Staging::persistent(&clipfiles::default_store())?),
+        notify: {
+            let notices = notices.cloned();
+            Arc::new(move |notice| {
+                if let Some(tx) = &notices {
+                    let _ = tx.send(ClientNotice::ClipboardFiles(notice));
+                }
+            })
+        },
+    };
 
     // Eigener Thread, damit SendInput nie die Netzwerk-Tasks blockiert.
     let (inject_tx, inject_rx) = std::sync::mpsc::channel::<ToInjector>();
@@ -168,7 +193,7 @@ async fn run_inner(
     let mut retry = RETRY_MIN;
     loop {
         let started = std::time::Instant::now();
-        let result = session(&config, &tls, &mut trust, &inject_tx, &clipboard, &*screen, notices).await;
+        let result = session(&config, &tls, &mut trust, &inject_tx, &mut clipboard, &*screen, notices).await;
         retry = if started.elapsed() > STABLE_SESSION { RETRY_MIN } else { (retry * 2).min(RETRY_MAX) };
         match result {
             Ok(()) => {
@@ -190,7 +215,7 @@ async fn session(
     tls: &quinn::ClientConfig,
     trust: &mut TrustStore,
     inject: &Sender<ToInjector>,
-    clipboard: &ClipboardHub,
+    clip: &mut ClipboardSide,
     screen: &(dyn Fn() -> Rect + Send + Sync),
     notices: Notices<'_>,
 ) -> Result<()> {
@@ -219,11 +244,11 @@ async fn session(
         platform: Platform::current(),
     };
     write_frame(&mut control, &hello).await?;
-    let server_platform = match read_frame::<_, Control>(&mut control_rx).await? {
+    let (server_name, server_platform) = match read_frame::<_, Control>(&mut control_rx).await? {
         Some(Control::Welcome { server_name, platform, .. }) => {
             info!("verbunden mit Server „{server_name}“ ({addr})");
-            notify(notices, ClientNotice::Connected { server_name, addr });
-            platform
+            notify(notices, ClientNotice::Connected { server_name: server_name.clone(), addr });
+            (server_name, platform)
         }
         Some(Control::Reject { reason }) => bail!("Server hat die Verbindung abgelehnt: {reason}"),
         other => bail!("unerwartete Antwort vom Server: {other:?}"),
@@ -234,7 +259,9 @@ async fn session(
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     tokio::spawn(receive_datagrams(conn.clone(), tx.clone()));
-    tokio::spawn(receive_streams(conn.clone(), tx, receiver.staging()));
+    tokio::spawn(receive_streams(conn.clone(), tx, receiver.staging(), clip.incoming.staging()));
+    // Übertragungen der vorigen Verbindung kommen nie mehr vollständig an.
+    clip.incoming.supersede();
 
     let mut state = ClientState::new();
     // PC steuert Mac (oder umgekehrt): Strg und Cmd tauschen, damit z. B. Strg+C kopiert
@@ -244,7 +271,7 @@ async fn session(
     }
     state.set_swap_ctrl_cmd(swap);
     // Zuletzt abgeglichene Clipboard-Sequenznummer (auch aus Hintergrund-Aufgaben aktualisiert)
-    let clip_synced = Arc::new(std::sync::Mutex::new(clipboard.sequence().await));
+    let clip_synced = Arc::new(std::sync::Mutex::new(clip.hub.sequence().await));
     // Für das Log: Bewegungen seit dem letzten Enter und letzte Position
     let mut moves = 0u32;
     let mut last_pos = (0, 0);
@@ -295,14 +322,14 @@ async fn session(
                                     last_pos.0, last_pos.1
                                 );
                                 // Beim Verlassen das eigene Clipboard mitgeben, falls es sich geändert hat.
-                                let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), conn.clone());
+                                let (hub, synced, conn) = (clip.hub.clone(), clip_synced.clone(), conn.clone());
+                                let (limit, peer, notify) = (config.clipboard_file_limit, server_name.clone(), clip.notify.clone());
                                 tokio::spawn(async move {
                                     let known = *synced.lock().unwrap();
-                                    let (seq, data) = clipboard.changed_since(Some(known)).await;
+                                    let (seq, content) = hub.changed_since(Some(known)).await;
                                     *synced.lock().unwrap() = seq;
-                                    if let Some(data) = data {
-                                        info!("Zwischenablage → Server: {}", data.summary());
-                                        send_clipboard(conn, data).await;
+                                    if let Some(content) = content {
+                                        clipfiles::send(conn, content, limit, peer, notify).await;
                                     }
                                 });
                             }
@@ -311,15 +338,33 @@ async fn session(
                     }
                     FromServer::Clipboard(data) => {
                         info!("Zwischenablage vom Server: {}", data.summary());
-                        let (clipboard, synced) = (clipboard.clone(), clip_synced.clone());
+                        clip.incoming.supersede();
+                        let (hub, synced) = (clip.hub.clone(), clip_synced.clone());
                         tokio::spawn(async move {
-                            match clipboard.write(data).await {
+                            match hub.write(data).await {
                                 Ok(seq) => *synced.lock().unwrap() = seq,
                                 Err(e) => warn!("Zwischenablage nicht übernommen: {e:#}"),
                             }
                         });
                     }
                     FromServer::File(outcome) => receiver.on_file(outcome),
+                    FromServer::ClipboardFiles { transfer, entries, data } => {
+                        let (names, bytes) = clipfiles::summary(&entries);
+                        (clip.notify)(FilesNotice::Receiving { peer: server_name.clone(), names, bytes });
+                        match clip.incoming.announce(server_name.clone(), transfer, entries, data) {
+                            Ok(Some(ready)) => deliver_files(ready, clip, &clip_synced),
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!("kopierte Dateien vom Server abgelehnt: {e:#}");
+                                (clip.notify)(FilesNotice::Failed { peer: server_name.clone(), reason: format!("{e:#}") });
+                            }
+                        }
+                    }
+                    FromServer::ClipboardFile(outcome) => match clip.incoming.on_file(outcome) {
+                        Ok(Some(ready)) => deliver_files(ready, clip, &clip_synced),
+                        Ok(None) => {}
+                        Err(failed) => (clip.notify)(FilesNotice::Failed { peer: failed.peer, reason: failed.reason }),
+                    },
                 },
                 _ = screen_poll.tick() => {
                     let now = screen();
@@ -338,6 +383,25 @@ async fn session(
     inject_all(inject, state.release_all());
     receiver.cancel_undropped();
     outcome
+}
+
+/// Fertig übertragene Dateien vom Server in die Zwischenablage legen.
+fn deliver_files(ready: Ready, clip: &ClipboardSide, synced: &Arc<std::sync::Mutex<u64>>) {
+    let (hub, synced, notify) = (clip.hub.clone(), synced.clone(), clip.notify.clone());
+    tokio::spawn(async move {
+        let Ready { peer, paths, data, names, bytes } = ready;
+        match hub.write_files(paths, data).await {
+            Ok(seq) => {
+                info!("kopierte Dateien liegen in der Zwischenablage");
+                *synced.lock().unwrap() = seq;
+                notify(FilesNotice::Ready { peer, names, bytes });
+            }
+            Err(e) => {
+                warn!("kopierte Dateien nicht in die Zwischenablage gelegt: {e:#}");
+                notify(FilesNotice::Failed { peer, reason: format!("{e:#}") });
+            }
+        }
+    });
 }
 
 fn verify_server(config: &ClientConfig, trust: &mut TrustStore, fingerprint: &Fingerprint) -> Result<()> {
@@ -410,11 +474,16 @@ fn fallback_drop_folder() -> PathBuf {
     dirs::download_dir().or_else(dirs::home_dir).unwrap_or_else(std::env::temp_dir).join("Qross")
 }
 
-async fn receive_streams(conn: Connection, tx: mpsc::UnboundedSender<FromServer>, staging: Arc<Staging>) {
+async fn receive_streams(
+    conn: Connection,
+    tx: mpsc::UnboundedSender<FromServer>,
+    drag: Arc<Staging>,
+    clipboard: Arc<Staging>,
+) {
     while let Ok(mut stream) = conn.accept_uni().await {
-        let (tx, staging) = (tx.clone(), staging.clone());
+        let (tx, drag, clipboard) = (tx.clone(), drag.clone(), clipboard.clone());
         tokio::spawn(async move {
-            if let Err(e) = read_server_stream(&mut stream, &tx, &staging).await {
+            if let Err(e) = read_server_stream(&mut stream, &tx, &drag, &clipboard).await {
                 debug!("Stream vom Server beendet: {e:#}");
             }
         });
@@ -424,7 +493,8 @@ async fn receive_streams(conn: Connection, tx: mpsc::UnboundedSender<FromServer>
 async fn read_server_stream(
     stream: &mut RecvStream,
     tx: &mpsc::UnboundedSender<FromServer>,
-    staging: &Staging,
+    drag: &Staging,
+    clipboard: &Staging,
 ) -> Result<()> {
     match read_kind(stream).await? {
         StreamKind::Input => {
@@ -432,14 +502,22 @@ async fn read_server_stream(
                 let _ = tx.send(FromServer::Input(input));
             }
         }
-        StreamKind::Clipboard => {
-            if let Some(ClipboardMsg::Data(data)) = read_frame(stream).await? {
+        StreamKind::Clipboard => match read_frame(stream).await? {
+            Some(ClipboardMsg::Data(data)) => {
                 let _ = tx.send(FromServer::Clipboard(data));
             }
-        }
+            Some(ClipboardMsg::Files { transfer, entries, data }) => {
+                let _ = tx.send(FromServer::ClipboardFiles { transfer, entries, data });
+            }
+            None => {}
+        },
         StreamKind::File => {
-            let outcome = files::receive_file(stream, staging).await?;
+            let outcome = files::receive_file(stream, drag).await?;
             let _ = tx.send(FromServer::File(outcome));
+        }
+        StreamKind::ClipboardFile => {
+            let outcome = files::receive_file(stream, clipboard).await?;
+            let _ = tx.send(FromServer::ClipboardFile(outcome));
         }
     }
     Ok(())

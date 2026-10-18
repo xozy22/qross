@@ -11,17 +11,18 @@ use qross_core::server::{Action, ServerEvent, ServerState, SwitchOptions};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard};
 use qross_proto::{
-    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, Input,
-    Platform, Rect,
-    StreamKind, PROTOCOL_VERSION,
+    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, FileEntry,
+    Input, Platform, Rect, StreamKind, PROTOCOL_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::clipboard::ClipboardHub;
+use crate::clipfiles::{self, FilesNotice, Notify, Ready};
+use crate::files::{FileOutcome, Staging};
 use crate::{discovery, files};
-use crate::streams::{open_input, read_kind, send_clipboard};
+use crate::streams::{open_input, read_kind};
 use crate::tls::{peer_fingerprint, server_config};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore};
 
@@ -48,6 +49,8 @@ pub struct Server {
     switching: SwitchOptions,
     /// Auf Suchanfragen im LAN antworten (Standard, wenn auf allen Adressen gelauscht wird)
     discovery: bool,
+    /// Kopierte Dateien bis zu dieser Gesamtgröße mitgeben (0 = nie)
+    clipboard_file_limit: u64,
     fingerprint: Fingerprint,
 }
 
@@ -73,6 +76,8 @@ pub enum ServerNotice {
     CursorOn { screen: String },
     /// Rollen-Taste: Cursor auf `screen` festgehalten (`locked`) bzw. wieder frei.
     CursorLocked { locked: bool, screen: String },
+    /// Kopierte Dateien in der Zwischenablage (senden, empfangen, einfügbar, zu groß)
+    ClipboardFiles(FilesNotice),
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -96,6 +101,8 @@ enum NetEvent {
     },
     ScreenChanged { name: String, id: usize, screen: Rect },
     Clipboard { name: String, id: usize, data: ClipboardData },
+    ClipboardFiles { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
+    ClipboardFile { name: String, id: usize, outcome: FileOutcome },
     Closed { name: String, id: usize },
 }
 
@@ -118,8 +125,16 @@ impl Server {
             notices: None,
             switching: SwitchOptions::RECOMMENDED,
             discovery,
+            clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
             fingerprint: identity.fingerprint(),
         })
+    }
+
+    /// Kopierte Dateien bis zu dieser Gesamtgröße in Bytes mitgeben (0 = nie;
+    /// Standard: `clipfiles::DEFAULT_LIMIT`). Größeres bleibt Drag & Drop vorbehalten.
+    pub fn with_clipboard_file_limit(mut self, bytes: u64) -> Self {
+        self.clipboard_file_limit = bytes;
+        self
     }
 
     /// Ecken-Totzone und Wechselverzögerung (Standard: `SwitchOptions::RECOMMENDED`).
@@ -164,11 +179,21 @@ impl Server {
     }
 
     pub async fn run(mut self, platform: ServerPlatform) -> Result<()> {
+        // Kopierte Dateien aller Clients landen hier, bis sie in die Zwischenablage kommen.
+        let mut incoming = clipfiles::Incoming::new(Staging::persistent(&clipfiles::default_store())?);
         let (net_tx, mut net_rx) = mpsc::unbounded_channel();
-        tokio::spawn(accept_loop(self.endpoint.clone(), net_tx));
+        tokio::spawn(accept_loop(self.endpoint.clone(), net_tx, incoming.staging()));
 
         let ServerPlatform { capture, mut events, clipboard, screen } = platform;
         let clipboard = ClipboardHub::spawn(clipboard);
+        let files_notify: Notify = {
+            let notices = self.notices.clone();
+            Arc::new(move |notice| {
+                if let Some(tx) = &notices {
+                    let _ = tx.send(ServerNotice::ClipboardFiles(notice));
+                }
+            })
+        };
         let mut local_screen = screen();
         let mut state = ServerState::new(self.config.name.clone(), self.config.layout.clone(), local_screen);
         state.set_switch_options(self.switching);
@@ -244,6 +269,7 @@ impl Server {
                     }
                     NetEvent::Clipboard { name, id, data } if is_current(&clients, &name, id) => {
                         info!("Zwischenablage von „{name}“: {}", data.summary());
+                        incoming.supersede();
                         let (clipboard, synced) = (clipboard.clone(), clip_synced.clone());
                         tokio::spawn(async move {
                             match clipboard.write(data).await {
@@ -254,6 +280,27 @@ impl Server {
                                 Err(e) => warn!("Zwischenablage von „{name}“ nicht übernommen: {e:#}"),
                             }
                         });
+                        Vec::new()
+                    }
+                    NetEvent::ClipboardFiles { name, id, transfer, entries, data } if is_current(&clients, &name, id) => {
+                        let (names, bytes) = clipfiles::summary(&entries);
+                        files_notify(FilesNotice::Receiving { peer: name.clone(), names, bytes });
+                        match incoming.announce(name.clone(), transfer, entries, data) {
+                            Ok(Some(ready)) => deliver_files(ready, &clipboard, &clip_synced, &files_notify),
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!("kopierte Dateien von „{name}“ abgelehnt: {e:#}");
+                                files_notify(FilesNotice::Failed { peer: name, reason: format!("{e:#}") });
+                            }
+                        }
+                        Vec::new()
+                    }
+                    NetEvent::ClipboardFile { name, id, outcome } if is_current(&clients, &name, id) => {
+                        match incoming.on_file(outcome) {
+                            Ok(Some(ready)) => deliver_files(ready, &clipboard, &clip_synced, &files_notify),
+                            Ok(None) => {}
+                            Err(failed) => files_notify(FilesNotice::Failed { peer: failed.peer, reason: failed.reason }),
+                        }
                         Vec::new()
                     }
                     NetEvent::Closed { name, id } if is_current(&clients, &name, id) => {
@@ -277,7 +324,8 @@ impl Server {
             };
             for action in actions {
                 self.notify_action(&action);
-                apply(action, &*capture, &clipboard, &clients, &clip_synced);
+                let files = (self.clipboard_file_limit, &files_notify);
+                apply(action, &*capture, &clipboard, &clients, &clip_synced, files);
             }
         }
     }
@@ -340,12 +388,33 @@ fn is_current(clients: &HashMap<String, ClientHandle>, name: &str, id: usize) ->
 /// Je Client die zuletzt übertragene Clipboard-Sequenznummer
 type ClipSynced = Arc<Mutex<HashMap<String, u64>>>;
 
+/// Fertig übertragene Dateien eines Clients in die Zwischenablage legen.
+fn deliver_files(ready: Ready, clipboard: &ClipboardHub, clip_synced: &ClipSynced, notify: &Notify) {
+    let (clipboard, synced, notify) = (clipboard.clone(), clip_synced.clone(), notify.clone());
+    tokio::spawn(async move {
+        let Ready { peer, paths, data, names, bytes } = ready;
+        match clipboard.write_files(paths, data).await {
+            Ok(seq) => {
+                info!("kopierte Dateien von „{peer}“ liegen in der Zwischenablage");
+                // Nicht an denselben Client zurückschicken
+                synced.lock().unwrap().insert(peer.clone(), seq);
+                notify(FilesNotice::Ready { peer, names, bytes });
+            }
+            Err(e) => {
+                warn!("kopierte Dateien von „{peer}“ nicht in die Zwischenablage gelegt: {e:#}");
+                notify(FilesNotice::Failed { peer, reason: format!("{e:#}") });
+            }
+        }
+    });
+}
+
 fn apply(
     action: Action,
     capture: &dyn Capture,
     clipboard: &ClipboardHub,
     clients: &HashMap<String, ClientHandle>,
     clip_synced: &ClipSynced,
+    (file_limit, files_notify): (u64, &Notify),
 ) {
     match action {
         Action::CaptureRemote => capture.capture_remote(),
@@ -372,14 +441,14 @@ fn apply(
         Action::SyncClipboard { to } => {
             let Some(client) = clients.get(&to) else { return };
             let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), client.conn.clone());
+            let notify = files_notify.clone();
             // Lesen und PNG-Kodierung im Clipboard-Thread; die Ereignisschleife läuft weiter.
             tokio::spawn(async move {
                 let known = synced.lock().unwrap().get(&to).copied();
-                let (seq, data) = clipboard.changed_since(known).await;
+                let (seq, content) = clipboard.changed_since(known).await;
                 synced.lock().unwrap().insert(to.clone(), seq);
-                if let Some(data) = data {
-                    info!("Zwischenablage → „{to}“: {}", data.summary());
-                    send_clipboard(conn, data).await;
+                if let Some(content) = content {
+                    clipfiles::send(conn, content, file_limit, to, notify).await;
                 }
             });
         }
@@ -410,7 +479,7 @@ async fn start_file_drag(
     info!("übertrage {} Einträge ({}) an „{to}“", entries.len(), files::human_size(total));
     let _ = input.send(Input::DragStart { transfer, entries: entries.iter().map(|e| e.entry.clone()).collect() });
     let started = std::time::Instant::now();
-    match files::send_files(conn, transfer, entries).await {
+    match files::send_files(conn, StreamKind::File, transfer, entries).await {
         Ok(()) => {
             let secs = started.elapsed().as_secs_f64().max(0.001);
             info!(
@@ -440,19 +509,23 @@ fn spawn_input_writer(conn: Connection, name: String) -> mpsc::UnboundedSender<I
     tx
 }
 
-async fn accept_loop(endpoint: Endpoint, tx: mpsc::UnboundedSender<NetEvent>) {
+async fn accept_loop(endpoint: Endpoint, tx: mpsc::UnboundedSender<NetEvent>, staging: Arc<Staging>) {
     while let Some(incoming) = endpoint.accept().await {
-        let tx = tx.clone();
+        let (tx, staging) = (tx.clone(), staging.clone());
         tokio::spawn(async move {
             let remote = incoming.remote_address();
-            if let Err(e) = handle_connection(incoming, tx).await {
+            if let Err(e) = handle_connection(incoming, tx, staging).await {
                 debug!("Verbindung von {remote} beendet: {e:#}");
             }
         });
     }
 }
 
-async fn handle_connection(incoming: Incoming, tx: mpsc::UnboundedSender<NetEvent>) -> Result<()> {
+async fn handle_connection(
+    incoming: Incoming,
+    tx: mpsc::UnboundedSender<NetEvent>,
+    staging: Arc<Staging>,
+) -> Result<()> {
     let remote = incoming.remote_address();
     let conn = incoming.await.context("QUIC-Handshake")?;
     let fingerprint = peer_fingerprint(&conn)?;
@@ -485,7 +558,7 @@ async fn handle_connection(incoming: Incoming, tx: mpsc::UnboundedSender<NetEven
     }
 
     let id = conn.stable_id();
-    tokio::spawn(receive_clipboards(conn.clone(), name.clone(), id, tx.clone()));
+    tokio::spawn(receive_client_streams(conn.clone(), name.clone(), id, tx.clone(), staging));
     loop {
         match read_frame::<_, Control>(&mut recv).await {
             Ok(Some(Control::ScreenChanged(info))) => {
@@ -500,16 +573,33 @@ async fn handle_connection(incoming: Incoming, tx: mpsc::UnboundedSender<NetEven
     Ok(())
 }
 
-async fn receive_clipboards(conn: Connection, name: String, id: usize, tx: mpsc::UnboundedSender<NetEvent>) {
+/// Streams vom Client: nur Zwischenablage (Inhalte und kopierte Dateien).
+async fn receive_client_streams(
+    conn: Connection,
+    name: String,
+    id: usize,
+    tx: mpsc::UnboundedSender<NetEvent>,
+    staging: Arc<Staging>,
+) {
     while let Ok(mut stream) = conn.accept_uni().await {
-        let (name, tx) = (name.clone(), tx.clone());
+        let (name, tx, staging) = (name.clone(), tx.clone(), staging.clone());
         tokio::spawn(async move {
             let result: Result<()> = async {
-                if read_kind(&mut stream).await? != StreamKind::Clipboard {
-                    bail!("Client darf nur Clipboard-Streams öffnen");
-                }
-                if let Some(ClipboardMsg::Data(data)) = read_frame(&mut stream).await? {
-                    let _ = tx.send(NetEvent::Clipboard { name, id, data });
+                match read_kind(&mut stream).await? {
+                    StreamKind::Clipboard => match read_frame(&mut stream).await? {
+                        Some(ClipboardMsg::Data(data)) => {
+                            let _ = tx.send(NetEvent::Clipboard { name, id, data });
+                        }
+                        Some(ClipboardMsg::Files { transfer, entries, data }) => {
+                            let _ = tx.send(NetEvent::ClipboardFiles { name, id, transfer, entries, data });
+                        }
+                        None => {}
+                    },
+                    StreamKind::ClipboardFile => {
+                        let outcome = files::receive_file(&mut stream, &staging).await?;
+                        let _ = tx.send(NetEvent::ClipboardFile { name, id, outcome });
+                    }
+                    other => bail!("Client darf keine Streams vom Typ {other:?} öffnen"),
                 }
                 Ok(())
             }

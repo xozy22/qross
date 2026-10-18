@@ -4,6 +4,7 @@
 //! nebeneinander oder übereinander, entsteht daraus ein Link wie in `qross.example.toml`.
 
 pub mod changelog;
+pub mod clipboard_files;
 
 use std::collections::HashSet;
 use std::fs;
@@ -40,6 +41,9 @@ pub struct Settings {
     pub role: Role,
     pub server: ServerSettings,
     pub client: ClientSettings,
+    /// Kopierte Dateien beim Wechsel bis zu dieser Gesamtgröße in MB mitgeben (0 = aus).
+    /// Gilt als Server wie als Client.
+    pub clipboard_files_mb: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -108,7 +112,18 @@ impl Settings {
                 discovery: true,
             },
             client: ClientSettings { address: String::new(), name: hostname.to_owned(), dry_run: false },
+            clipboard_files_mb: qross_net::clipfiles::DEFAULT_LIMIT / 1_000_000,
         }
+    }
+
+    /// Grenze für kopierte Dateien in Bytes (0 = nie automatisch übertragen)
+    pub fn clipboard_file_limit(&self) -> u64 {
+        self.clipboard_files_mb.saturating_mul(1_000_000)
+    }
+
+    /// Inhalt einer `qross.toml` für `qross server --config`.
+    pub fn server_toml(&self) -> String {
+        self.server.to_toml(self.clipboard_files_mb)
     }
 
     /// Lädt `gui.json` aus `dir`; `None`, wenn es die Datei noch nicht gibt.
@@ -240,13 +255,14 @@ impl ServerSettings {
         }
     }
 
-    /// Inhalt einer `qross.toml` für `qross server --config`.
-    pub fn to_toml(&self) -> String {
+    /// Inhalt einer `qross.toml` für `qross server --config` (siehe auch [`Settings::server_toml`]).
+    pub fn to_toml(&self, clipboard_files_mb: u64) -> String {
         let mut out = String::from("# Erzeugt von der Qross-Oberfläche\n");
         out += &format!("name = {}\n", quote(&self.name));
         out += &format!("listen = \"{}\"\n", self.listen());
         out += &format!("discovery = {}\n", self.discovery);
         out += &format!("\n[switching]\ncorner_size = {}\ndelay_ms = {}\n", self.corner_size, self.switch_delay_ms);
+        out += &format!("\n[clipboard]\nmax_file_mb = {clipboard_files_mb}\n");
         for link in self.links() {
             out += &format!(
                 "\n[[links]]\nfrom = {}\nedge = \"{}\"\nto = {}\n",
@@ -335,6 +351,7 @@ mod tests {
             listen: SocketAddr,
             discovery: bool,
             switching: Switching,
+            clipboard: ClipboardSection,
             links: Vec<LinkConfig>,
         }
         #[derive(Deserialize)]
@@ -343,11 +360,17 @@ mod tests {
             corner_size: u32,
             delay_ms: u64,
         }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ClipboardSection {
+            max_file_mb: u64,
+        }
         let mut s = server(&[("pc", 3, 2), ("lap\"top", 4, 2)]);
         s.corner_size = 12;
         s.switch_delay_ms = 150;
         s.discovery = false;
-        let file: ServerFile = toml::from_str(&s.to_toml()).unwrap();
+        let file: ServerFile = toml::from_str(&s.to_toml(250)).unwrap();
+        assert_eq!(file.clipboard.max_file_mb, 250);
         assert_eq!(file.name, "pc");
         assert!(!file.discovery);
         assert_eq!((file.switching.corner_size, file.switching.delay_ms), (12, 150));
@@ -393,5 +416,8 @@ mod tests {
         let old: Settings = serde_json::from_str(r#"{"server":{"name":"pc","port":24900,"screens":[]}}"#).unwrap();
         assert_eq!(old.server.switch_options(), SwitchOptions::RECOMMENDED);
         assert!(old.server.discovery);
+        // … und die Standardgrenze für kopierte Dateien (1 GB)
+        assert_eq!(old.clipboard_files_mb, 1000);
+        assert_eq!(old.clipboard_file_limit(), qross_net::clipfiles::DEFAULT_LIMIT);
     }
 }

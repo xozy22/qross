@@ -68,6 +68,18 @@ pub trait Clipboard: Send {
     /// Ändert sich bei jeder Änderung des Clipboards (auch durch andere Programme).
     fn sequence(&mut self) -> u64;
 
+    /// Kopierte Dateien und Ordner (Explorer, Finder, Dateimanager) als absolute Pfade; leer, wenn keine.
+    fn files(&mut self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    /// Legt Dateien zum Einfügen im Dateimanager ab und dazu die Darstellungen aus `data`, soweit
+    /// das System beides zugleich erlaubt (Windows: ja; über `arboard` gewinnen die Dateien).
+    fn write_files(&mut self, files: &[PathBuf], data: &ClipboardData) -> anyhow::Result<()> {
+        let _ = (files, data);
+        anyhow::bail!("Dateien in der Zwischenablage werden auf diesem System nicht unterstützt")
+    }
+
     fn text(&mut self) -> Option<String> {
         self.read().and_then(|data| data.text)
     }

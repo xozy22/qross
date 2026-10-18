@@ -1,4 +1,5 @@
-//! Dateiübertragung für Drag & Drop.
+//! Dateiübertragung für Drag & Drop und für kopierte Dateien aus der Zwischenablage
+//! (siehe `clipfiles`).
 //!
 //! Jede Datei läuft auf einem eigenen QUIC-Stream mit niedriger Priorität: `FileHeader`,
 //! Rohbytes, `FileTrailer` mit SHA-256. Der Empfänger schreibt zuerst in ein Staging-
@@ -35,37 +36,54 @@ pub struct LocalEntry {
 /// Löst die gezogenen Pfade rekursiv auf. Relative Pfade beginnen mit dem Namen des gezogenen
 /// Elements; symbolische Links werden übersprungen.
 pub fn collect(roots: &[PathBuf]) -> Result<Vec<LocalEntry>> {
+    Ok(collect_up_to(roots, u64::MAX)?.expect("ohne Grenze immer vollständig"))
+}
+
+/// Wie [`collect`], hört aber auf, sobald die Dateien zusammen größer als `max_bytes` sind
+/// (`None`). So dauert auch ein versehentlich kopiertes Laufwerk nicht ewig.
+pub fn collect_up_to(roots: &[PathBuf], max_bytes: u64) -> Result<Option<Vec<LocalEntry>>> {
     let mut out = Vec::new();
+    let mut total = 0;
     for root in roots {
         let name = root
             .file_name()
             .with_context(|| format!("{} hat keinen Dateinamen", root.display()))?
             .to_string_lossy()
             .into_owned();
-        walk(root, name, &mut out)?;
+        if !walk(root, name, &mut out, &mut total, max_bytes)? {
+            return Ok(None);
+        }
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
-fn walk(path: &Path, rel: String, out: &mut Vec<LocalEntry>) -> Result<()> {
+/// `false`, sobald `max_bytes` überschritten ist.
+fn walk(path: &Path, rel: String, out: &mut Vec<LocalEntry>, total: &mut u64, max_bytes: u64) -> Result<bool> {
     let meta = fs::symlink_metadata(path).with_context(|| format!("{} lesen", path.display()))?;
     if meta.is_dir() {
         out.push(LocalEntry { source: path.to_owned(), entry: FileEntry { path: rel.clone(), size: 0, is_dir: true } });
         let mut children: Vec<_> = fs::read_dir(path)?.collect::<Result<_, _>>()?;
         children.sort_by_key(|c| c.file_name());
         for child in children {
-            walk(&child.path(), format!("{rel}/{}", child.file_name().to_string_lossy()), out)?;
+            if !walk(&child.path(), format!("{rel}/{}", child.file_name().to_string_lossy()), out, total, max_bytes)? {
+                return Ok(false);
+            }
         }
     } else if meta.is_file() {
+        *total = total.saturating_add(meta.len());
+        if *total > max_bytes {
+            return Ok(false);
+        }
         out.push(LocalEntry { source: path.to_owned(), entry: FileEntry { path: rel, size: meta.len(), is_dir: false } });
     } else {
         debug!("überspringe {} (kein normaler Eintrag)", path.display());
     }
-    Ok(())
+    Ok(true)
 }
 
-/// Sendet alle Dateien einer Übertragung nacheinander auf je einem eigenen Stream.
-pub async fn send_files(conn: Connection, transfer: u64, entries: Vec<LocalEntry>) -> Result<()> {
+/// Sendet alle Dateien einer Übertragung nacheinander auf je einem eigenen Stream
+/// (`kind`: `File` für Drag & Drop, `ClipboardFile` für die Zwischenablage).
+pub async fn send_files(conn: Connection, kind: StreamKind, transfer: u64, entries: Vec<LocalEntry>) -> Result<()> {
     let mut buf = vec![0u8; CHUNK];
     for (index, local) in entries.iter().enumerate() {
         if local.entry.is_dir {
@@ -73,7 +91,7 @@ pub async fn send_files(conn: Connection, transfer: u64, entries: Vec<LocalEntry
         }
         let mut stream = conn.open_uni().await?;
         stream.set_priority(BULK_PRIORITY)?;
-        stream.write_all(&[StreamKind::File as u8]).await?;
+        stream.write_all(&[kind as u8]).await?;
         let header = FileHeader { transfer, index: index as u32, path: local.entry.path.clone(), size: local.entry.size };
         write_frame(&mut stream, &header).await?;
 
@@ -130,46 +148,75 @@ pub fn sanitize(path: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// Gemeinsamer Zustand zwischen den Stream-Lesern und der Client-Hauptschleife.
+/// Ablageort für ankommende Dateien, gemeinsam für die Stream-Leser und die Hauptschleife.
 pub struct Staging {
     root: PathBuf,
     cancelled: Mutex<HashSet<u64>>,
+    /// Bleibt beim Beenden erhalten (Zwischenablage: eingefügt wird oft erst später).
+    keep: bool,
 }
 
+const DAY: Duration = Duration::from_secs(24 * 3600);
+
 impl Staging {
-    /// Eigenes Verzeichnis pro Lauf; Reste älterer Läufe (> 1 Tag) werden aufgeräumt.
+    /// Eigenes Verzeichnis pro Lauf, wird beim Beenden gelöscht; Reste älterer Läufe (> 1 Tag)
+    /// werden aufgeräumt.
     pub fn create(base: &Path) -> Result<Arc<Self>> {
-        if let Ok(entries) = fs::read_dir(base) {
-            let day_ago = SystemTime::now() - Duration::from_secs(24 * 3600);
-            for entry in entries.flatten() {
-                let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < day_ago);
-                if old {
-                    let _ = fs::remove_dir_all(entry.path());
-                }
-            }
-        }
+        remove_older_than(base, DAY, None);
         let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let root = base.join(format!("{}-{nanos}", std::process::id()));
         fs::create_dir_all(&root).with_context(|| format!("{} anlegen", root.display()))?;
-        Ok(Arc::new(Self { root, cancelled: Mutex::new(HashSet::new()) }))
+        Ok(Arc::new(Self { root, cancelled: Mutex::new(HashSet::new()), keep: false }))
+    }
+
+    /// Dauerhafter Ablageort direkt in `base`, der Programmende und Neuverbindungen übersteht.
+    /// Übertragungen, die älter als ein Tag sind, werden aufgeräumt.
+    pub fn persistent(base: &Path) -> Result<Arc<Self>> {
+        remove_older_than(base, DAY, None);
+        fs::create_dir_all(base).with_context(|| format!("{} anlegen", base.display()))?;
+        Ok(Arc::new(Self { root: base.to_owned(), cancelled: Mutex::new(HashSet::new()), keep: true }))
     }
 
     pub fn transfer_dir(&self, transfer: u64) -> PathBuf {
         self.root.join(transfer.to_string())
     }
 
+    /// Bricht laufende Streams dieser Übertragung ab und löscht, was schon angekommen ist.
+    pub fn discard(&self, transfer: u64) {
+        self.cancel(transfer);
+        let _ = fs::remove_dir_all(self.transfer_dir(transfer));
+    }
+
+    /// Löscht alle anderen Übertragungen, die seit `age` nicht mehr verändert wurden.
+    pub fn prune(&self, age: Duration, except: u64) {
+        remove_older_than(&self.root, age, Some(&self.transfer_dir(except)));
+    }
+
     fn cancel(&self, transfer: u64) {
         self.cancelled.lock().unwrap().insert(transfer);
     }
 
-    fn is_cancelled(&self, transfer: u64) -> bool {
+    pub(crate) fn is_cancelled(&self, transfer: u64) -> bool {
         self.cancelled.lock().unwrap().contains(&transfer)
     }
 }
 
 impl Drop for Staging {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        if !self.keep {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+fn remove_older_than(dir: &Path, age: Duration, except: Option<&Path>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Some(limit) = SystemTime::now().checked_sub(age) else { return };
+    for entry in entries.flatten() {
+        let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t <= limit);
+        if old && except != Some(entry.path().as_path()) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -290,9 +337,8 @@ impl Receiver {
         let undropped: Vec<u64> = self.transfers.iter().filter(|(_, t)| t.target.is_none()).map(|(id, _)| *id).collect();
         for id in undropped {
             debug!("Übertragung {id} verworfen (nicht abgelegt)");
-            self.staging.cancel(id);
+            self.staging.discard(id);
             self.transfers.remove(&id);
-            let _ = fs::remove_dir_all(self.staging.transfer_dir(id));
         }
     }
 
@@ -300,9 +346,8 @@ impl Receiver {
         let Some(transfer) = self.transfers.get(&id) else { return };
         if !transfer.failed.is_empty() {
             warn!("Übertragung fehlgeschlagen: {}", transfer.failed.join("; "));
-            self.staging.cancel(id);
+            self.staging.discard(id);
             self.transfers.remove(&id);
-            let _ = fs::remove_dir_all(self.staging.transfer_dir(id));
             return;
         }
         if transfer.target.is_none() || !transfer.complete() {
@@ -452,6 +497,37 @@ mod tests {
         assert!(target.join("Ordner/leer").is_dir());
         assert_eq!(fs::read(target.join("bild.png")).unwrap(), b"schon da");
         assert!(!staging.exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn collect_up_to_stops_at_the_limit() {
+        let base = std::env::temp_dir().join(format!("qross-files-limit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("Ordner")).unwrap();
+        fs::write(base.join("Ordner/a.bin"), vec![0u8; 600]).unwrap();
+        fs::write(base.join("Ordner/b.bin"), vec![0u8; 600]).unwrap();
+        let roots = [base.join("Ordner")];
+        assert_eq!(collect_up_to(&roots, 1200).unwrap().map(|e| e.len()), Some(3));
+        assert!(collect_up_to(&roots, 1199).unwrap().is_none());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn persistent_staging_survives_and_prunes() {
+        let base = std::env::temp_dir().join(format!("qross-staging-keep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let staging = Staging::persistent(&base).unwrap();
+        for id in [1, 2] {
+            fs::create_dir_all(staging.transfer_dir(id)).unwrap();
+        }
+        staging.prune(Duration::ZERO, 2);
+        assert!(!staging.transfer_dir(1).exists() && staging.transfer_dir(2).exists());
+        staging.discard(2);
+        assert!(!staging.transfer_dir(2).exists());
+        fs::create_dir_all(staging.transfer_dir(3)).unwrap();
+        drop(staging);
+        assert!(base.join("3").exists(), "bleibt nach dem Beenden erhalten");
         let _ = fs::remove_dir_all(&base);
     }
 

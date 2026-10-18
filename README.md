@@ -15,7 +15,8 @@
 Eine eigene Implementierung in der Art von Synergy, geschrieben in Rust. Statt TCP verwendet Qross ein eigenes
 Protokoll über **QUIC**. Bei Paketverlust (WLAN) bleibt der Cursor damit flüssig, wo ein TCP-Transport wie der von
 Synergy 200–600 ms hängt ([Benchmark](docs/benchmark-ergebnisse.md)). Große Dateien wandern per **Drag & Drop** über
-die Bildschirmkante, ohne dass Maus und Tastatur ins Stocken geraten.
+die Bildschirmkante, ohne dass Maus und Tastatur ins Stocken geraten. Kopierte Dateien lassen sich auf dem
+anderen Rechner einfach **einfügen** (Strg+C hier, Strg+V dort).
 
 <p align="center">
   <img src="docs/assets/screenshots/server.png" width="820" alt="Server-Ansicht mit Layout-Editor, verbundenen Rechnern und Freigabe-Anfrage">
@@ -42,6 +43,7 @@ die Bildschirmkante, ohne dass Maus und Tastatur ins Stocken geraten.
 | Eingaben während eines 2-MB-Clipboards (p99)¹ | 116 ms (0 % Verlust) / 248 ms (1 %) | 32 ms / 5 ms, keine Ruckler über 50 ms |
 | Screenshots & formatierter Text in der Zwischenablage | ja | ja, als PNG bzw. HTML, ohne die Eingaben auszubremsen |
 | Dateien per Drag & Drop | über dieselbe Verbindung wie die Eingaben | eigener Stream je Datei, SHA-256-geprüft, auch GB-große Dateien und Ordner |
+| Dateien kopieren und einfügen | nicht über die Zwischenablage, nur per Drag & Drop | Strg+C im Explorer, Strg+V auf dem anderen Rechner, in beide Richtungen, bis 1 GB automatisch |
 | Vertrauen | TLS mit Fingerprint-Bestätigung | gegenseitige Zertifikate: der Server gibt Clients explizit frei, der Client merkt sich den Server |
 | Versehentliches Wechseln an Ecken | Ecken-Schutz muss konfiguriert werden | Ecken-Totzone ab Werk, optionale Wechselverzögerung |
 | PC ↔ Mac | Modifier von Hand umbelegen | Strg/Cmd wird automatisch getauscht |
@@ -58,6 +60,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Server: Eingaben erfassen, Kanten pro Monitor | ✔ | ✔ | ✔¹ |
 | Client: Eingaben einspeisen | ✔ | ✔ | ✔¹ |
 | Zwischenablage in beide Richtungen: Text, HTML, Bilder (z. B. Screenshots) | ✔ | ✔ | ✔¹ |
+| Dateien kopieren und einfügen, in beide Richtungen | ✔ Explorer | ✔ Dateimanager mit `text/uri-list` (Nautilus, Dolphin) | ✔ Finder¹ |
 | Cursor auf dem Server ausblenden | ✔ | ✔ | soweit macOS es zulässt¹ |
 | Dateien per Drag & Drop **senden** (Server) | ✔ | – | – |
 | Dateien per Drag & Drop **empfangen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
@@ -69,9 +72,10 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
-  (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, Ablehnung
-  unbekannter Clients, LAN-Suche).
-- Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB).
+  (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, kopierte
+  Dateien und Ordner in beide Richtungen, Ablehnung unbekannter Clients, LAN-Suche).
+- Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
+  die der Explorer anschließend selbst einfügt.
 - Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
 - Windows: Bau- und Smoke-Tests sowie die Explorer-Ordnererkennung. Hooks und Einspeisung wurden noch nicht
   mit zwei echten Rechnern getestet.
@@ -128,6 +132,9 @@ Hinweise:
 - `qross discover` listet alle Qross-Server im LAN, `qross client <adresse>` verbindet gezielt.
 - `[switching]` in `qross.toml`: `corner_size` (Ecken-Totzone in Pixeln, Standard 8) und `delay_ms`
   (so lange gegen die Kante drücken, bevor gewechselt wird, Standard 0).
+- `[clipboard] max_file_mb` in `qross.toml` bzw. `qross client --clipboard-max-mb`: kopierte Dateien bis zu
+  dieser Gesamtgröße beim Wechsel mitgeben (Standard 1000, 0 = aus). Sie liegen danach im Cache
+  (`%LOCALAPPDATA%\Qross\clipboard`) und werden nach einem Tag aufgeräumt.
 - Solange kein Client verbunden ist, verhält sich der Server völlig unauffällig.
 - `qross client --dry-run` protokolliert Eingaben nur. Damit lässt sich testen, ohne einen zweiten Rechner fernzusteuern.
 - `--log-file <datei>` und `-v` für ausführliche Logs.
@@ -170,7 +177,8 @@ docker run --rm -v "%CD%:/src" -v qross-cargo:/usr/local/cargo/registry -v qross
 ```
 
 Diagnose für Drag & Drop: `cargo run -p qross-platform --example folder_at -- <x> <y>` zeigt den Ablageordner
-an einer Bildschirmposition.
+an einer Bildschirmposition. `cargo run -p qross-platform --example clipboard_check` prüft die echte
+Zwischenablage dieses Rechners mit allen Formaten und stellt den vorherigen Inhalt danach wieder her.
 
 ## Lizenz
 

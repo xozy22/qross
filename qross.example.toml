@@ -27,3 +27,9 @@ to = "laptop"
 corner_size = 8
 # So lange gegen die Kante drücken, bevor gewechselt wird (0 = sofort)
 delay_ms = 0
+
+# Zwischenablage (optional)
+[clipboard]
+# Kopierte Dateien (Strg+C im Explorer) bis zu dieser Gesamtgröße in MB beim Wechsel mitgeben,
+# damit sie drüben mit Strg+V eingefügt werden können. Größeres per Drag & Drop ziehen. 0 = aus
+max_file_mb = 1000

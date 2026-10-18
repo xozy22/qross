@@ -8,6 +8,7 @@
 
 pub mod client;
 mod clipboard;
+pub mod clipfiles;
 pub mod discovery;
 pub mod files;
 mod identity;

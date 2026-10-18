@@ -1,14 +1,17 @@
 //! Startet und stoppt Server bzw. Client im eigenen Prozess und führt den Status für das Fenster.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use qross_core::CaptureEvent;
+use qross_gui::clipboard_files;
 use qross_gui::{Role, Settings};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
+use qross_net::clipfiles::FilesNotice;
 use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, StopHandle};
 use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{LogInjector, MemoryClipboard};
@@ -141,7 +144,12 @@ pub struct Runtime {
     generation: AtomicU64,
     /// In dieser Sitzung ignorierte Clients (Name, Fingerprint)
     dismissed: Mutex<Vec<(String, String)>>,
+    /// Seit wann kopierte Dateien von einem Rechner ankommen (für die Systembenachrichtigung)
+    receiving_since: Mutex<HashMap<String, Instant>>,
 }
+
+/// Ab dieser Dauer meldet sich „Dateien sind bereit“ auch als Systembenachrichtigung.
+const SLOW_TRANSFER: Duration = Duration::from_secs(2);
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -158,6 +166,7 @@ impl Runtime {
             capture: Mutex::new(None),
             generation: AtomicU64::new(0),
             dismissed: Mutex::new(Vec::new()),
+            receiving_since: Mutex::new(HashMap::new()),
         }
     }
 
@@ -302,7 +311,8 @@ impl Runtime {
         let server = server
             .with_notices(notice_tx)
             .with_switch_options(s.switch_options())
-            .with_discovery(s.discovery);
+            .with_discovery(s.discovery)
+            .with_clipboard_file_limit(settings.clipboard_file_limit());
         let stop = server.stop_handle();
         let platform = ServerPlatform {
             capture,
@@ -379,11 +389,11 @@ impl Runtime {
                 });
             }
             ServerNotice::CursorOn { screen } => self.update(|s| s.cursor_on = Some(screen)),
-            // Anzeige der Rollen-Tasten-Sperre folgt in der GUI
             ServerNotice::CursorLocked { locked, screen } => self.update(|s| {
                 s.locked = locked;
                 s.cursor_on = Some(screen);
             }),
+            ServerNotice::ClipboardFiles(notice) => self.on_files_notice(notice),
         }
     }
 
@@ -484,7 +494,12 @@ impl Runtime {
         let name = if c.name.trim().is_empty() { crate::hostname() } else { c.name.trim().to_owned() };
         info!("Dieser Rechner: „{name}“, Fingerprint {}", identity.fingerprint());
         let trust = TrustStore::load(&self.data_dir.join(KNOWN_SERVERS_FILE))?;
-        let config = ClientConfig { name, server: c.address.trim().to_owned(), server_fingerprint: None };
+        let config = ClientConfig {
+            name,
+            server: c.address.trim().to_owned(),
+            server_fingerprint: None,
+            clipboard_file_limit: settings.clipboard_file_limit(),
+        };
         let platform = if c.dry_run {
             info!("Testmodus: Eingaben werden nur protokolliert");
             ClientPlatform {
@@ -537,10 +552,41 @@ impl Runtime {
             }),
             ClientNotice::CursorEntered => self.update(|s| s.cursor_here = true),
             ClientNotice::CursorLeft => self.update(|s| s.cursor_here = false),
+            ClientNotice::ClipboardFiles(notice) => self.on_files_notice(notice),
         }
     }
 
     // ---------------------------------------------------------------- beide
+
+    /// Kopierte Dateien: Hinweis im Fenster und, wenn es im Hintergrund ist, eine
+    /// Systembenachrichtigung für „bereit“ (nach längerer Übertragung) und „zu groß“.
+    /// Das Protokoll schreibt `qross_net` selbst.
+    pub fn on_files_notice(&self, notice: FilesNotice) {
+        let message = clipboard_files::describe(&notice, Platform::current() == Platform::MacOs);
+        let system = {
+            let mut since = self.receiving_since.lock().unwrap();
+            match &notice {
+                FilesNotice::Receiving { peer, .. } => {
+                    since.insert(peer.clone(), Instant::now());
+                    false
+                }
+                FilesNotice::Ready { peer, .. } => since.remove(peer).is_some_and(|t| t.elapsed() >= SLOW_TRANSFER),
+                FilesNotice::TooLarge { .. } => true,
+                FilesNotice::Failed { peer, .. } => {
+                    since.remove(peer);
+                    false
+                }
+                _ => false,
+            }
+        };
+        if message.text.is_none() {
+            return;
+        }
+        if system && !crate::window_in_front(&self.app) {
+            crate::notify(&self.app, &message);
+        }
+        let _ = self.app.emit("clipboard-files", &message);
+    }
 
     fn finished(&self, generation: u64, result: Result<()>) {
         if !self.is_current(generation) {

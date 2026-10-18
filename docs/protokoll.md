@@ -1,5 +1,7 @@
 # Qross-Protokoll, Version 3
 
+Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischenablage (siehe unten).
+
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
 
@@ -21,10 +23,12 @@ Implementierung: `crates/qross-proto`.
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel` |
 | Datagramm | Server → Client | **nein** | `MouseMove` |
-| Clipboard (je Übertragung ein eigener Stream, Priorität −10) | ⇄ | ja | `Clipboard::Data { text, html, png }` |
-| Datei (je Datei ein eigener Stream, Priorität −10) | Server → Client | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
+| Clipboard (je Übertragung ein eigener Stream, Priorität −10) | ⇄ | ja | `Clipboard::Data { text, html, png }`, `Clipboard::Files { transfer, entries, data }` |
+| Datei für Drag & Drop (je Datei ein eigener Stream, Priorität −10) | Server → Client | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
+| Datei aus der Zwischenablage (wie oben) | ⇄ | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
 
-Jeder unidirektionale Stream beginnt mit einem Byte `StreamKind` (1 = Input, 2 = Clipboard, 3 = Datei).
+Jeder unidirektionale Stream beginnt mit einem Byte `StreamKind` (1 = Input, 2 = Clipboard, 3 = Datei für
+Drag & Drop, 4 = Datei aus der Zwischenablage).
 Durch die Trennung blockieren Clipboard und Dateien nie die Eingaben, das war im Benchmark der zweite
 große Schwachpunkt von Synergy.
 
@@ -55,6 +59,30 @@ Der Empfänger stellt sie wieder gemeinsam bereit, sodass jedes Programm sein be
 Unter Windows sind das Unicode-Text, „HTML Format“, „PNG“ und zusätzlich ein DIB für ältere Programme.
 Lesen und PNG-Kodierung laufen in einem eigenen Thread, damit große Screenshots die Maus nicht ausbremsen.
 Bilder über der Frame-Grenze werden weggelassen, Text und HTML gehen trotzdem mit.
+
+### Kopierte Dateien
+
+1. Liegen beim Wechsel Dateien in der Zwischenablage (Windows `CF_HDROP`, macOS `public.file-url`,
+   Linux `text/uri-list`), sammelt der Sender sie rekursiv ein, höchstens bis zur eingestellten Grenze
+   (Standard 1 GB, `[clipboard] max_file_mb`, 0 = aus). Darüber bricht er das Einsammeln ab, überträgt keine
+   Dateien und meldet das der Oberfläche. Große Dateien gehen per Drag & Drop.
+2. Er sendet `Clipboard::Files { transfer, entries, data }`. `data` enthält, was sonst noch in der
+   Zwischenablage liegt, zum Beispiel die Dateinamen als Text. Danach folgt jede Datei auf einem eigenen
+   Stream vom Typ 4, aufgebaut wie beim Drag & Drop.
+3. Der Empfänger schreibt in einen eigenen Ablageordner (`<Cache>/Qross/clipboard/<transfer>`), der
+   Neuverbindungen und Programmende übersteht, denn eingefügt wird oft erst später. Er bereinigt die
+   Namen wie beim Drag & Drop und prüft jede Datei per SHA-256.
+4. Erst wenn alle Dateien angekommen sind, setzt er seine Zwischenablage auf die obersten Dateien und
+   Ordner. Unter Windows kommen `CF_HDROP` mit „Preferred DropEffect = Kopieren“ und alle Darstellungen aus
+   `data` dazu. Über `arboard` (macOS, Linux) gewinnen die Dateien.
+5. Ein neuerer Inhalt verwirft laufende Übertragungen und bricht ihre Streams ab, damit nie Älteres über
+   Neueres geschrieben wird. Vorherige Übertragungen werden nach 10 Minuten gelöscht, alles nach einem Tag.
+
+Über den Server gelangen Dateien auch von einem Client zum nächsten: Er legt sie in seine eigene
+Zwischenablage und gibt sie beim nächsten Wechsel weiter.
+
+Ältere Gegenstellen (Qross 0.2) kennen weder `Clipboard::Files` noch Stream-Typ 4. Sie verwerfen nur diese
+Streams und bleiben verbunden. Text, HTML und Bilder funktionieren mit ihnen weiter.
 
 ## Drag & Drop von Dateien
 
@@ -92,6 +120,6 @@ Zeichen und reservierte Namen werden ersetzt.
 
 - Drag & Drop in Gegenrichtung (Client → Server) und als Quelle unter Linux/macOS
 - Relative Mausbewegung für Spiele
-- Zwischenablage: RTF; Dateien per Kopieren/Einfügen
+- Zwischenablage: RTF; virtuelle Dateien (z. B. Outlook-Anhänge) und Dateien erst beim Einfügen übertragen
 - Bildschirmschoner-Sync, Strg+Alt+Entf, Secure Desktop (UAC)
 - Wayland (libei/InputCapture-Portal)

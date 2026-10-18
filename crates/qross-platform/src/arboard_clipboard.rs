@@ -1,7 +1,9 @@
-//! Zwischenablage für Linux und macOS über `arboard`: Text, HTML und Bilder.
+//! Zwischenablage für Linux und macOS über `arboard`: Text, HTML, Bilder und kopierte Dateien
+//! (Finder bzw. Dateimanager: `public.file-url` bzw. `text/uri-list`).
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 
 use anyhow::anyhow;
 use qross_proto::ClipboardData;
@@ -27,18 +29,27 @@ impl ArboardClipboard {
     }
 
     /// Rohinhalte ohne PNG-Kodierung (für `sequence`, das oft aufgerufen wird)
-    fn raw(&mut self) -> Option<(Option<String>, Option<String>, Option<arboard::ImageData<'static>>)> {
+    fn raw(&mut self) -> Option<Raw> {
         let cb = self.inner()?;
+        let files = cb.get().file_list().unwrap_or_default();
         let text = cb.get_text().ok().filter(|t| !t.is_empty());
         let html = cb.get().html().ok().filter(|h| !h.is_empty());
-        let image = cb.get_image().ok();
-        Some((text, html, image))
+        // Der Finder legt zu kopierten Dateien ihr Symbol als Bild dazu – das ist kein Inhalt.
+        let image = if files.is_empty() { cb.get_image().ok() } else { None };
+        Some(Raw { text, html, image, files })
     }
+}
+
+struct Raw {
+    text: Option<String>,
+    html: Option<String>,
+    image: Option<arboard::ImageData<'static>>,
+    files: Vec<PathBuf>,
 }
 
 impl Clipboard for ArboardClipboard {
     fn read(&mut self) -> Option<ClipboardData> {
-        let (text, html, image) = self.raw()?;
+        let Raw { text, html, image, .. } = self.raw()?;
         let png = image.and_then(|img| {
             let rgba = Rgba { width: img.width as u32, height: img.height as u32, pixels: img.bytes.into_owned() };
             rgba_to_png(&rgba).map_err(|e| tracing::debug!("Bild nicht kodierbar: {e:#}")).ok()
@@ -71,11 +82,22 @@ impl Clipboard for ArboardClipboard {
     /// Ohne Änderungszähler im System: Hash des Inhalts – ändert sich mit jedem neuen Inhalt.
     fn sequence(&mut self) -> u64 {
         let mut hasher = DefaultHasher::new();
-        if let Some((text, html, image)) = self.raw() {
+        if let Some(Raw { text, html, image, files }) = self.raw() {
             text.hash(&mut hasher);
             html.hash(&mut hasher);
             image.map(|i| (i.width, i.height, i.bytes.into_owned())).hash(&mut hasher);
+            files.hash(&mut hasher);
         }
         hasher.finish()
+    }
+
+    fn files(&mut self) -> Vec<PathBuf> {
+        self.inner().and_then(|cb| cb.get().file_list().ok()).unwrap_or_default()
+    }
+
+    /// `arboard` setzt nur eine Art von Inhalt: Die Dateien gewinnen, `data` entfällt.
+    fn write_files(&mut self, files: &[PathBuf], _data: &ClipboardData) -> anyhow::Result<()> {
+        let cb = self.inner().ok_or_else(|| anyhow!("Clipboard nicht verfügbar"))?;
+        cb.set().file_list(files).map_err(|e| anyhow!("Dateien in die Zwischenablage legen: {e}"))
     }
 }

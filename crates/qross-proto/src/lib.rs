@@ -5,7 +5,8 @@
 //! - **Input** (unidirektionaler Stream Server → Client): Tasten, Maustasten, Rad, Enter/Leave
 //! - **Datagramme** (Server → Client): Mausposition, unzuverlässig, die neueste gewinnt
 //! - **Clipboard** (je Übertragung ein eigener unidirektionaler Stream, beide Richtungen)
-//! - **Datei** (je Datei ein eigener unidirektionaler Stream, niedrige Priorität)
+//! - **Datei** (je Datei ein eigener unidirektionaler Stream, niedrige Priorität): Drag & Drop
+//!   (Server → Client) und kopierte Dateien aus der Zwischenablage (beide Richtungen)
 
 mod frame;
 mod geometry;
@@ -101,7 +102,7 @@ pub struct FileEntry {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FileHeader {
     pub transfer: u64,
-    /// Index in `DragStart::entries`
+    /// Index in `Input::DragStart::entries` bzw. `Clipboard::Files::entries`
     pub index: u32,
     pub path: String,
     pub size: u64,
@@ -128,9 +129,17 @@ pub enum Datagram {
 }
 
 /// Nachricht auf einem Clipboard-Stream.
+///
+/// Neue Varianten werden nur hinten angefügt: Eine ältere Gegenstelle kann sie nicht lesen,
+/// verwirft dann nur diesen einen Stream und bleibt verbunden.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Clipboard {
     Data(ClipboardData),
+    /// Kopierte Dateien und Ordner (seit Qross 0.3). Die Inhalte folgen auf Streams vom Typ
+    /// `StreamKind::ClipboardFile` mit derselben `transfer`-Nummer. Der Empfänger setzt seine
+    /// Zwischenablage erst, wenn alle Dateien geprüft angekommen sind – dann auf die Dateien und
+    /// zusätzlich auf `data` (z. B. Dateinamen als Text), soweit sein System beides zulässt.
+    Files { transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
 }
 
 /// Inhalt der Zwischenablage. Oft liegen mehrere Darstellungen gleichzeitig vor (z. B. Text und
@@ -179,8 +188,11 @@ impl ClipboardData {
 pub enum StreamKind {
     Input = 1,
     Clipboard = 2,
-    /// Eine Datei: `FileHeader`-Frame, Rohbytes, `FileTrailer`-Frame
+    /// Eine Datei für Drag & Drop: `FileHeader`-Frame, Rohbytes, `FileTrailer`-Frame
     File = 3,
+    /// Eine Datei aus der Zwischenablage (`Clipboard::Files`), aufgebaut wie `File`.
+    /// Ältere Gegenstellen kennen den Typ nicht und brechen nur diesen Stream ab.
+    ClipboardFile = 4,
 }
 
 impl StreamKind {
@@ -189,6 +201,7 @@ impl StreamKind {
             1 => Some(Self::Input),
             2 => Some(Self::Clipboard),
             3 => Some(Self::File),
+            4 => Some(Self::ClipboardFile),
             _ => None,
         }
     }
@@ -200,4 +213,32 @@ impl StreamKind {
 pub enum Discovery {
     Probe { version: u16 },
     Announce { version: u16, name: String, port: u16, fingerprint: String, platform: Platform },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// So sah `Clipboard` bis Qross 0.2 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ClipboardV02 {
+        Data(ClipboardData),
+    }
+
+    #[test]
+    fn older_peers_read_text_and_reject_files_cleanly() {
+        let data = ClipboardData::from_text("hallo");
+        let bytes = postcard::to_stdvec(&Clipboard::Data(data.clone())).unwrap();
+        assert_eq!(postcard::from_bytes::<ClipboardV02>(&bytes).unwrap(), ClipboardV02::Data(data));
+
+        let files = Clipboard::Files {
+            transfer: 7,
+            entries: vec![FileEntry { path: "a.txt".into(), size: 3, is_dir: false }],
+            data: ClipboardData::default(),
+        };
+        let bytes = postcard::to_stdvec(&files).unwrap();
+        assert!(postcard::from_bytes::<ClipboardV02>(&bytes).is_err(), "ältere Version muss sauber ablehnen");
+        assert_eq!(postcard::from_bytes::<Clipboard>(&bytes).unwrap(), files);
+        assert_eq!(StreamKind::from_u8(StreamKind::ClipboardFile as u8), Some(StreamKind::ClipboardFile));
+    }
 }

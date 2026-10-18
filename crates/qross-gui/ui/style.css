@@ -490,6 +490,8 @@ input[type="text"]:focus, input[type="number"]:focus { outline: none; border-col
 .unit-input input { padding-right: 38px; }
 .unit-input span { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: var(--faint); font-size: 13px; pointer-events: none; }
 .panel .switch { margin-top: 14px; font-size: 13px; }
+.clip-limit .unit-input { max-width: 190px; }
+.panel .clip-limit + .hint { margin-top: 8px; }
 
 select {
   padding: 5px 10px;
@@ -725,6 +727,8 @@ dialog::backdrop { background: rgba(6, 9, 20, .65); backdrop-filter: blur(4px); 
 }
 .toast.error { border-color: rgba(255, 107, 122, .6); background: #3a2234; color: #ffd0d5; }
 .toast { display: flex; align-items: center; gap: 16px; }
+.toast.success { border-color: rgba(63, 227, 198, .55); }
+.toast.warn { border-color: rgba(255, 182, 72, .6); background: #3a3122; color: #ffe2b0; }
 .toast-action { border: 0; background: transparent; padding: 0; color: var(--teal); font-weight: 650; white-space: nowrap; }
 .toast-action:hover { text-decoration: underline; }
 
