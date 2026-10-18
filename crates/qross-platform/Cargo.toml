@@ -34,6 +34,10 @@ futures-util = "0.3"
 # Monotone Uhr für die Zeitstempel von libei
 rustix = { version = "1", features = ["time"] }
 
+[dev-dependencies]
+# Log der Beispiele (z. B. `--example finder`)
+tracing-subscriber.workspace = true
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = { version = "0.14", features = ["xtest"] }
 

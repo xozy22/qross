@@ -136,6 +136,8 @@ struct Showing {
     /// Gerasterter Name zur Bildpunkt-Größe (ändert sich nur, wenn der Cursor auf einen Monitor mit
     /// anderer Skalierung wandert)
     text: Option<(f32, Option<draw::Text>)>,
+    /// So viele Bilder wurden gezeigt
+    presented: u32,
 }
 
 impl Showing {
@@ -195,7 +197,8 @@ fn run(mut surface: Box<dyn Surface>, commands: Receiver<Command>, fullscreen: f
                 } else if fullscreen() {
                     debug!("Cursor-Finder: Vollbild im Vordergrund, nichts gezeigt");
                 } else if surface.prepare() {
-                    showing = Some(Showing { style, name, since: at, text: None });
+                    debug!("Cursor-Finder: {} für „{name}“", qross_core::finder::describe(style));
+                    showing = Some(Showing { style, name, since: at, text: None, presented: 0 });
                 }
                 if shown && showing.is_none() {
                     surface.hide();
@@ -206,8 +209,14 @@ fn run(mut surface: Box<dyn Surface>, commands: Receiver<Command>, fullscreen: f
         }
         if let Some(current) = showing.as_mut() {
             match current.frame(&mut *surface, &mut font) {
-                Some(frame) => surface.present(&frame),
+                Some(frame) => {
+                    surface.present(&frame);
+                    current.presented += 1;
+                }
                 None if current.since.elapsed() >= DURATION => {
+                    if current.presented == 0 {
+                        debug!("Cursor-Finder: nichts gezeigt, Cursor oder Monitor nicht abfragbar");
+                    }
                     showing = None;
                     surface.hide();
                 }

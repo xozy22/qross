@@ -3768,6 +3768,7 @@ dependencies = [
  "rustix",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "windows",
  "windows-core",
  "windows-sys 0.61.2",
