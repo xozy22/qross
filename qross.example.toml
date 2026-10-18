@@ -1,0 +1,29 @@
+# Qross – Server-Konfiguration
+# Kopieren nach qross.toml und anpassen. Start: qross server
+
+# Name dieses Rechners (Standard: Rechnername in Kleinbuchstaben)
+name = "pc"
+
+# UDP-Adresse, auf der der Server lauscht
+listen = "0.0.0.0:24900"
+
+# Anordnung der Bildschirme. Die Gegenrichtung wird automatisch ergänzt:
+# „laptop rechts vom pc“ bedeutet auch „pc links vom laptop“.
+# Kanten: left, right, top, bottom
+[[links]]
+from = "pc"
+edge = "right"
+to = "laptop"
+
+# Weitere Rechner, z. B. ein Tablet über dem PC:
+# [[links]]
+# from = "pc"
+# edge = "top"
+# to = "tablet"
+
+# Wann der Cursor wechselt (optional)
+[switching]
+# Ecken-Totzone in Pixeln: In den Ecken wird nicht gewechselt (Startmenü, Schließen-Knopf)
+corner_size = 8
+# So lange gegen die Kante drücken, bevor gewechselt wird (0 = sofort)
+delay_ms = 0

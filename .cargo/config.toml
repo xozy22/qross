@@ -1,4 +1,4 @@
-# C-Runtime statisch linken: glide.exe läuft dann auch auf Rechnern ohne
+# C-Runtime statisch linken: qross.exe läuft dann auch auf Rechnern ohne
 # installiertes Visual C++ Redistributable (einfach kopieren und starten).
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

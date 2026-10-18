@@ -12,7 +12,7 @@ use crate::workload::{Clock, Event, Recorder};
 pub const HEADER_LEN: usize = 13;
 /// Clipboard wird in Chunks dieser Größe übertragen.
 pub const CLIP_CHUNK: usize = 64 * 1024;
-/// Synergy schickt bei `DMMV` zwei 16-Bit-Koordinaten.
+/// Eine Mausbewegung trägt zwei 16-Bit-Koordinaten (wie beim quelloffenen Deskflow).
 const INPUT_PAYLOAD: [u8; 4] = [0, 100, 0, 50];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

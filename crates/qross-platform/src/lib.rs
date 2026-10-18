@@ -1,0 +1,101 @@
+//! Betriebssystem-Anbindung: Eingaben abfangen (Server), Eingaben einspeisen (Client),
+//! Clipboard und Bildschirmgröße. Aktuell ist Windows implementiert; andere Plattformen
+//! liefern einen klaren Fehler, bis sie nachgezogen werden.
+
+pub mod dryrun;
+pub mod keymap_linux;
+pub mod keymap_mac;
+pub mod keymap_windows;
+
+#[cfg(windows)]
+mod win;
+#[cfg(windows)]
+use win as imp;
+
+#[cfg(target_os = "linux")]
+mod x11;
+#[cfg(target_os = "linux")]
+use x11 as imp;
+
+#[cfg(target_os = "macos")]
+mod mac;
+#[cfg(target_os = "macos")]
+use mac as imp;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod arboard_clipboard;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+mod unsupported;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+use unsupported as imp;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use qross_core::{CaptureEvent, Inject};
+use qross_proto::Rect;
+use tokio::sync::mpsc::UnboundedSender;
+
+/// Steuerung der Eingabe-Erfassung auf dem Server.
+pub trait Capture: Send + Sync {
+    /// Ab jetzt alle lokalen Eingaben abfangen und als Deltas/Ereignisse melden.
+    fn capture_remote(&self);
+    /// Abfangen beenden und den lokalen Cursor auf (x, y) setzen.
+    fn release(&self, x: i32, y: i32);
+    /// Prüfen, ob an (x, y) gerade Dateien gezogen werden. Muss mit
+    /// `CaptureEvent::DragProbeResult` antworten; ohne Drag-&-Drop-Unterstützung passiert nichts.
+    fn probe_drag(&self, _x: i32, _y: i32) {}
+    /// Den lokalen Drag abbrechen (die Dateien gehen stattdessen an einen Client).
+    fn cancel_local_drag(&self) {}
+}
+
+pub trait Injector: Send {
+    fn inject(&mut self, event: &Inject);
+    /// Ordner, in dem an (x, y) abgelegte Dateien landen sollen – z. B. das Explorer-Fenster oder
+    /// der Desktop unter dem Cursor. `None`: keine passende Ablage, die Laufzeit nimmt „Downloads“.
+    fn drop_folder(&mut self, _x: i32, _y: i32) -> Option<PathBuf> {
+        None
+    }
+}
+
+pub trait Clipboard: Send {
+    fn text(&mut self) -> Option<String>;
+    fn set_text(&mut self, text: &str) -> anyhow::Result<()>;
+    /// Ändert sich bei jeder Änderung des Clipboards (auch durch andere Programme).
+    fn sequence(&mut self) -> u64;
+}
+
+/// Einmal beim Programmstart aufrufen (z. B. DPI-Awareness unter Windows).
+pub fn init_process() {
+    imp::init_process();
+}
+
+/// Bounding-Box aller Monitore in physischen Pixeln.
+pub fn screen_bounds() -> Rect {
+    imp::screen_bounds()
+}
+
+/// Startet die Erfassung. Ereignisse landen in `events`.
+pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Arc<dyn Capture>> {
+    imp::start_capture(events)
+}
+
+pub fn injector() -> anyhow::Result<Box<dyn Injector>> {
+    imp::injector()
+}
+
+pub fn clipboard() -> Box<dyn Clipboard> {
+    imp::clipboard()
+}
+
+/// Ablageordner an einer Bildschirmposition (Diagnose; derselbe Weg wie beim Drop).
+pub fn folder_at(x: i32, y: i32) -> Option<PathBuf> {
+    injector().ok()?.drop_folder(x, y)
+}
+
+/// Diagnose: aktueller Ordner eines Explorer-Fensters (Windows-Fensterhandle).
+#[cfg(windows)]
+pub fn explorer_folder(hwnd: isize) -> Option<PathBuf> {
+    win::folder_of_window(hwnd)
+}

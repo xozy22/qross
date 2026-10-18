@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Qross</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="icon.png" alt="" width="30" height="30">
+      <span>Qross</span>
+    </div>
+    <div class="segmented" role="radiogroup" aria-label="Rolle dieses Rechners">
+      <button type="button" role="radio" data-role="server">Server</button>
+      <button type="button" role="radio" data-role="client">Client</button>
+    </div>
+    <div class="status" id="status" data-phase="stopped" role="status">
+      <span class="dot"></span>
+      <span id="statusText">Gestoppt</span>
+    </div>
+    <button type="button" id="toggle" class="btn primary">
+      <svg class="ico ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor" stroke="none"/></svg>
+      <svg class="ico ico-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none"/></svg>
+      <span id="toggleText">Starten</span>
+    </button>
+  </header>
+
+  <main>
+    <!-- Server -->
+    <section id="serverView" class="view server-view">
+      <div class="desk-area">
+        <div class="desk-head">
+          <div>
+            <h1>Anordnung</h1>
+            <p class="lede">Stell die Bildschirme so, wie sie auf deinem Schreibtisch stehen. Bildschirme, die sich berühren, sind verbunden.</p>
+          </div>
+          <button type="button" id="addScreen" class="btn ghost">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            Bildschirm
+          </button>
+        </div>
+        <div class="desk">
+          <div id="grid" class="grid" aria-label="Bildschirm-Anordnung"></div>
+        </div>
+        <p class="keys">Verschieben mit der Maus oder den Pfeiltasten, umbenennen per Doppelklick oder F2, entfernen mit Entf.</p>
+        <p id="layoutNote" class="note" hidden></p>
+      </div>
+
+      <aside class="panel">
+        <section class="panel-section attention" id="pendingCard" hidden>
+          <h2>Möchte sich verbinden</h2>
+          <div id="pendingList" class="pending-list"></div>
+        </section>
+
+        <section class="panel-section">
+          <h2>Verbundene Rechner</h2>
+          <ul id="clientList" class="client-list"></ul>
+        </section>
+
+        <section class="panel-section">
+          <h2>Dieser Server</h2>
+          <div class="address" id="addressBox">
+            <span class="address-label">Adresse für Clients</span>
+            <div class="address-values" id="addressValues"></div>
+          </div>
+          <div class="fields two">
+            <label>Name im Layout
+              <input id="serverName" type="text" spellcheck="false" autocomplete="off">
+            </label>
+            <label>UDP-Port
+              <input id="serverPort" type="number" min="1" max="65535" inputmode="numeric">
+            </label>
+          </div>
+          <details class="fp-details">
+            <summary>Fingerprint anzeigen</summary>
+            <code class="fingerprint" data-own-fingerprint></code>
+            <p class="hint">Clients zeigen beim ersten Verbinden diesen Wert zum Vergleich an.</p>
+          </details>
+        </section>
+
+        <section class="panel-section">
+          <h2>Wechsel zwischen Bildschirmen</h2>
+          <div class="fields two-equal">
+            <label>Ecken-Totzone
+              <span class="unit-input"><input id="cornerSize" type="number" min="0" max="400" step="1" inputmode="numeric"><span>px</span></span>
+            </label>
+            <label>Verzögerung
+              <span class="unit-input"><input id="switchDelay" type="number" min="0" max="3000" step="50" inputmode="numeric"><span>ms</span></span>
+            </label>
+          </div>
+          <p class="hint">In den Ecken wechselt der Cursor nicht, damit Startmenü und Schließen-Knöpfe erreichbar bleiben. Mit Verzögerung musst du kurz gegen den Rand drücken.</p>
+          <label class="switch">
+            <input id="discovery" type="checkbox" role="switch">
+            <span class="track"><span class="thumb"></span></span>
+            <span>Im Netzwerk auffindbar, damit Clients diesen Server ohne Adresse finden</span>
+          </label>
+        </section>
+
+        <details class="panel-section">
+          <summary>Konfiguration als Datei</summary>
+          <pre id="tomlPreview" class="toml"></pre>
+          <p class="hint">Liegt als <code>qross.toml</code> in <span data-data-dir></span> und funktioniert auch mit <code>qross server --config</code>.</p>
+        </details>
+      </aside>
+    </section>
+
+    <!-- Client -->
+    <section id="clientView" class="view client-view" hidden>
+      <div class="client-hero">
+        <div class="link-visual" id="linkVisual" data-state="stopped">
+          <div class="machine">
+            <div class="monitor"></div>
+            <span id="visualServer">Server</span>
+          </div>
+          <div class="wire"><span></span></div>
+          <div class="machine">
+            <div class="monitor here">
+              <svg class="cursor" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 7.5-6.2 1.7L10 19z"/></svg>
+            </div>
+            <span id="visualClient">Dieser Rechner</span>
+          </div>
+        </div>
+        <h1 id="clientHeadline">Nicht verbunden</h1>
+        <p id="clientMessage" class="lede"></p>
+      </div>
+
+      <div class="client-form">
+        <section class="finder" aria-labelledby="finderTitle">
+          <div class="finder-head">
+            <h2 id="finderTitle">Server im Netzwerk</h2>
+            <button type="button" id="searchServers" class="btn ghost small">
+              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>
+              <span>Erneut suchen</span>
+            </button>
+          </div>
+          <ul id="serverList" class="server-list" aria-live="polite"></ul>
+        </section>
+        <label class="field-wide">Server-Adresse
+          <input id="clientAddress" type="text" placeholder="Rechnername oder IP, z. B. pc oder 192.168.1.10" spellcheck="false" autocomplete="off">
+        </label>
+        <label class="field-wide">Name dieses Rechners
+          <input id="clientName" type="text" spellcheck="false" autocomplete="off">
+          <span class="hint">So muss er im Layout des Servers heißen.</span>
+        </label>
+        <label class="switch">
+          <input id="clientDryRun" type="checkbox" role="switch">
+          <span class="track"><span class="thumb"></span></span>
+          <span>Testmodus: Eingaben nur protokollieren, nicht ausführen</span>
+        </label>
+        <div class="client-actions">
+          <button type="button" id="checkServer" class="btn ghost">Fingerprint des Servers prüfen</button>
+        </div>
+        <details class="fp-details">
+          <summary>Fingerprint dieses Rechners</summary>
+          <code class="fingerprint" data-own-fingerprint></code>
+          <p class="hint">Der Server zeigt ihn bei der Freigabe an. Beide Werte müssen übereinstimmen.</p>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="drawer" id="logPanel" data-open="false">
+    <div class="drawer-bar">
+      <button type="button" id="logToggle" class="drawer-toggle" aria-expanded="false" aria-controls="log">
+        <svg class="ico chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        <span class="drawer-title">Protokoll</span>
+        <span id="logLast" class="log-last"></span>
+      </button>
+      <div class="drawer-tools">
+        <select id="logLevel" aria-label="Welche Meldungen">
+          <option value="0">Alles</option>
+          <option value="1" selected>Info und wichtiger</option>
+          <option value="2">Nur Warnungen und Fehler</option>
+        </select>
+        <button type="button" id="logClear" class="btn ghost small">Leeren</button>
+      </div>
+    </div>
+    <div id="log" class="log" role="log"></div>
+  </footer>
+
+  <dialog id="dialog">
+    <form method="dialog" class="dialog">
+      <h2 id="dialogTitle"></h2>
+      <div id="dialogBody" class="dialog-body"></div>
+      <div class="dialog-actions" id="dialogActions"></div>
+    </form>
+  </dialog>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1448,106 +1448,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glide"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "dirs",
- "gethostname",
- "glide-core",
- "glide-net",
- "glide-platform",
- "glide-proto",
- "serde",
- "tokio",
- "toml 1.1.8+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "glide-core"
-version = "0.1.0"
-dependencies = [
- "glide-proto",
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "glide-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "gethostname",
- "glide-core",
- "glide-net",
- "glide-platform",
- "glide-proto",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-mcp-bridge",
- "tokio",
- "toml 1.1.8+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "glide-net"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "glide-core",
- "glide-platform",
- "glide-proto",
- "if-addrs",
- "postcard",
- "quinn",
- "rcgen",
- "rustls",
- "serde",
- "sha2 0.11.1",
- "tokio",
- "toml 1.1.8+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "glide-platform"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "core-foundation",
- "core-graphics",
- "glide-core",
- "glide-proto",
- "tokio",
- "tracing",
- "windows",
- "windows-core",
- "windows-sys 0.61.2",
- "x11rb 0.14.0",
-]
-
-[[package]]
-name = "glide-proto"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "serde",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3196,6 +3096,106 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qross"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dirs",
+ "gethostname",
+ "qross-core",
+ "qross-net",
+ "qross-platform",
+ "qross-proto",
+ "serde",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "qross-core"
+version = "0.1.0"
+dependencies = [
+ "qross-proto",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "qross-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "gethostname",
+ "qross-core",
+ "qross-net",
+ "qross-platform",
+ "qross-proto",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-mcp-bridge",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "qross-net"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "if-addrs",
+ "postcard",
+ "qross-core",
+ "qross-platform",
+ "qross-proto",
+ "quinn",
+ "rcgen",
+ "rustls",
+ "serde",
+ "sha2 0.11.1",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "qross-platform"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "core-foundation",
+ "core-graphics",
+ "qross-core",
+ "qross-proto",
+ "tokio",
+ "tracing",
+ "windows",
+ "windows-core",
+ "windows-sys 0.61.2",
+ "x11rb 0.14.0",
+]
+
+[[package]]
+name = "qross-proto"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "thiserror 2.0.21",
+ "tokio",
+]
 
 [[package]]
 name = "quick-xml"

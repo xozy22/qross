@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Qross</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#262f5a"/>
+      <stop offset="1" stop-color="#12172a"/>
+    </linearGradient>
+    <linearGradient id="trail" gradientUnits="userSpaceOnUse" x1="96" y1="300" x2="330" y2="200">
+      <stop offset="0" stop-color="#8c8cff" stop-opacity="0"/>
+      <stop offset=".4" stop-color="#8c8cff"/>
+      <stop offset="1" stop-color="#3fe3c6"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="340" cy="250" r="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3fe3c6" stop-opacity=".35"/>
+      <stop offset="1" stop-color="#3fe3c6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="8" y="8" width="496" height="496" rx="108" fill="url(#bg)"/>
+  <rect x="9.5" y="9.5" width="493" height="493" rx="106.5" fill="none" stroke="#5a66a0" stroke-opacity=".35" stroke-width="3"/>
+  <g fill="none" stroke="#3a4470" stroke-width="12" stroke-linejoin="round">
+    <rect x="62" y="176" width="172" height="120" rx="20"/>
+    <rect x="278" y="176" width="172" height="120" rx="20"/>
+  </g>
+  <g fill="#3a4470">
+    <rect x="128" y="306" width="40" height="12" rx="4"/>
+    <rect x="344" y="306" width="40" height="12" rx="4"/>
+  </g>
+  <circle cx="340" cy="250" r="120" fill="url(#glow)"/>
+  <path d="M104 268 C 150 150, 270 118, 322 206" fill="none" stroke="url(#trail)" stroke-width="26" stroke-linecap="round"/>
+  <path d="M318 196 L318 316 L346 290 L366 334 L386 325 L366 282 L404 282 Z" fill="#3fe3c6" stroke="#12172a" stroke-width="10" stroke-linejoin="round"/>
+</svg>

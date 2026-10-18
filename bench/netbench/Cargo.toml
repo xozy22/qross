@@ -2,6 +2,7 @@
 name = "netbench"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Vergleicht TCP+TLS (Synergy-Stil) mit QUIC für KVM-Eingabeverkehr bei Paketverlust"
 
 [dependencies]

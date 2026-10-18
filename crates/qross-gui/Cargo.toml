@@ -1,0 +1,39 @@
+[package]
+name = "qross-gui"
+description = "Grafische Oberfläche von Qross (Tauri 2)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "qross_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "qross-gui"
+path = "src/main.rs"
+# Die Tests liegen in der Bibliothek; das Tauri-Binary selbst braucht keinen Test-Harness.
+test = false
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+gethostname.workspace = true
+qross-core.workspace = true
+qross-net.workspace = true
+qross-platform.workspace = true
+qross-proto.workspace = true
+serde.workspace = true
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-mcp-bridge = "0.13"
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

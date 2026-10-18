@@ -1,4 +1,4 @@
-# Simuliert am Server Mausbewegungen, damit Glide ohne Handarbeit getestet werden kann:
+# Simuliert am Server Mausbewegungen, damit Qross ohne Handarbeit getestet werden kann:
 # Cursor an die rechte Kante → Wechsel zum Client → Bewegungen + Shift antippen → zurück.
 # Es werden bewusst keine Klicks und keine Zeichen gesendet, damit auf dem Client nichts ausgelöst wird.
 param(
@@ -11,7 +11,7 @@ Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 
-public static class GlideDrive {
+public static class QrossDrive {
     [StructLayout(LayoutKind.Sequential)]
     struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr extra; }
     [StructLayout(LayoutKind.Sequential)]
@@ -44,25 +44,25 @@ public static class GlideDrive {
 }
 "@
 
-# Per-Monitor-v2 wie glide.exe, damit Koordinaten physische Pixel sind.
-[void][GlideDrive]::SetThreadDpiAwarenessContext([IntPtr]-4)
-$right = [GlideDrive]::GetSystemMetrics(76) + [GlideDrive]::GetSystemMetrics(78) - 1
+# Per-Monitor-v2 wie qross.exe, damit Koordinaten physische Pixel sind.
+[void][QrossDrive]::SetThreadDpiAwarenessContext([IntPtr]-4)
+$right = [QrossDrive]::GetSystemMetrics(76) + [QrossDrive]::GetSystemMetrics(78) - 1
 
 Write-Output "Cursor an die rechte Kante (x=$right)"
-[void][GlideDrive]::SetCursorPos($right - 3, 400)
+[void][QrossDrive]::SetCursorPos($right - 3, 400)
 Start-Sleep -Milliseconds 200
-[GlideDrive]::Move(20, 0)
+[QrossDrive]::Move(20, 0)
 Start-Sleep -Milliseconds 500
 
 Write-Output "$Steps Bewegungen à $StepPx px nach rechts unten"
-for ($i = 0; $i -lt $Steps; $i++) { [GlideDrive]::Move($StepPx, 5); Start-Sleep -Milliseconds 16 }
+for ($i = 0; $i -lt $Steps; $i++) { [QrossDrive]::Move($StepPx, 5); Start-Sleep -Milliseconds 16 }
 Start-Sleep -Milliseconds 300
 
 Write-Output "Shift antippen"
-[GlideDrive]::Key(0x2A, $false); Start-Sleep -Milliseconds 50; [GlideDrive]::Key(0x2A, $true)
+[QrossDrive]::Key(0x2A, $false); Start-Sleep -Milliseconds 50; [QrossDrive]::Key(0x2A, $true)
 Start-Sleep -Milliseconds 300
 
 Write-Output "zurück nach links"
-for ($i = 0; $i -lt $ReturnSteps; $i++) { [GlideDrive]::Move(-60, 0); Start-Sleep -Milliseconds 16 }
+for ($i = 0; $i -lt $ReturnSteps; $i++) { [QrossDrive]::Move(-60, 0); Start-Sleep -Milliseconds 16 }
 Start-Sleep -Milliseconds 300
 Write-Output "fertig"

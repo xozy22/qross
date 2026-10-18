@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Qross",
+  "version": "0.1.0",
+  "identifier": "app.qross.desktop",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Qross",
+        "width": 1080,
+        "height": 760,
+        "minWidth": 420,
+        "minHeight": 520,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "DennisK",
+    "copyright": "© 2026 DennisK, MIT-Lizenz",
+    "license": "MIT",
+    "licenseFile": "../../LICENSE",
+    "category": "Utility",
+    "shortDescription": "Maus und Tastatur über mehrere Rechner teilen",
+    "longDescription": "Qross teilt Maus, Tastatur, Clipboard und Dateien zwischen mehreren Rechnern – über QUIC, flüssig auch im WLAN.",
+    "homepage": "https://github.com/xozy22/qross",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.png", "icons/icon.ico"],
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}

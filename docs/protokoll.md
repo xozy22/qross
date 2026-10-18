@@ -1,14 +1,14 @@
-# Glide-Protokoll, Version 2
+# Qross-Protokoll, Version 2
 
-Entscheidungsgrundlage: [analyse-synergy.md](analyse-synergy.md) und [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
-Implementierung: `crates/glide-proto`.
+Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
+Implementierung: `crates/qross-proto`.
 
 ## Transport
 
-- **QUIC** (`quinn`) über UDP, Standardport **24900**, ALPN `glide/2`, ausschließlich TLS 1.3
+- **QUIC** (`quinn`) über UDP, Standardport **24900**, ALPN `qross/2`, ausschließlich TLS 1.3
 - Beide Seiten weisen sich mit einem **selbstsignierten Zertifikat** aus (gegenseitige Authentifizierung).
   Vertrauen entsteht über den SHA-256-Fingerprint des Zertifikats:
-  - Der Server nimmt nur Clients an, die er per `glide trust <name> <fingerprint>` freigegeben hat.
+  - Der Server nimmt nur Clients an, die er per `qross trust <name> <fingerprint>` freigegeben hat.
   - Der Client speichert den Server-Fingerprint beim ersten Kontakt (TOFU) oder prüft gegen `--server-fingerprint`.
 - Keepalive 1 s, Idle-Timeout 5 s. Bricht die Verbindung ab, holt der Server den Cursor zurück, und der
   Client lässt alle gedrückten Tasten los.
@@ -59,7 +59,7 @@ große Schwachpunkt von Synergy.
 3. Der Client drückt dabei **keine** Maustaste. Er schreibt die Dateien in ein Staging-Verzeichnis
    (`*.part`, umbenannt erst nach erfolgreicher SHA-256-Prüfung).
 4. Lässt der Nutzer die Taste los, kommt `Drop { transfer, x, y }`. Der Client bestimmt den Ordner unter dem Cursor:
-   ein Explorer-Fenster (bei Windows-11-Tabs der sichtbare Tab), den Desktop oder sonst `Downloads\Glide`.
+   ein Explorer-Fenster (bei Windows-11-Tabs der sichtbare Tab), den Desktop oder sonst `Downloads\Qross`.
    Sobald alles angekommen ist, verschiebt er die Dateien dorthin. Vorhandene Namen werden nicht
    überschrieben, sondern durchnummeriert, z. B. „Bericht (2).pdf“.
 5. Verlässt der Cursor den Client ohne Drop, verwirft der Client die Übertragung und bricht die Streams ab.

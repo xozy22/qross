@@ -7,12 +7,15 @@ exclude = ["bench/netbench"]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/xozy22/qross"
+authors = ["DennisK"]
 
 [workspace.dependencies]
-glide-core = { path = "crates/glide-core" }
-glide-net = { path = "crates/glide-net" }
-glide-platform = { path = "crates/glide-platform" }
-glide-proto = { path = "crates/glide-proto" }
+qross-core = { path = "crates/qross-core" }
+qross-net = { path = "crates/qross-net" }
+qross-platform = { path = "crates/qross-platform" }
+qross-proto = { path = "crates/qross-proto" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

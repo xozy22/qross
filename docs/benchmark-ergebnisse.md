@@ -77,7 +77,7 @@ QUIC mit Datagrammen+Streams, 100 Mbit/s, alle 5 s eine 20-MB-Übertragung, Datu
 
 Ergebnis: Auch während eine Datei die Leitung voll auslastet (ca. 94 Mbit/s), gibt es keinen einzigen
 Ruckler über 50 ms. Das p99 der Eingaben steigt auf 15–34 ms, weil sie in der Warteschlange des
-Engpasses mitwarten. BBR (in quinn experimentell) bringt hier nichts. Glide bleibt beim Standard Cubic.
+Engpasses mitwarten. BBR (in quinn experimentell) bringt hier nichts. Qross bleibt beim Standard Cubic.
 NewReno ist minimal besser, liegt aber innerhalb der Streuung eines einzelnen Laufs.
 
 ## 3b. Sofortige ACKs (ACK-Frequency-Erweiterung)
@@ -95,7 +95,7 @@ Datagrammen+Streams, 200 Tastendrücke/s (ca. 4.000 je Lauf), 20 s.
 | Standard | 5 % | 2,19 | 9,18 | 19,4 |
 | sofort | 5 % | 2,66 | 8,49 | 20,4 |
 
-Ergebnis: kein messbarer Vorteil, die Unterschiede liegen in der Streuung. Glide bleibt bei den
+Ergebnis: kein messbarer Vorteil, die Unterschiede liegen in der Streuung. Qross bleibt bei den
 Standard-ACKs. Zum Vergleich: TCP+TLS im Synergy-Stil lag unter denselben Verlustraten bei p99 33–590 ms.
 
 ## 4. Entscheidung (Empfehlung)

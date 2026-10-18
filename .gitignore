@@ -1,4 +1,6 @@
 /target
 /bench/netbench/target
 /dist
-/glide.toml
+/qross.toml
+# Nur lokal: nicht zur Veröffentlichung bestimmte Unterlagen
+/local/

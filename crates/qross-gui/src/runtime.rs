@@ -1,0 +1,559 @@
+//! Startet und stoppt Server bzw. Client im eigenen Prozess und führt den Status für das Fenster.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use anyhow::{anyhow, Context, Result};
+use qross_core::CaptureEvent;
+use qross_gui::{Role, Settings};
+use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
+use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, StopHandle};
+use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
+use qross_platform::dryrun::{LogInjector, MemoryClipboard};
+use qross_platform::Capture;
+use qross_proto::{Platform, Rect, DEFAULT_PORT};
+use serde::Serialize;
+use tauri::async_runtime::{self, JoinHandle};
+use tauri::{AppHandle, Emitter};
+use tokio::sync::mpsc;
+use tracing::{info, warn};
+
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Phase {
+    #[default]
+    Stopped,
+    Starting,
+    /// Server lauscht
+    Listening,
+    /// Client versucht sich zu verbinden
+    Connecting,
+    /// Client ist verbunden
+    Connected,
+    Error,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct ClientInfo {
+    pub name: String,
+    pub addr: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Ein abgewiesener Client, der auf Freigabe wartet (oder einen Hinweis braucht).
+#[derive(Serialize, Clone, Debug)]
+pub struct PendingClient {
+    pub name: String,
+    pub addr: String,
+    pub fingerprint: String,
+    /// `unknown`, `mismatch` oder `known`
+    pub trust: &'static str,
+    /// Bereits freigegebener Fingerprint (bei `mismatch`)
+    pub expected: Option<String>,
+    pub reason: String,
+    pub in_layout: bool,
+    pub last_seen: u64,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct Status {
+    /// Rolle der laufenden Instanz (`None`, wenn gestoppt)
+    pub role: Option<Role>,
+    pub phase: Phase,
+    pub message: String,
+    /// Server: Bildschirm, auf dem der Cursor gerade ist
+    pub cursor_on: Option<String>,
+    /// Server: Cursor per Rollen-Taste auf `cursor_on` festgehalten
+    pub locked: bool,
+    pub clients: Vec<ClientInfo>,
+    pub pending: Vec<PendingClient>,
+    /// Client: Name des verbundenen Servers
+    pub server_name: Option<String>,
+    /// Client: Cursor ist gerade auf diesem Rechner
+    pub cursor_here: bool,
+}
+
+impl Status {
+    pub fn running(&self) -> bool {
+        self.role.is_some()
+    }
+}
+
+/// Fingerprint eines Servers, den der Nutzer vor dem ersten Verbinden bestätigen soll.
+#[derive(Serialize, Clone, Debug)]
+pub struct ServerProbe {
+    pub address: String,
+    pub addr: String,
+    pub fingerprint: String,
+    /// Bisher gespeicherter Fingerprint, falls er abweicht
+    pub expected: Option<String>,
+    /// Fingerprint ist bereits gespeichert und stimmt
+    pub known: bool,
+}
+
+/// Ein per LAN-Suche gefundener Server. Die Angaben sind unbestätigt; geprüft wird beim Verbinden.
+#[derive(Serialize, Clone, Debug)]
+pub struct FoundServer {
+    pub name: String,
+    /// So in das Adressfeld übernehmen (IP, mit Port nur wenn abweichend)
+    pub address: String,
+    pub fingerprint: String,
+    /// `windows`, `macos`, `linux` oder `other`
+    pub platform: &'static str,
+    /// Strg und Cmd werden beim Verbinden getauscht (Mac ↔ PC)
+    pub swaps_modifiers: bool,
+    /// `known`, `unknown` oder `mismatch` gegenüber dem gespeicherten Fingerprint
+    pub trust: &'static str,
+}
+
+pub fn platform_name(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Windows => "windows",
+        Platform::MacOs => "macos",
+        Platform::Linux => "linux",
+        _ => "other",
+    }
+}
+
+enum Running {
+    Server { task: JoinHandle<()>, stop: StopHandle, name: String },
+    Client { task: JoinHandle<()> },
+}
+
+/// Die Eingabe-Erfassung lässt sich pro Prozess nur einmal starten. Sie bleibt deshalb bestehen,
+/// und ihre Ereignisse werden an den jeweils laufenden Server weitergereicht.
+struct CaptureHub {
+    capture: Arc<dyn Capture>,
+    target: Arc<Mutex<Option<mpsc::UnboundedSender<CaptureEvent>>>>,
+}
+
+pub struct Runtime {
+    app: AppHandle,
+    pub data_dir: PathBuf,
+    pub settings: Mutex<Settings>,
+    status: Mutex<Status>,
+    running: tokio::sync::Mutex<Option<Running>>,
+    capture: Mutex<Option<CaptureHub>>,
+    /// Jede gestartete Instanz bekommt eine neue Nummer; Meldungen alter Instanzen werden ignoriert.
+    generation: AtomicU64,
+    /// In dieser Sitzung ignorierte Clients (Name, Fingerprint)
+    dismissed: Mutex<Vec<(String, String)>>,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+impl Runtime {
+    pub fn new(app: AppHandle, data_dir: PathBuf, settings: Settings) -> Self {
+        Self {
+            app,
+            data_dir,
+            settings: Mutex::new(settings),
+            status: Mutex::new(Status::default()),
+            running: tokio::sync::Mutex::new(None),
+            capture: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            dismissed: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn status(&self) -> Status {
+        self.status.lock().unwrap().clone()
+    }
+
+    pub fn identity(&self) -> Result<Identity> {
+        Identity::load_or_create(&self.data_dir)
+    }
+
+    /// Ändert den Status und meldet ihn an Fenster und Tray.
+    fn update(&self, change: impl FnOnce(&mut Status)) {
+        let status = {
+            let mut status = self.status.lock().unwrap();
+            change(&mut status);
+            status.clone()
+        };
+        crate::tray::update(&self.app, &status);
+        let _ = self.app.emit("status", status);
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation.load(Ordering::SeqCst) == generation
+    }
+
+    /// Startet die gespeicherte Rolle. Liefert beim Client einen zu bestätigenden Fingerprint,
+    /// wenn der Server noch unbekannt ist; dann wird nicht gestartet.
+    pub async fn start(self: &Arc<Self>) -> Result<Option<ServerProbe>> {
+        let settings = self.settings.lock().unwrap().clone();
+        if settings.role == Role::Client {
+            if let Some(probe) = self.needs_confirmation(&settings).await? {
+                return Ok(Some(probe));
+            }
+        }
+        let mut running = self.running.lock().await;
+        if let Some(old) = running.take() {
+            self.shutdown(old).await;
+        }
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.update(|s| {
+            *s = Status { role: Some(settings.role), phase: Phase::Starting, message: "Startet …".into(), ..Status::default() }
+        });
+        let result = match settings.role {
+            Role::Server => self.start_server(&settings, generation).await,
+            Role::Client => self.start_client(&settings, generation),
+        };
+        match result {
+            Ok(r) => {
+                *running = Some(r);
+                Ok(None)
+            }
+            Err(e) => {
+                warn!("Start fehlgeschlagen: {e:#}");
+                let message = format!("{e:#}");
+                self.update(|s| *s = Status { phase: Phase::Error, message, ..Status::default() });
+                Err(e)
+            }
+        }
+    }
+
+    pub async fn stop(&self) {
+        let mut running = self.running.lock().await;
+        if let Some(old) = running.take() {
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            self.shutdown(old).await;
+            info!("gestoppt");
+        }
+        self.update(|s| *s = Status::default());
+    }
+
+    async fn shutdown(&self, running: Running) {
+        match running {
+            Running::Server { task, stop, name } => {
+                let _ = tokio::time::timeout(Duration::from_secs(2), stop.stop()).await;
+                task.abort();
+                if let Some(hub) = self.capture.lock().unwrap().as_ref() {
+                    *hub.target.lock().unwrap() = None;
+                    // War der Cursor gerade auf einem Client, Maus und Tastatur zurückholen.
+                    let cursor_on = self.status.lock().unwrap().cursor_on.clone();
+                    if cursor_on.is_some_and(|screen| screen != name) {
+                        let b = qross_platform::screen_bounds();
+                        hub.capture.release(b.x + b.width as i32 / 2, b.y + b.height as i32 / 2);
+                    }
+                }
+            }
+            Running::Client { task } => task.abort(),
+        }
+    }
+
+    // ---------------------------------------------------------------- Server
+
+    fn capture_events(&self) -> Result<(Arc<dyn Capture>, mpsc::UnboundedReceiver<CaptureEvent>)> {
+        let mut slot = self.capture.lock().unwrap();
+        if slot.is_none() {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let capture = qross_platform::start_capture(tx)?;
+            let target: Arc<Mutex<Option<mpsc::UnboundedSender<CaptureEvent>>>> = Arc::default();
+            let forward = target.clone();
+            async_runtime::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    if let Some(tx) = forward.lock().unwrap().as_ref() {
+                        let _ = tx.send(event);
+                    }
+                }
+            });
+            *slot = Some(CaptureHub { capture, target });
+        }
+        let hub = slot.as_ref().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        *hub.target.lock().unwrap() = Some(tx);
+        Ok((hub.capture.clone(), rx))
+    }
+
+    async fn start_server(self: &Arc<Self>, settings: &Settings, generation: u64) -> Result<Running> {
+        let s = &settings.server;
+        let layout = s.validate().map_err(|e| anyhow!(e))?;
+        let identity = self.identity()?;
+        info!("Fingerprint dieses Servers: {}", identity.fingerprint());
+
+        // Nach einem Neustart kann der Port noch kurz belegt sein.
+        let mut attempt = 0;
+        let server = loop {
+            let trust = TrustStore::load(&self.data_dir.join(TRUSTED_CLIENTS_FILE))?;
+            let config = ServerConfig { name: s.name.clone(), listen: s.listen(), layout: layout.clone() };
+            match Server::bind(config, &identity, trust) {
+                Ok(server) => break server,
+                Err(e) if attempt < 5 => {
+                    attempt += 1;
+                    warn!("{e:#} – neuer Versuch");
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        for name in s.isolated() {
+            warn!("„{name}“ hat im Layout keinen Nachbarn – der Cursor kann ihn nicht erreichen");
+        }
+
+        let (capture, events) = self.capture_events()?;
+        let (notice_tx, mut notice_rx) = mpsc::unbounded_channel();
+        let server = server
+            .with_notices(notice_tx)
+            .with_switch_options(s.switch_options())
+            .with_discovery(s.discovery);
+        let stop = server.stop_handle();
+        let platform = ServerPlatform {
+            capture,
+            events,
+            clipboard: qross_platform::clipboard(),
+            screen: Box::new(qross_platform::screen_bounds),
+        };
+
+        let rt = self.clone();
+        async_runtime::spawn(async move {
+            while let Some(notice) = notice_rx.recv().await {
+                if !rt.is_current(generation) {
+                    break;
+                }
+                rt.on_server_notice(notice);
+            }
+        });
+        let rt = self.clone();
+        let task = async_runtime::spawn(async move {
+            let result = server.run(platform).await;
+            rt.finished(generation, result);
+        });
+        Ok(Running::Server { task, stop, name: s.name.clone() })
+    }
+
+    fn on_server_notice(&self, notice: ServerNotice) {
+        let settings = self.settings.lock().unwrap().server.clone();
+        match notice {
+            ServerNotice::Listening { addr } => self.update(|s| {
+                s.phase = Phase::Listening;
+                s.message = format!("Wartet auf Clients (UDP {})", addr.port());
+                s.cursor_on = Some(settings.name.clone());
+            }),
+            ServerNotice::ClientConnected { name, addr, screen } => self.update(|s| {
+                s.clients.retain(|c| c.name != name);
+                s.pending.retain(|p| p.name != name);
+                s.clients.push(ClientInfo { name, addr: addr.to_string(), width: screen.width, height: screen.height });
+                s.clients.sort_by(|a, b| a.name.cmp(&b.name));
+            }),
+            ServerNotice::ClientDisconnected { name } => self.update(|s| {
+                s.clients.retain(|c| c.name != name);
+                if s.cursor_on.as_deref() == Some(name.as_str()) {
+                    s.cursor_on = Some(settings.name.clone());
+                }
+            }),
+            ServerNotice::ClientRejected { name, addr, fingerprint, trust, reason } => {
+                let fingerprint = fingerprint.to_string();
+                if self.dismissed.lock().unwrap().iter().any(|(n, f)| *n == name && *f == fingerprint) {
+                    return;
+                }
+                let expected = match trust {
+                    TrustOutcome::Mismatch => TrustStore::load(&self.data_dir.join(TRUSTED_CLIENTS_FILE))
+                        .ok()
+                        .and_then(|t| t.expected(&name).map(str::to_owned)),
+                    _ => None,
+                };
+                let pending = PendingClient {
+                    in_layout: settings.contains(&name),
+                    name,
+                    addr: addr.to_string(),
+                    fingerprint,
+                    trust: match trust {
+                        TrustOutcome::Known => "known",
+                        TrustOutcome::Unknown => "unknown",
+                        TrustOutcome::Mismatch => "mismatch",
+                    },
+                    expected,
+                    reason,
+                    last_seen: now_ms(),
+                };
+                self.update(|s| {
+                    s.pending.retain(|p| p.name != pending.name);
+                    s.pending.push(pending);
+                });
+            }
+            ServerNotice::CursorOn { screen } => self.update(|s| s.cursor_on = Some(screen)),
+            // Anzeige der Rollen-Tasten-Sperre folgt in der GUI
+            ServerNotice::CursorLocked { locked, screen } => self.update(|s| {
+                s.locked = locked;
+                s.cursor_on = Some(screen);
+            }),
+        }
+    }
+
+    /// Gibt einen wartenden Client frei. Er wird beim nächsten Verbindungsversuch angenommen.
+    pub fn approve_client(&self, name: &str, fingerprint: &str) -> Result<()> {
+        let fingerprint: Fingerprint = fingerprint.parse()?;
+        let path = self.data_dir.join(TRUSTED_CLIENTS_FILE);
+        TrustStore::load(&path)?.trust(name, &fingerprint)?;
+        info!("„{name}“ ist freigegeben ({fingerprint})");
+        self.update(|s| s.pending.retain(|p| p.name != name));
+        Ok(())
+    }
+
+    pub fn dismiss_client(&self, name: &str) {
+        let fingerprint = self.status.lock().unwrap().pending.iter().find(|p| p.name == name).map(|p| p.fingerprint.clone());
+        if let Some(fingerprint) = fingerprint {
+            self.dismissed.lock().unwrap().push((name.to_owned(), fingerprint));
+        }
+        self.update(|s| s.pending.retain(|p| p.name != name));
+    }
+
+    // ---------------------------------------------------------------- Client
+
+    async fn needs_confirmation(&self, settings: &Settings) -> Result<Option<ServerProbe>> {
+        let address = settings.client.address.trim();
+        if address.is_empty() {
+            return Err(anyhow!("Bitte die Adresse des Servers eingeben."));
+        }
+        let trust = TrustStore::load(&self.data_dir.join(KNOWN_SERVERS_FILE))?;
+        if trust.expected(address).is_some() {
+            // Bekannt; eine Abweichung meldet die Client-Laufzeit selbst.
+            return Ok(None);
+        }
+        Ok(Some(self.probe_server(address).await?))
+    }
+
+    /// Fragt den Fingerprint des Servers ab, ohne sich anzumelden.
+    pub async fn probe_server(&self, address: &str) -> Result<ServerProbe> {
+        let identity = self.identity()?;
+        let (addr, fingerprint) = tokio::time::timeout(Duration::from_secs(8), client::probe_fingerprint(address, &identity))
+            .await
+            .map_err(|_| anyhow!("Server {address} antwortet nicht"))?
+            .with_context(|| format!("Server {address} nicht erreichbar"))?;
+        let trust = TrustStore::load(&self.data_dir.join(KNOWN_SERVERS_FILE))?;
+        let outcome = trust.check(address, &fingerprint);
+        let expected = match outcome {
+            TrustOutcome::Mismatch => trust.expected(address).map(str::to_owned),
+            _ => None,
+        };
+        Ok(ServerProbe {
+            address: address.to_owned(),
+            addr: addr.to_string(),
+            fingerprint: fingerprint.to_string(),
+            expected,
+            known: outcome == TrustOutcome::Known,
+        })
+    }
+
+    /// Sucht Qross-Server im LAN (dauert etwa `wait`).
+    pub async fn discover_servers(&self, wait: Duration) -> Result<Vec<FoundServer>> {
+        let found = qross_net::discovery::discover(wait).await?;
+        let trust = TrustStore::load(&self.data_dir.join(KNOWN_SERVERS_FILE))?;
+        let mut servers: Vec<FoundServer> = found
+            .into_iter()
+            .map(|s| {
+                let address = if s.addr.port() == DEFAULT_PORT { s.addr.ip().to_string() } else { s.addr.to_string() };
+                let trust = match s.fingerprint.parse::<Fingerprint>().map(|fp| trust.check(&address, &fp)) {
+                    Ok(TrustOutcome::Known) => "known",
+                    Ok(TrustOutcome::Mismatch) => "mismatch",
+                    _ => "unknown",
+                };
+                FoundServer {
+                    swaps_modifiers: (s.platform == Platform::MacOs) != (Platform::current() == Platform::MacOs),
+                    platform: platform_name(s.platform),
+                    name: s.name,
+                    address,
+                    fingerprint: s.fingerprint,
+                    trust,
+                }
+            })
+            .collect();
+        servers.sort_by(|a, b| a.name.cmp(&b.name));
+        info!("Server-Suche: {} gefunden", servers.len());
+        Ok(servers)
+    }
+
+    /// Speichert den bestätigten Fingerprint des Servers (ersetzt einen alten Eintrag).
+    pub fn trust_server(&self, address: &str, fingerprint: &str) -> Result<()> {
+        let fingerprint: Fingerprint = fingerprint.parse()?;
+        TrustStore::load(&self.data_dir.join(KNOWN_SERVERS_FILE))?.trust(address.trim(), &fingerprint)?;
+        info!("Server {address} bestätigt ({fingerprint})");
+        Ok(())
+    }
+
+    fn start_client(self: &Arc<Self>, settings: &Settings, generation: u64) -> Result<Running> {
+        let c = &settings.client;
+        let identity = self.identity()?;
+        let name = if c.name.trim().is_empty() { crate::hostname() } else { c.name.trim().to_owned() };
+        info!("Dieser Rechner: „{name}“, Fingerprint {}", identity.fingerprint());
+        let trust = TrustStore::load(&self.data_dir.join(KNOWN_SERVERS_FILE))?;
+        let config = ClientConfig { name, server: c.address.trim().to_owned(), server_fingerprint: None };
+        let platform = if c.dry_run {
+            info!("Testmodus: Eingaben werden nur protokolliert");
+            ClientPlatform {
+                injector: Box::new(LogInjector),
+                clipboard: Box::new(MemoryClipboard::default()),
+                screen: Box::new(|| Rect::new(0, 0, 1920, 1080)),
+            }
+        } else {
+            ClientPlatform {
+                injector: qross_platform::injector()?,
+                clipboard: qross_platform::clipboard(),
+                screen: Box::new(qross_platform::screen_bounds),
+            }
+        };
+
+        let (notice_tx, mut notice_rx) = mpsc::unbounded_channel();
+        let rt = self.clone();
+        async_runtime::spawn(async move {
+            while let Some(notice) = notice_rx.recv().await {
+                if !rt.is_current(generation) {
+                    break;
+                }
+                rt.on_client_notice(notice);
+            }
+        });
+        let rt = self.clone();
+        let task = async_runtime::spawn(async move {
+            let result = client::run_with_notices(config, identity, trust, platform, notice_tx).await;
+            rt.finished(generation, result);
+        });
+        Ok(Running::Client { task })
+    }
+
+    fn on_client_notice(&self, notice: ClientNotice) {
+        match notice {
+            ClientNotice::Connecting { addr } => self.update(|s| {
+                s.phase = Phase::Connecting;
+                s.message = format!("Verbinde mit {addr} …");
+            }),
+            ClientNotice::Connected { server_name, addr } => self.update(|s| {
+                s.phase = Phase::Connected;
+                s.message = format!("Verbunden mit „{server_name}“ ({addr})");
+                s.server_name = Some(server_name);
+            }),
+            ClientNotice::Disconnected { reason } => self.update(|s| {
+                s.phase = Phase::Connecting;
+                s.message = format!("{reason} – neuer Versuch in Kürze");
+                s.server_name = None;
+                s.cursor_here = false;
+            }),
+            ClientNotice::CursorEntered => self.update(|s| s.cursor_here = true),
+            ClientNotice::CursorLeft => self.update(|s| s.cursor_here = false),
+        }
+    }
+
+    // ---------------------------------------------------------------- beide
+
+    fn finished(&self, generation: u64, result: Result<()>) {
+        if !self.is_current(generation) {
+            return;
+        }
+        let (phase, message) = match result {
+            Ok(()) => (Phase::Stopped, "Beendet".to_owned()),
+            Err(e) => {
+                warn!("{e:#}");
+                (Phase::Error, format!("{e:#}"))
+            }
+        };
+        // Die Instanz läuft nicht mehr; ein erneuter Start räumt `running` auf.
+        self.update(|s| *s = Status { phase, message, ..Status::default() });
+    }
+}
