@@ -47,6 +47,8 @@ const state = {
   desktop: "windows",
   /** Nur Wayland: Stand der Desktop-Portale (siehe portal_state), null = unbekannt */
   portal: null,
+  /** Aufgeklappte Einträge unter „Rechte je Rechner“ (Name; "" = Vorgabe für neue Rechner) */
+  sharingOpen: new Set(),
 };
 
 const PLATFORMS = {
@@ -68,6 +70,7 @@ const ICONS = {
   lock: '<rect x="5" y="11" width="14" height="9" rx="2" fill="currentColor" stroke="none"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
   game: '<path d="M7.5 7h9a5 5 0 0 1 4.9 6l-.7 3.4a2.2 2.2 0 0 1-3.7 1.1L14.6 15H9.4l-2.4 2.5a2.2 2.2 0 0 1-3.7-1.1L2.6 13a5 5 0 0 1 4.9-6z"/><path d="M8 9.5v3M6.5 11h3"/><path d="M15.5 10.5h.01M17.5 12h.01"/>',
   up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  shield: '<path d="M12 3l7 3v5.5c0 4.2-2.9 7.8-7 9.5-4.1-1.7-7-5.3-7-9.5V6z"/><path d="M9 12h6"/>',
   down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
 };
 
@@ -425,6 +428,8 @@ function renderServer() {
     const classes = ["screen", isServer && "server", isOnline && "online", hasCursor && "has-cursor", held && "locked"]
       .filter(Boolean)
       .join(" ");
+    // Eingeschränkte Rechte: kleines Schild, das zum Eintrag in der Seitenleiste führt
+    const limits = isServer ? null : sharingSummary(sharingOf(s.name));
     const card = el(
       "div",
       {
@@ -432,7 +437,7 @@ function renderServer() {
         tabindex: "0",
         role: "button",
         "data-name": s.name,
-        "aria-label": `${s.name}, ${isServer ? "Server" : sub}${monitorNote(screen)}`,
+        "aria-label": `${s.name}, ${isServer ? "Server" : sub}${monitorNote(screen)}${limits ? ", Rechte eingeschränkt" : ""}`,
         style: `grid-column:${s.col + 1};grid-row:${s.row + 1}`,
         title: screenTitle(s.name, screen),
       },
@@ -441,6 +446,24 @@ function renderServer() {
       hasCursor ? el("span", { class: "marker", title: marker.title }, icon(marker.icon)) : null,
       el("span", { class: "name", text: s.name }),
       el("span", { class: "sub", text: sub }),
+      limits
+        ? el(
+            "button",
+            {
+              class: "share-badge",
+              type: "button",
+              title: `Eingeschränkt: ${limits}`,
+              "aria-label": `Rechte von ${s.name} anzeigen`,
+              tabindex: "-1",
+              onpointerdown: (e) => e.stopPropagation(),
+              onclick: (e) => {
+                e.stopPropagation();
+                openSharing(s.name);
+              },
+            },
+            icon("shield"),
+          )
+        : null,
       isServer
         ? null
         : el(
@@ -483,6 +506,7 @@ function renderServer() {
   $("#discovery").checked = server.discovery;
   renderClipLimit();
   renderAddress();
+  renderSharing();
 }
 
 function renderAddress() {
@@ -607,6 +631,8 @@ function addScreenNamed(name, cell = freeCell()) {
     return false;
   }
   server.screens.push({ name, col: cell[0], row: cell[1] });
+  // Neue Rechner bekommen die Vorgabe als eigene Rechte.
+  server.sharing.clients[name] ??= { ...server.sharing.default };
   return true;
 }
 
@@ -636,6 +662,7 @@ async function renameScreen(oldName) {
   server.screens.find((s) => s.name === oldName).name = name;
   if (server.name === oldName) server.name = name;
   renameSwitchKey(oldName, name);
+  renameSharing(oldName, name);
   state.focusName = name;
   await settingsChanged({ immediate: true });
   focusScreen(name);
@@ -644,6 +671,7 @@ async function renameScreen(oldName) {
 function removeScreen(name) {
   const server = state.settings.server;
   server.screens = server.screens.filter((s) => s.name !== name);
+  delete server.sharing.clients[name];
   state.focusName = server.name;
   settingsChanged({ immediate: true });
   toast(`„${name}“ entfernt`);
@@ -764,6 +792,136 @@ async function approve(p) {
   }
 }
 
+// ------------------------------------------------------------------ Rechte je Rechner
+
+/** Was sich je Rechner freigeben lässt; `key` wie in gui.json, `short` für Kurzfassungen */
+const SHARE_KINDS = [
+  { key: "clipboard", label: "Zwischenablage", short: "Zwischenablage", hint: "Text, HTML, Bild" },
+  { key: "files", label: "Kopierte Dateien", short: "Dateien", hint: "Kopieren, Einfügen" },
+  { key: "drag", label: "Drag & Drop", short: "Drag & Drop", hint: "Dateien ziehen" },
+];
+/** Aus Sicht des jeweiligen Rechners: „to-client“ heißt, er empfängt nur. */
+const SHARE_OPTIONS = [
+  ["both", "Senden und empfangen"],
+  ["to-client", "Nur empfangen"],
+  ["from-client", "Nur senden"],
+  ["off", "Aus"],
+];
+const SHARE_SHORT = { "to-client": "nur empfangen", "from-client": "nur senden", off: "aus" };
+/** Eintrag für die Vorgabe (kein gültiger Rechnername) */
+const SHARE_DEFAULT = "";
+
+/** Clients in der Anordnung, ohne den Server selbst */
+function sharingClients() {
+  const server = state.settings.server;
+  return server.screens.map((s) => s.name).filter((n) => n !== server.name);
+}
+
+/** Rechte eines Rechners; ohne eigenen Eintrag gilt die Vorgabe (so sieht es auch der Server) */
+function sharingOf(name) {
+  const rules = state.settings.server.sharing;
+  return (name !== SHARE_DEFAULT && rules.clients[name]) || rules.default;
+}
+
+/** Kurzfassung, z. B. „Zwischenablage nur empfangen · Drag & Drop aus“; `null`, wenn alles erlaubt ist */
+function sharingSummary(sharing) {
+  const parts = SHARE_KINDS.filter((k) => sharing[k.key] !== "both").map((k) => `${k.short} ${SHARE_SHORT[sharing[k.key]]}`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+function renderSharing() {
+  const list = $("#sharingList");
+  const names = [...sharingClients(), SHARE_DEFAULT];
+  // Nur neu aufbauen, wenn sich die Rechner ändern; sonst bleiben Auswahl und Fokus erhalten.
+  const key = JSON.stringify(names);
+  if (list.dataset.names !== key) {
+    list.dataset.names = key;
+    list.replaceChildren(...names.map(sharingEntry));
+  }
+  for (const details of list.querySelectorAll(".share-entry")) {
+    const name = details.dataset.name;
+    const sharing = sharingOf(name);
+    for (const select of details.querySelectorAll("select")) {
+      if (document.activeElement !== select) select.value = sharing[select.dataset.kind];
+    }
+    const limits = sharingSummary(sharing);
+    details.classList.toggle("limited", limits !== null);
+    details.querySelector(".share-sum").textContent = limits ?? "Alles erlaubt";
+  }
+}
+
+function sharingEntry(name) {
+  const isDefault = name === SHARE_DEFAULT;
+  const who = isDefault ? "neue Rechner" : name;
+  const rows = SHARE_KINDS.map((kind) =>
+    el(
+      "label",
+      { class: "share-row" },
+      el("span", { class: "share-kind" }, el("span", { text: kind.label }), el("span", { class: "hint", text: kind.hint })),
+      el(
+        "select",
+        { "data-kind": kind.key, "aria-label": `${kind.label} für ${who}`, onchange: (e) => setShare(name, kind.key, e.target.value) },
+        ...SHARE_OPTIONS.map(([value, label]) => el("option", { value, text: label })),
+      ),
+    ),
+  );
+  const details = el(
+    "details",
+    {
+      class: `share-entry${isDefault ? " default" : ""}`,
+      "data-name": name,
+      ontoggle: (e) => (e.target.open ? state.sharingOpen.add(name) : state.sharingOpen.delete(name)),
+    },
+    el(
+      "summary",
+      {},
+      el("span", { class: "share-head" }, el("span", { class: "share-name", text: isDefault ? "Neue Rechner" : name }), el("span", { class: "share-sum" })),
+    ),
+    isDefault ? el("p", { class: "hint share-default-hint", text: "Vorgabe für Rechner, die neu in die Anordnung kommen. Eingetragene behalten ihre Rechte." }) : null,
+    ...rows,
+  );
+  details.open = state.sharingOpen.has(name);
+  return el("li", {}, details);
+}
+
+function setShare(name, kind, value) {
+  const rules = state.settings.server.sharing;
+  if (name === SHARE_DEFAULT) {
+    // Eingetragene Rechner behalten, was sie bisher hatten.
+    for (const client of sharingClients()) rules.clients[client] ??= { ...rules.default };
+    rules.default = { ...rules.default, [kind]: value };
+  } else {
+    rules.clients[name] = { ...sharingOf(name), [kind]: value };
+  }
+  settingsChanged({ immediate: true });
+}
+
+function renameSharing(oldName, name) {
+  const clients = state.settings.server.sharing.clients;
+  if (clients[oldName]) clients[name] = clients[oldName];
+  delete clients[oldName];
+  if (state.sharingOpen.delete(oldName)) state.sharingOpen.add(name);
+}
+
+/** Vom Schild auf einer Karte: Eintrag aufklappen und zeigen */
+function openSharing(name) {
+  state.sharingOpen.add(name);
+  renderSharing();
+  const details = $(`#sharingList .share-entry[data-name="${CSS.escape(name)}"]`);
+  if (!details) return;
+  details.open = true;
+  details.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  details.querySelector("summary").focus({ preventScroll: true });
+}
+
+/** Client-Ansicht: was der Server mit diesem Rechner nicht oder nur in eine Richtung teilt */
+function renderClientSharing(sharing) {
+  const note = $("#clientSharing");
+  const limits = sharing && sharingSummary(sharing);
+  note.hidden = !limits;
+  if (limits) note.replaceChildren(el("strong", { text: "Vom Server eingeschränkt: " }), limits);
+}
+
 // ------------------------------------------------------------------ Client-Ansicht
 
 function renderClient() {
@@ -806,6 +964,7 @@ function renderClient() {
   }
   if (phase === "error") message = s.message;
   $("#clientMessage").textContent = message;
+  renderClientSharing(phase === "connected" ? s.sharing : null);
 
   const qualitySlot = $("#clientQuality");
   qualitySlot.hidden = phase !== "connected";

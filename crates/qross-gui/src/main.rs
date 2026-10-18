@@ -298,6 +298,8 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
 
     let status = rt.status();
     let server_changed = settings.server.needs_restart(&old.server);
+    // Rechte je Rechner übernimmt ein laufender Server ohne Neustart.
+    let sharing_changed = settings.server.effective_sharing() != old.server.effective_sharing();
     // Kopierte Dateien und Spielemodus gelten für beide Rollen
     let limit_changed = settings.clipboard_files_mb != old.clipboard_files_mb || settings.game_mode != old.game_mode;
     match status.role {
@@ -306,6 +308,7 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
             info!("Einstellungen geändert – Server startet neu");
             rt.start().await.map_err(|e| format!("{e:#}"))?;
         }
+        Some(Role::Server) if sharing_changed => rt.set_sharing(settings.server.effective_sharing()).await,
         Some(Role::Client) if limit_changed => {
             info!("Einstellungen geändert – Client verbindet neu");
             rt.start().await.map_err(|e| format!("{e:#}"))?;

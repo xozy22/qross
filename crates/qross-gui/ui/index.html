@@ -88,6 +88,13 @@
           <ul id="clientList" class="client-list"></ul>
         </section>
 
+        <!-- Rechte je Rechner: je Client und für neue Rechner, siehe renderSharing -->
+        <section class="panel-section" aria-labelledby="sharingTitle">
+          <h2 id="sharingTitle">Rechte je Rechner</h2>
+          <p class="hint sharing-lede">Was jeder Rechner senden und empfangen darf. Gesendetes erreicht über den Server auch andere Rechner. Gilt sofort, auch bei bestehender Verbindung.</p>
+          <ul id="sharingList" class="sharing-list"></ul>
+        </section>
+
         <section class="panel-section">
           <h2>Dieser Server</h2>
           <div class="address" id="addressBox">
@@ -153,6 +160,7 @@
         </div>
         <h1 id="clientHeadline">Nicht verbunden</h1>
         <p id="clientMessage" class="lede"></p>
+        <p id="clientSharing" class="share-note" role="status" hidden></p>
         <div id="clientQuality" class="client-quality" hidden></div>
       </div>
 
