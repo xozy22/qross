@@ -18,7 +18,19 @@ pub use frame::{decode_datagram, encode_datagram, read_frame, write_frame, Frame
 pub use geometry::{Edge, Rect};
 pub use input::{KeyCode, MouseButton};
 
+/// Version im `Hello`. Bleibt 3, solange das Protokoll nur abwärtskompatibel wächst, denn Server
+/// bis Qross 0.3 lehnen jede andere ab.
 pub const PROTOCOL_VERSION: u16 = 3;
+/// Version im `Welcome`: welche Erweiterungen von Protokoll 3 der Server versteht. Clients bis
+/// Qross 0.3 werten das Feld nicht aus.
+/// - 3: Qross 0.2 und 0.3
+/// - 4: `Control::Monitors` (seit Qross 0.4)
+pub const SERVER_VERSION: u16 = 4;
+/// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
+/// die Verbindung bei unbekannten Control-Nachrichten.
+pub const MONITORS_SINCE: u16 = 4;
+/// Höchstzahl Monitore, die der Server aus `Control::Monitors` übernimmt
+pub const MAX_MONITORS: usize = 16;
 /// ALPN-Kennung im TLS-Handshake
 pub const ALPN: &[u8] = b"qross/3";
 /// UDP-Port (bewusst nicht Synergys 24800, damit beide parallel laufen können)
@@ -49,23 +61,33 @@ impl Platform {
     }
 }
 
-/// Bildschirmfläche eines Rechners: Bounding-Box des virtuellen Desktops in physischen Pixeln.
+/// Bildschirmfläche eines Rechners: Bounding-Box des virtuellen Desktops in physischen Pixeln
+/// (macOS: Punkte). Die einzelnen Monitore meldet `Control::Monitors`.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenInfo {
     pub bounds: Rect,
 }
 
 /// Nachrichten auf dem Control-Stream.
+///
+/// Neue Varianten werden nur hinten angefügt. Anders als bei `Clipboard` trennen ältere Server die
+/// Verbindung, wenn sie eine Nachricht nicht lesen können; der Client sendet neue Varianten deshalb
+/// nur, wenn die Version im `Welcome` sie abdeckt (z. B. `MONITORS_SINCE`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Control {
     /// Client → Server, erste Nachricht
     Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
-    /// Server → Client: angenommen
+    /// Server → Client: angenommen. `version`: siehe `SERVER_VERSION`
     Welcome { version: u16, server_name: String, platform: Platform },
     /// Server → Client: abgelehnt, danach wird die Verbindung geschlossen
     Reject { reason: String },
     /// Client → Server: Auflösung oder Monitor-Anordnung hat sich geändert
     ScreenChanged(ScreenInfo),
+    /// Client → Server (seit Qross 0.4, nur ab `MONITORS_SINCE`): die einzelnen Monitore in denselben
+    /// Koordinaten wie `ScreenInfo::bounds`. Folgt direkt auf das `Welcome` und nach jeder Änderung.
+    /// Der Server hält den Cursor dann auf den Monitorflächen und wechselt nur an Kantenstücken,
+    /// an denen ein Monitor an der äußeren Kante liegt.
+    Monitors(Vec<Rect>),
 }
 
 /// Zuverlässige, geordnete Eingabe-Ereignisse (Server → Client).
@@ -240,5 +262,41 @@ mod tests {
         assert!(postcard::from_bytes::<ClipboardV02>(&bytes).is_err(), "ältere Version muss sauber ablehnen");
         assert_eq!(postcard::from_bytes::<Clipboard>(&bytes).unwrap(), files);
         assert_eq!(StreamKind::from_u8(StreamKind::ClipboardFile as u8), Some(StreamKind::ClipboardFile));
+    }
+
+    /// So sah `Control` bis Qross 0.3 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ControlV03 {
+        Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+        Welcome { version: u16, server_name: String, platform: Platform },
+        Reject { reason: String },
+        ScreenChanged(ScreenInfo),
+    }
+
+    #[test]
+    fn monitors_reach_only_servers_that_understand_them() {
+        // Hello und ScreenChanged lesen ältere Server unverändert; Hello meldet weiter Version 3.
+        let screen = ScreenInfo { bounds: Rect::new(0, -400, 5256, 1800) };
+        let hello = Control::Hello { version: PROTOCOL_VERSION, name: "mac".into(), screen, platform: Platform::MacOs };
+        let bytes = postcard::to_stdvec(&hello).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<ControlV03>(&bytes).unwrap(),
+            ControlV03::Hello { version: 3, name: "mac".into(), screen, platform: Platform::MacOs }
+        );
+        let bytes = postcard::to_stdvec(&Control::ScreenChanged(screen)).unwrap();
+        assert_eq!(postcard::from_bytes::<ControlV03>(&bytes).unwrap(), ControlV03::ScreenChanged(screen));
+
+        // Ältere Clients lesen das Welcome eines neuen Servers (die Version werten sie nicht aus).
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV03>(&bytes).unwrap(), ControlV03::Welcome { version: 4, .. }));
+
+        // Monitors kann ein älterer Server nicht lesen (er würde trennen). Er meldet im Welcome
+        // Version 3 und bekommt die Nachricht deshalb nie.
+        const { assert!(PROTOCOL_VERSION < MONITORS_SINCE && MONITORS_SINCE <= SERVER_VERSION) };
+        let monitors = Control::Monitors(vec![Rect::new(0, 418, 1512, 982), Rect::new(1512, -400, 3744, 1800)]);
+        let bytes = postcard::to_stdvec(&monitors).unwrap();
+        assert!(postcard::from_bytes::<ControlV03>(&bytes).is_err(), "ältere Version kann Monitors nicht lesen");
+        assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), monitors);
     }
 }

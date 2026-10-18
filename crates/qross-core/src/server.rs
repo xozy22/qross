@@ -8,14 +8,20 @@ use qross_proto::{Edge, Input, MouseMove, Rect};
 
 use crate::input::CaptureEvent;
 use crate::layout::Layout;
+use crate::screen::{beyond, Screen};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerEvent {
     Capture(CaptureEvent),
     ClientConnected { name: String, screen: Rect },
     ClientScreenChanged { name: String, screen: Rect },
+    /// Die einzelnen Monitore eines Clients (seit Qross 0.4). Ohne diese Meldung gilt seine
+    /// Fläche als ein einziger Monitor.
+    ClientMonitors { name: String, monitors: Vec<Rect> },
     ClientDisconnected { name: String },
     LocalScreenChanged(Rect),
+    /// Die eigenen Monitore des Servers
+    LocalMonitors(Vec<Rect>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,8 +80,8 @@ enum Active {
 pub struct ServerState {
     me: String,
     layout: Layout,
-    local: Rect,
-    clients: HashMap<String, Rect>,
+    local: Screen,
+    clients: HashMap<String, Screen>,
     active: Active,
     epoch: u16,
     seq: u32,
@@ -96,7 +102,7 @@ impl ServerState {
         Self {
             me: me.into(),
             layout,
-            local,
+            local: Screen::new(local),
             clients: HashMap::new(),
             active: Active::Local,
             epoch: 0,
@@ -136,17 +142,19 @@ impl ServerState {
         match event {
             ServerEvent::Capture(c) => self.on_capture(c, now, &mut out),
             ServerEvent::ClientConnected { name, screen } => {
-                self.clients.insert(name, screen);
+                self.clients.insert(name, Screen::new(screen));
             }
             ServerEvent::ClientScreenChanged { name, screen } => {
-                if let Some(rect) = self.clients.get_mut(&name) {
-                    *rect = screen;
+                if let Some(s) = self.clients.get_mut(&name) {
+                    s.set_bounds(screen);
                 }
-                if let Active::Remote { name: active, x, y } = &mut self.active {
-                    if *active == name {
-                        (*x, *y) = screen.clamp(*x, *y);
-                    }
+                self.keep_cursor_on_monitor(&name);
+            }
+            ServerEvent::ClientMonitors { name, monitors } => {
+                if let Some(s) = self.clients.get_mut(&name) {
+                    s.set_monitors(monitors);
                 }
+                self.keep_cursor_on_monitor(&name);
             }
             ServerEvent::ClientDisconnected { name } => {
                 self.clients.remove(&name);
@@ -154,9 +162,19 @@ impl ServerState {
                     self.go_local(self.local.center(), &mut out);
                 }
             }
-            ServerEvent::LocalScreenChanged(rect) => self.local = rect,
+            ServerEvent::LocalScreenChanged(rect) => self.local.set_bounds(rect),
+            ServerEvent::LocalMonitors(monitors) => self.local.set_monitors(monitors),
         }
         out
+    }
+
+    /// Nach einer Änderung der Fläche von `name`: steht der Cursor dort, auf einen Monitor holen.
+    fn keep_cursor_on_monitor(&mut self, name: &str) {
+        if let (Active::Remote { name: active, x, y }, Some(screen)) = (&mut self.active, self.clients.get(name)) {
+            if active == name {
+                (*x, *y) = screen.snap(*x, *y);
+            }
+        }
     }
 
     /// Darf über `edge` an Position (x, y) von `rect` gewechselt werden?
@@ -195,8 +213,15 @@ impl ServerState {
                 let Some(target) = self.layout.neighbor(&self.me, edge).map(str::to_owned) else {
                     return;
                 };
-                let Some(&rect) = self.clients.get(&target) else { return };
-                if !self.may_switch(self.local, edge, x, y, now) {
+                if !self.clients.contains_key(&target) {
+                    return;
+                }
+                // Das System meldet jede Monitorkante ohne Nachbarmonitor; gewechselt wird nur
+                // dort, wo ein Monitor an der äußeren Kante liegt.
+                if self.local.knows_monitors() && !self.local.on_outer_edge(edge, x, y) {
+                    return;
+                }
+                if !self.may_switch(self.local.monitor_at(x, y), edge, x, y, now) {
                     return;
                 }
                 if buttons_down {
@@ -208,7 +233,7 @@ impl ServerState {
                     }
                     return;
                 }
-                let (nx, ny) = map_across(self.local, edge, x, y, rect);
+                let (nx, ny) = enter_point(self.local.hull(), edge, x, y, &self.clients[&target]);
                 self.enter(target, nx, ny, out);
             }
             CaptureEvent::DragProbeResult { files } => {
@@ -219,8 +244,8 @@ impl ServerState {
                 let Some(target) = self.layout.neighbor(&self.me, edge).map(str::to_owned) else {
                     return;
                 };
-                let Some(&rect) = self.clients.get(&target) else { return };
-                let (nx, ny) = map_across(self.local, edge, x, y, rect);
+                let Some(screen) = self.clients.get(&target) else { return };
+                let (nx, ny) = enter_point(self.local.hull(), edge, x, y, screen);
                 out.push(Action::CancelLocalDrag);
                 self.enter(target.clone(), nx, ny, out);
                 let transfer = self.next_transfer;
@@ -268,38 +293,34 @@ impl ServerState {
             Active::Remote { name, x, y } => (name.clone(), *x, *y),
             Active::Local => return,
         };
-        let Some(&rect) = self.clients.get(&name) else { return };
+        let Some(screen) = self.clients.get(&name) else { return };
+        let rect = screen.hull();
         let (nx, ny) = (x.saturating_add(dx), y.saturating_add(dy));
+        // Nur auf Monitorflächen bewegen (ohne Monitorliste: im Rechteck klemmen)
+        let (cx, cy) = screen.step((x, y), (nx, ny));
 
+        // Wechsel über die äußere Kante, und nur dort, wo ein Monitor an ihr liegt
         let crossing = if self.locked {
             None
-        } else if nx < rect.x {
-            Some(Edge::Left)
-        } else if nx > rect.right() {
-            Some(Edge::Right)
-        } else if ny < rect.y {
-            Some(Edge::Top)
-        } else if ny > rect.bottom() {
-            Some(Edge::Bottom)
         } else {
-            None
+            Edge::ALL.into_iter().find(|&edge| beyond(rect, edge, nx, ny) && screen.on_outer_edge(edge, cx, cy))
         };
-        let (cx, cy) = rect.clamp(nx, ny);
+        let monitor = screen.monitor_at(cx, cy);
 
         let crossing = crossing.filter(|&edge| {
             let available =
                 self.layout.neighbor(&name, edge).is_some_and(|t| t == self.me || self.clients.contains_key(t));
-            available && self.may_switch(rect, edge, cx, cy, now)
+            available && self.may_switch(monitor, edge, cx, cy, now)
         });
         if let Some(edge) = crossing {
             if let Some(target) = self.layout.neighbor(&name, edge).map(str::to_owned) {
                 if target == self.me {
                     out.push(Action::Send { to: name, input: Input::Leave });
-                    self.go_local(map_across(rect, edge, cx, cy, self.local), out);
+                    self.go_local(enter_point(rect, edge, cx, cy, &self.local), out);
                     return;
                 }
-                if let Some(&target_rect) = self.clients.get(&target) {
-                    let (tx, ty) = map_across(rect, edge, cx, cy, target_rect);
+                if let Some(target_screen) = self.clients.get(&target) {
+                    let (tx, ty) = enter_point(rect, edge, cx, cy, target_screen);
                     self.enter(target, tx, ty, out);
                     return;
                 }
@@ -332,6 +353,13 @@ impl ServerState {
         self.drag = None;
         out.push(Action::ReleaseCapture { x, y });
     }
+}
+
+/// Position auf `to` beim Übertritt über `edge` der Fläche `from`: anteilig entlang der Kante
+/// umgerechnet, dann auf den nächstgelegenen Monitor an der Eintrittskante gelegt.
+fn enter_point(from: Rect, edge: Edge, x: i32, y: i32, to: &Screen) -> (i32, i32) {
+    let (tx, ty) = map_across(from, edge, x, y, to.hull());
+    to.entry_point(edge.opposite(), tx, ty)
 }
 
 /// Position beim Übertritt über `edge` von `from` nach `to`: auf der gegenüberliegenden
@@ -599,6 +627,101 @@ mod tests {
         s.handle(delta(-5, 0));
         let actions = s.handle(edge_hit(Edge::Right, 1919, 0));
         assert!(actions.contains(&Action::Send { to: "laptop".into(), input: Input::Enter { epoch: 2, x: 1, y: 0 } }));
+    }
+
+    /// MacBook links (unten bündig), daneben ein höherer externer Monitor, der weiter oben beginnt
+    const MAC: Rect = Rect::new(0, -400, 5256, 1800);
+    const MAC_BUILTIN: Rect = Rect::new(0, 418, 1512, 982);
+    const MAC_EXTERNAL: Rect = Rect::new(1512, -400, 3744, 1800);
+
+    fn mac_state() -> ServerState {
+        let layout =
+            Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "mac".into() }]).unwrap();
+        let mut s = ServerState::new("pc", layout, PC);
+        s.handle(ServerEvent::ClientConnected { name: "mac".into(), screen: MAC });
+        s.handle(ServerEvent::ClientMonitors { name: "mac".into(), monitors: vec![MAC_BUILTIN, MAC_EXTERNAL] });
+        s
+    }
+
+    fn enter_mac(epoch: u16, x: i32, y: i32) -> Action {
+        Action::Send { to: "mac".into(), input: Input::Enter { epoch, x, y } }
+    }
+
+    fn move_mac(seq: u32, x: i32, y: i32) -> Action {
+        Action::Move { to: "mac".into(), mv: MouseMove { epoch: 1, seq, x, y } }
+    }
+
+    #[test]
+    fn entering_lands_on_the_nearest_monitor_at_the_edge() {
+        let mut s = mac_state();
+        // Neben dem oberen Teil des PCs liegt beim Mac links kein Monitor: Oberkante des MacBooks
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 100)).contains(&enter_mac(1, 1, 418)));
+        s.handle(delta(-5, 0));
+        assert_eq!(s.active_screen(), "pc");
+        // Weiter unten anteilig wie bisher, denn dort liegt das MacBook
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 900)).contains(&enter_mac(2, 1, 1100)));
+    }
+
+    #[test]
+    fn cursor_stays_on_the_monitors_of_a_client() {
+        let mut s = mac_state();
+        s.handle(edge_hit(Edge::Right, 1919, 100));
+        // Hinüber auf den externen Monitor, oberhalb des MacBooks
+        assert_eq!(s.handle(delta(1600, -100)), vec![move_mac(1, 1601, 318)]);
+        // Nach links in die tote Fläche über dem MacBook: bleibt am Rand des externen Monitors
+        assert_eq!(s.handle(delta(-200, 0)), vec![move_mac(2, 1512, 318)]);
+        // Dort ist keine äußere Kante, also auch kein Wechsel zum PC
+        assert!(s.handle(delta(-5000, 0)).is_empty());
+        assert_eq!(s.active_screen(), "mac");
+        // Hinunter aufs MacBook und über dessen linke Kante zurück
+        assert_eq!(s.handle(delta(-100, 500)), vec![move_mac(3, 1412, 818)]);
+        assert_eq!(
+            s.handle(delta(-5000, 0)),
+            vec![Action::Send { to: "mac".into(), input: Input::Leave }, Action::ReleaseCapture { x: 1918, y: 730 }]
+        );
+    }
+
+    #[test]
+    fn corner_dead_zone_belongs_to_each_monitor() {
+        let mut s = mac_state();
+        s.set_switch_options(SwitchOptions { corner_size: 10, delay: Duration::ZERO });
+        s.handle(edge_hit(Edge::Right, 1919, 100));
+        // Obere linke Ecke des MacBooks, weit unterhalb der Oberkante des Rechtecks
+        assert_eq!(s.handle(delta(-50, 2)), vec![move_mac(1, 0, 420)]);
+        assert_eq!(s.active_screen(), "mac");
+        assert_eq!(
+            s.handle(delta(-50, 20)),
+            vec![Action::Send { to: "mac".into(), input: Input::Leave }, Action::ReleaseCapture { x: 1918, y: 503 }]
+        );
+    }
+
+    #[test]
+    fn server_switches_only_where_its_own_monitors_reach_the_edge() {
+        let mut s = state();
+        // Rechter Monitor 300 px tiefer: rechts neben dem oberen Teil des linken Monitors ist nichts
+        s.handle(ServerEvent::LocalScreenChanged(Rect::new(0, 0, 3840, 1380)));
+        s.handle(ServerEvent::LocalMonitors(vec![PC, Rect::new(1920, 300, 1920, 1080)]));
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 100)).is_empty(), "Monitorkante zur toten Fläche");
+        assert!(s.handle(edge_hit(Edge::Right, 3839, 800)).contains(&Action::Send {
+            to: "laptop".into(),
+            input: Input::Enter { epoch: 1, x: 1, y: 463 }
+        }));
+        // Zurück landet der Cursor auf dem Monitor an der Kante, nicht in der toten Fläche
+        assert_eq!(
+            s.handle(delta(-50, -463)),
+            vec![Action::Send { to: "laptop".into(), input: Input::Leave }, Action::ReleaseCapture { x: 3838, y: 300 }]
+        );
+    }
+
+    #[test]
+    fn changed_monitors_keep_the_cursor_on_a_monitor() {
+        let mut s = mac_state();
+        s.handle(edge_hit(Edge::Right, 1919, 100));
+        s.handle(delta(1600, -100));
+        // Externer Monitor abgezogen: macOS legt das MacBook nach (0, 0)
+        s.handle(ServerEvent::ClientScreenChanged { name: "mac".into(), screen: Rect::new(0, 0, 1512, 982) });
+        s.handle(ServerEvent::ClientMonitors { name: "mac".into(), monitors: vec![Rect::new(0, 0, 1512, 982)] });
+        assert_eq!(s.handle(delta(-11, 0)), vec![move_mac(2, 1500, 418)]);
     }
 
     #[test]

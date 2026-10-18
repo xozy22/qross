@@ -12,7 +12,7 @@ use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard};
 use qross_proto::{
     encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, FileEntry,
-    Input, Platform, Rect, StreamKind, PROTOCOL_VERSION,
+    Input, Platform, Rect, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming};
 use tokio::sync::{mpsc, oneshot};
@@ -39,6 +39,8 @@ pub struct ServerPlatform {
     pub clipboard: Box<dyn Clipboard>,
     /// Liefert die aktuelle Bildschirmfläche (wird regelmäßig abgefragt).
     pub screen: Box<dyn Fn() -> Rect + Send + Sync>,
+    /// Die einzelnen Monitore in den Koordinaten von `screen` (leer: unbekannt)
+    pub monitors: Box<dyn Fn() -> Vec<Rect> + Send + Sync>,
 }
 
 pub struct Server {
@@ -78,6 +80,11 @@ pub enum ServerNotice {
     CursorLocked { locked: bool, screen: String },
     /// Kopierte Dateien in der Zwischenablage (senden, empfangen, einfügbar, zu groß)
     ClipboardFiles(FilesNotice),
+    /// Bildschirm eines verbundenen Clients: Gesamtfläche und einzelne Monitore (leer bei Clients
+    /// vor Qross 0.4). Kommt nach `ClientConnected`, sobald er Monitore meldet, und bei Änderungen.
+    ClientScreenChanged { name: String, screen: Rect, monitors: Vec<Rect> },
+    /// Bildschirm des Servers selbst, nach `Listening` und bei Änderungen
+    LocalScreenChanged { screen: Rect, monitors: Vec<Rect> },
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -100,6 +107,7 @@ enum NetEvent {
         reply: oneshot::Sender<Result<String, String>>,
     },
     ScreenChanged { name: String, id: usize, screen: Rect },
+    Monitors { name: String, id: usize, monitors: Vec<Rect> },
     Clipboard { name: String, id: usize, data: ClipboardData },
     ClipboardFiles { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     ClipboardFile { name: String, id: usize, outcome: FileOutcome },
@@ -111,6 +119,9 @@ struct ClientHandle {
     id: usize,
     conn: Connection,
     input: mpsc::UnboundedSender<Input>,
+    /// Zuletzt gemeldete Fläche und Monitore (für die Oberfläche)
+    screen: Rect,
+    monitors: Vec<Rect>,
 }
 
 impl Server {
@@ -184,7 +195,7 @@ impl Server {
         let (net_tx, mut net_rx) = mpsc::unbounded_channel();
         tokio::spawn(accept_loop(self.endpoint.clone(), net_tx, incoming.staging()));
 
-        let ServerPlatform { capture, mut events, clipboard, screen } = platform;
+        let ServerPlatform { capture, mut events, clipboard, screen, monitors } = platform;
         let clipboard = ClipboardHub::spawn(clipboard);
         let files_notify: Notify = {
             let notices = self.notices.clone();
@@ -195,7 +206,9 @@ impl Server {
             })
         };
         let mut local_screen = screen();
+        let mut local_monitors = monitors();
         let mut state = ServerState::new(self.config.name.clone(), self.config.layout.clone(), local_screen);
+        state.handle(ServerEvent::LocalMonitors(local_monitors.clone()));
         state.set_switch_options(self.switching);
         let _discovery = self.discovery.then(|| {
             let port = self.local_addr().map(|a| a.port()).unwrap_or_default();
@@ -206,7 +219,11 @@ impl Server {
         let clip_synced: ClipSynced = Arc::new(Mutex::new(HashMap::new()));
         let mut screen_poll = tokio::time::interval(Duration::from_secs(2));
         info!("Server „{}“ lauscht auf {}", self.config.name, self.local_addr()?);
+        if !local_monitors.is_empty() {
+            info!("eigene Monitore: {}", describe_monitors(&local_monitors));
+        }
         self.notify(ServerNotice::Listening { addr: self.local_addr()? });
+        self.notify(ServerNotice::LocalScreenChanged { screen: local_screen, monitors: local_monitors.clone() });
 
         loop {
             let actions = tokio::select! {
@@ -243,7 +260,8 @@ impl Server {
                             Ok(()) => {
                                 self.notify(ServerNotice::ClientConnected { name: name.clone(), addr, screen });
                                 let input = spawn_input_writer(conn.clone(), name.clone());
-                                clients.insert(name.clone(), ClientHandle { id: conn.stable_id(), conn, input });
+                                let handle = ClientHandle { id: conn.stable_id(), conn, input, screen, monitors: Vec::new() };
+                                clients.insert(name.clone(), handle);
                                 clip_synced.lock().unwrap().remove(&name);
                                 let _ = reply.send(Ok(self.config.name.clone()));
                                 info!("Client „{name}“ verbunden ({}×{})", screen.width, screen.height);
@@ -265,7 +283,22 @@ impl Server {
                         }
                     }
                     NetEvent::ScreenChanged { name, id, screen } if is_current(&clients, &name, id) => {
+                        info!("Bildschirm von „{name}“ geändert: {}×{}", screen.width, screen.height);
+                        if let Some(client) = clients.get_mut(&name) {
+                            client.screen = screen;
+                            let monitors = client.monitors.clone();
+                            self.notify(ServerNotice::ClientScreenChanged { name: name.clone(), screen, monitors });
+                        }
                         state.handle(ServerEvent::ClientScreenChanged { name, screen })
+                    }
+                    NetEvent::Monitors { name, id, monitors } if is_current(&clients, &name, id) => {
+                        info!("„{name}“ meldet {}", describe_monitors(&monitors));
+                        if let Some(client) = clients.get_mut(&name) {
+                            client.monitors = monitors.clone();
+                            let (screen, monitors) = (client.screen, monitors.clone());
+                            self.notify(ServerNotice::ClientScreenChanged { name: name.clone(), screen, monitors });
+                        }
+                        state.handle(ServerEvent::ClientMonitors { name, monitors })
                     }
                     NetEvent::Clipboard { name, id, data } if is_current(&clients, &name, id) => {
                         info!("Zwischenablage von „{name}“: {}", data.summary());
@@ -312,14 +345,22 @@ impl Server {
                     _ => Vec::new(),
                 },
                 _ = screen_poll.tick() => {
-                    let now = screen();
-                    if now == local_screen {
-                        Vec::new()
-                    } else {
-                        local_screen = now;
+                    let (now, now_monitors) = (screen(), monitors());
+                    let mut actions = Vec::new();
+                    if now != local_screen {
                         info!("lokaler Bildschirm geändert: {}×{}", now.width, now.height);
-                        state.handle(ServerEvent::LocalScreenChanged(now))
+                        actions.extend(state.handle(ServerEvent::LocalScreenChanged(now)));
                     }
+                    if now_monitors != local_monitors {
+                        info!("eigene Monitore: {}", describe_monitors(&now_monitors));
+                        actions.extend(state.handle(ServerEvent::LocalMonitors(now_monitors.clone())));
+                    }
+                    if now != local_screen || now_monitors != local_monitors {
+                        (local_screen, local_monitors) = (now, now_monitors);
+                        let monitors = local_monitors.clone();
+                        self.notify(ServerNotice::LocalScreenChanged { screen: local_screen, monitors });
+                    }
+                    actions
                 }
             };
             for action in actions {
@@ -383,6 +424,16 @@ impl Server {
 
 fn is_current(clients: &HashMap<String, ClientHandle>, name: &str, id: usize) -> bool {
     clients.get(name).is_some_and(|c| c.id == id)
+}
+
+/// Fürs Log, z. B. „2 Monitore (1512×982, 3744×1800)“
+fn describe_monitors(monitors: &[Rect]) -> String {
+    let sizes: Vec<String> = monitors.iter().map(|m| format!("{}×{}", m.width, m.height)).collect();
+    match sizes.len() {
+        0 => "keine Monitore".to_owned(),
+        1 => format!("1 Monitor ({})", sizes[0]),
+        n => format!("{n} Monitore ({})", sizes.join(", ")),
+    }
 }
 
 /// Je Client die zuletzt übertragene Clipboard-Sequenznummer
@@ -545,7 +596,8 @@ async fn handle_connection(
     match verdict {
         Ok(server_name) => {
             debug!("„{name}“ läuft unter {platform:?}");
-            let welcome = Control::Welcome { version: PROTOCOL_VERSION, server_name, platform: Platform::current() };
+            // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore.
+            let welcome = Control::Welcome { version: SERVER_VERSION, server_name, platform: Platform::current() };
             write_frame(&mut send, &welcome).await?;
         }
         Err(reason) => {
@@ -563,6 +615,10 @@ async fn handle_connection(
         match read_frame::<_, Control>(&mut recv).await {
             Ok(Some(Control::ScreenChanged(info))) => {
                 let _ = tx.send(NetEvent::ScreenChanged { name: name.clone(), id, screen: info.bounds });
+            }
+            Ok(Some(Control::Monitors(mut monitors))) => {
+                monitors.truncate(MAX_MONITORS);
+                let _ = tx.send(NetEvent::Monitors { name: name.clone(), id, monitors });
             }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht"),
             Ok(None) | Err(_) => break,

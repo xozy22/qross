@@ -13,7 +13,7 @@ use qross_core::Inject;
 use qross_platform::{Clipboard, Injector};
 use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, FileEntry,
-    Input, MouseMove, Platform, Rect, ScreenInfo, StreamKind, DEFAULT_PORT, PROTOCOL_VERSION,
+    Input, MouseMove, Platform, Rect, ScreenInfo, StreamKind, DEFAULT_PORT, MONITORS_SINCE, PROTOCOL_VERSION,
 };
 use quinn::{Connection, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot};
@@ -49,6 +49,14 @@ pub struct ClientPlatform {
     pub injector: Box<dyn Injector>,
     pub clipboard: Box<dyn Clipboard>,
     pub screen: Box<dyn Fn() -> Rect + Send + Sync>,
+    /// Die einzelnen Monitore in den Koordinaten von `screen` (leer: unbekannt)
+    pub monitors: Box<dyn Fn() -> Vec<Rect> + Send + Sync>,
+}
+
+/// Abfrage der eigenen Bildschirmfläche (aus `ClientPlatform`)
+struct ScreenQuery {
+    bounds: Box<dyn Fn() -> Rect + Send + Sync>,
+    monitors: Box<dyn Fn() -> Vec<Rect> + Send + Sync>,
 }
 
 /// Fehler, bei denen eine Wiederverbindung sinnlos ist.
@@ -156,7 +164,8 @@ async fn run_inner(
     platform: ClientPlatform,
     notices: Notices<'_>,
 ) -> Result<()> {
-    let ClientPlatform { mut injector, clipboard, screen } = platform;
+    let ClientPlatform { mut injector, clipboard, screen, monitors } = platform;
+    let screen = ScreenQuery { bounds: screen, monitors };
     let mut clipboard = ClipboardSide {
         hub: ClipboardHub::spawn(clipboard),
         incoming: Incoming::new(Staging::persistent(&clipfiles::default_store())?),
@@ -193,7 +202,7 @@ async fn run_inner(
     let mut retry = RETRY_MIN;
     loop {
         let started = std::time::Instant::now();
-        let result = session(&config, &tls, &mut trust, &inject_tx, &mut clipboard, &*screen, notices).await;
+        let result = session(&config, &tls, &mut trust, &inject_tx, &mut clipboard, &screen, notices).await;
         retry = if started.elapsed() > STABLE_SESSION { RETRY_MIN } else { (retry * 2).min(RETRY_MAX) };
         match result {
             Ok(()) => {
@@ -216,7 +225,7 @@ async fn session(
     trust: &mut TrustStore,
     inject: &Sender<ToInjector>,
     clip: &mut ClipboardSide,
-    screen: &(dyn Fn() -> Rect + Send + Sync),
+    screen: &ScreenQuery,
     notices: Notices<'_>,
 ) -> Result<()> {
     let addr = resolve(&config.server).await?;
@@ -236,7 +245,7 @@ async fn session(
     verify_server(config, trust, &peer_fingerprint(&conn)?)?;
 
     let (mut control, mut control_rx) = conn.open_bi().await?;
-    let mut bounds = screen();
+    let mut bounds = (screen.bounds)();
     let hello = Control::Hello {
         version: PROTOCOL_VERSION,
         name: config.name.clone(),
@@ -244,15 +253,22 @@ async fn session(
         platform: Platform::current(),
     };
     write_frame(&mut control, &hello).await?;
-    let (server_name, server_platform) = match read_frame::<_, Control>(&mut control_rx).await? {
-        Some(Control::Welcome { server_name, platform, .. }) => {
+    let (server_name, server_platform, server_version) = match read_frame::<_, Control>(&mut control_rx).await? {
+        Some(Control::Welcome { version, server_name, platform }) => {
             info!("verbunden mit Server „{server_name}“ ({addr})");
             notify(notices, ClientNotice::Connected { server_name: server_name.clone(), addr });
-            (server_name, platform)
+            (server_name, platform, version)
         }
         Some(Control::Reject { reason }) => bail!("Server hat die Verbindung abgelehnt: {reason}"),
         other => bail!("unerwartete Antwort vom Server: {other:?}"),
     };
+    // Die einzelnen Monitore nur an Server, die sie kennen: ältere trennen bei unbekannten Nachrichten.
+    let report_monitors = server_version >= MONITORS_SINCE;
+    let mut monitors = (screen.monitors)();
+    if report_monitors && !monitors.is_empty() {
+        debug!(?monitors, "Monitore an den Server gemeldet");
+        write_frame(&mut control, &Control::Monitors(monitors.clone())).await?;
+    }
 
     let staging_base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("Qross").join("incoming");
     let mut receiver = Receiver::new(Staging::create(&staging_base)?);
@@ -367,10 +383,18 @@ async fn session(
                     },
                 },
                 _ = screen_poll.tick() => {
-                    let now = screen();
+                    let now = (screen.bounds)();
                     if now != bounds {
                         bounds = now;
                         write_frame(&mut control, &Control::ScreenChanged(ScreenInfo { bounds })).await?;
+                    }
+                    if report_monitors {
+                        let now = (screen.monitors)();
+                        if now != monitors {
+                            monitors = now;
+                            debug!(?monitors, "Monitore geändert");
+                            write_frame(&mut control, &Control::Monitors(monitors.clone())).await?;
+                        }
                     }
                 }
                 reason = conn.closed() => return Err(anyhow!("Verbindung getrennt: {reason}")),

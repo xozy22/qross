@@ -1,13 +1,13 @@
 //! Ende-zu-Ende über echtes QUIC auf Loopback, mit Test-Doubles statt Betriebssystem.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qross_core::{CaptureEvent, Inject, Layout, LinkConfig};
 use qross_net::client::{self, ClientConfig, ClientPlatform};
 use qross_net::clipfiles;
-use qross_net::server::{Server, ServerConfig, ServerPlatform};
+use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform};
 use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, RecordingCapture, RecordingInjector, SharedClipboard};
 use qross_platform::Clipboard;
@@ -18,12 +18,23 @@ use tokio::task::JoinHandle;
 const PC: Rect = Rect::new(0, 0, 1920, 1080);
 const LAPTOP: Rect = Rect::new(0, 0, 1280, 800);
 
+/// Client wie ein MacBook mit externem Monitor: links das MacBook (unten bündig), rechts ein
+/// höherer Monitor, der weiter oben beginnt. Über dem MacBook liegt eine tote Fläche.
+const MAC: Rect = Rect::new(0, -400, 5256, 1800);
+const MAC_BUILTIN: Rect = Rect::new(0, 418, 1512, 982);
+const MAC_EXTERNAL: Rect = Rect::new(1512, -400, 3744, 1800);
+
+/// Bildschirm des Test-Clients (Gesamtfläche, Monitore); lässt sich während des Tests ändern.
+type ClientScreen = Arc<Mutex<(Rect, Vec<Rect>)>>;
+
 struct Setup {
     events: UnboundedSender<CaptureEvent>,
     capture: RecordingCapture,
     server_clip: SharedClipboard,
     injected: RecordingInjector,
     client_clip: SharedClipboard,
+    client_screen: ClientScreen,
+    notices: Arc<Mutex<Vec<ServerNotice>>>,
     server_task: JoinHandle<anyhow::Result<()>>,
     client_task: JoinHandle<anyhow::Result<()>>,
 }
@@ -41,6 +52,17 @@ fn start(trust_client: bool, pin: Option<qross_net::Fingerprint>) -> Setup {
 
 /// `file_limit`: Grenze für kopierte Dateien auf beiden Seiten
 fn start_with(trust_client: bool, pin: Option<qross_net::Fingerprint>, file_limit: u64) -> Setup {
+    start_client_screen(trust_client, pin, file_limit, LAPTOP, Vec::new())
+}
+
+/// Wie `start_with`, mit eigener Bildschirmfläche und Monitoren des Clients (leer: keine Liste)
+fn start_client_screen(
+    trust_client: bool,
+    pin: Option<qross_net::Fingerprint>,
+    file_limit: u64,
+    bounds: Rect,
+    monitors: Vec<Rect>,
+) -> Setup {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
@@ -52,7 +74,18 @@ fn start_with(trust_client: bool, pin: Option<qross_net::Fingerprint>, file_limi
     let layout =
         Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
     let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
-    let server = Server::bind(config, &server_id, trust).unwrap().with_clipboard_file_limit(file_limit);
+    let (notice_tx, mut notice_rx) = tokio::sync::mpsc::unbounded_channel();
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let collected = notices.clone();
+    tokio::spawn(async move {
+        while let Some(notice) = notice_rx.recv().await {
+            collected.lock().unwrap().push(notice);
+        }
+    });
+    let server = Server::bind(config, &server_id, trust)
+        .unwrap()
+        .with_clipboard_file_limit(file_limit)
+        .with_notices(notice_tx);
     let addr = server.local_addr().unwrap();
 
     let capture = RecordingCapture::default();
@@ -63,10 +96,13 @@ fn start_with(trust_client: bool, pin: Option<qross_net::Fingerprint>, file_limi
         events: events_rx,
         clipboard: Box::new(server_clip.clone()),
         screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
     }));
 
     let injected = RecordingInjector::default();
     let client_clip = SharedClipboard::default();
+    let client_screen: ClientScreen = Arc::new(Mutex::new((bounds, monitors)));
+    let (screen, monitors) = (client_screen.clone(), client_screen.clone());
     let client_config = ClientConfig {
         name: "laptop".into(),
         server: addr.to_string(),
@@ -80,11 +116,12 @@ fn start_with(trust_client: bool, pin: Option<qross_net::Fingerprint>, file_limi
         ClientPlatform {
             injector: Box::new(injected.clone()),
             clipboard: Box::new(client_clip.clone()),
-            screen: Box::new(|| LAPTOP),
+            screen: Box::new(move || screen.lock().unwrap().0),
+            monitors: Box::new(move || monitors.lock().unwrap().1.clone()),
         },
     ));
 
-    Setup { events, capture, server_clip, injected, client_clip, server_task, client_task }
+    Setup { events, capture, server_clip, injected, client_clip, client_screen, notices, server_task, client_task }
 }
 
 async fn wait_for(what: &str, condition: impl FnMut() -> bool) {
@@ -353,4 +390,92 @@ async fn wrong_server_fingerprint_stops_client() {
     let result = tokio::time::timeout(Duration::from_secs(5), &mut s.client_task).await.expect("Client hätte aufgeben müssen");
     let err = result.unwrap().unwrap_err();
     assert!(err.to_string().contains("Fingerprint"), "{err:#}");
+}
+
+/// Wartet, bis der Server diese Fläche und Monitore des Clients kennt (Meldung für die Oberfläche).
+async fn wait_for_monitors(s: &Setup, bounds: Rect, monitors: &[Rect]) {
+    let notices = s.notices.clone();
+    wait_up_to(Duration::from_secs(10), "Monitore beim Server", || {
+        notices.lock().unwrap().iter().any(|n| {
+            matches!(n, ServerNotice::ClientScreenChanged { name, screen, monitors: m }
+                if name == "laptop" && *screen == bounds && m == monitors)
+        })
+    })
+    .await;
+}
+
+/// Eine Bewegung senden und warten, bis der Server sie ausgewertet hat. Das Rad-Ereignis danach
+/// trennt sie von der nächsten Bewegung (wartende Bewegungen fasst der Server zusammen) und kommt
+/// erst beim Client an, wenn die Bewegung verarbeitet ist.
+async fn move_by(s: &Setup, dx: i32, dy: i32, marker: i16) {
+    s.events.send(CaptureEvent::MouseDelta { dx, dy }).unwrap();
+    s.events.send(CaptureEvent::Wheel { dx: 0, dy: marker }).unwrap();
+    let injected = s.injected.clone();
+    wait_for("Markierung beim Client", || injected.0.lock().unwrap().contains(&Inject::Wheel { dx: 0, dy: marker }))
+        .await;
+}
+
+#[tokio::test]
+async fn cursor_stays_on_the_monitors_of_a_client() {
+    let s = start_client_screen(true, None, clipfiles::DEFAULT_LIMIT, MAC, vec![MAC_BUILTIN, MAC_EXTERNAL]);
+    wait_for_monitors(&s, MAC, &[MAC_BUILTIN, MAC_EXTERNAL]).await;
+
+    // Rechts oben am PC hinaus: beim Mac liegt links oben kein Monitor, also auf die Oberkante
+    // des MacBooks.
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(CaptureEvent::EdgeHit { edge: Edge::Right, x: 1919, y: 100, buttons_down: false });
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    let injected = s.injected.clone();
+    wait_for("Enter auf dem MacBook", || injected.0.lock().unwrap().contains(&Inject::MoveTo { x: 1, y: 418 })).await;
+
+    // Auf den externen Monitor, dann nach links in die tote Fläche über dem MacBook
+    move_by(&s, 1600, -100, 1).await;
+    move_by(&s, -200, 0, 2).await;
+    // Kräftig weiter nach links: hier liegt kein Monitor an der äußeren Kante, also kein Wechsel
+    move_by(&s, -5000, 0, 3).await;
+    assert!(
+        !capture.0.lock().unwrap().iter().any(|c| matches!(c, CaptureCall::Release { .. })),
+        "Wechsel an einer Kante ohne Monitor"
+    );
+    // Hinunter aufs MacBook und über dessen linke Kante zurück zum PC
+    move_by(&s, -100, 500, 4).await;
+    s.events.send(CaptureEvent::MouseDelta { dx: -5000, dy: 0 }).unwrap();
+    wait_for("Rückkehr zum Server", || capture.0.lock().unwrap().contains(&CaptureCall::Release { x: 1918, y: 730 }))
+        .await;
+
+    let expected = [(1, 418), (1601, 318), (1512, 318), (1412, 818)];
+    wait_for("Bewegungen beim Client", || {
+        let log = injected.0.lock().unwrap();
+        expected.iter().all(|&(x, y)| log.contains(&Inject::MoveTo { x, y }))
+    })
+    .await;
+    let log = injected.0.lock().unwrap().clone();
+    for inject in &log {
+        if let Inject::MoveTo { x, y } = *inject {
+            assert!(MAC_BUILTIN.contains(x, y) || MAC_EXTERNAL.contains(x, y), "({x}, {y}) liegt auf keinem Monitor: {log:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn changed_monitors_are_reported_again() {
+    let s = start_client_screen(true, None, clipfiles::DEFAULT_LIMIT, MAC, vec![MAC_BUILTIN, MAC_EXTERNAL]);
+    wait_for_monitors(&s, MAC, &[MAC_BUILTIN, MAC_EXTERNAL]).await;
+
+    // Externen Monitor abziehen: macOS legt das MacBook nach (0, 0)
+    let builtin = Rect::new(0, 0, 1512, 982);
+    *s.client_screen.lock().unwrap() = (builtin, vec![builtin]);
+    wait_for_monitors(&s, builtin, &[builtin]).await;
+
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    let injected = s.injected.clone();
+    wait_for("Enter nach der Änderung", || injected.0.lock().unwrap().contains(&Inject::MoveTo { x: 1, y: 490 })).await;
 }

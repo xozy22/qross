@@ -44,6 +44,16 @@ pub struct ClientInfo {
     pub addr: String,
     pub width: u32,
     pub height: u32,
+    /// Einzelne Monitore (leer: Client vor Qross 0.4 oder noch nicht gemeldet)
+    pub monitors: Vec<Rect>,
+}
+
+/// Bildschirm dieses Rechners, wenn er Server ist
+#[derive(Serialize, Clone, Debug)]
+pub struct LocalScreen {
+    pub width: u32,
+    pub height: u32,
+    pub monitors: Vec<Rect>,
 }
 
 /// Ein abgewiesener Client, der auf Freigabe wartet (oder einen Hinweis braucht).
@@ -77,6 +87,8 @@ pub struct Status {
     pub server_name: Option<String>,
     /// Client: Cursor ist gerade auf diesem Rechner
     pub cursor_here: bool,
+    /// Server: eigener Bildschirm samt Monitoren
+    pub local_screen: Option<LocalScreen>,
 }
 
 impl Status {
@@ -319,6 +331,7 @@ impl Runtime {
             events,
             clipboard: qross_platform::clipboard(),
             screen: Box::new(qross_platform::screen_bounds),
+            monitors: Box::new(qross_platform::monitors),
         };
 
         let rt = self.clone();
@@ -349,7 +362,8 @@ impl Runtime {
             ServerNotice::ClientConnected { name, addr, screen } => self.update(|s| {
                 s.clients.retain(|c| c.name != name);
                 s.pending.retain(|p| p.name != name);
-                s.clients.push(ClientInfo { name, addr: addr.to_string(), width: screen.width, height: screen.height });
+                let (width, height) = (screen.width, screen.height);
+                s.clients.push(ClientInfo { name, addr: addr.to_string(), width, height, monitors: Vec::new() });
                 s.clients.sort_by(|a, b| a.name.cmp(&b.name));
             }),
             ServerNotice::ClientDisconnected { name } => self.update(|s| {
@@ -394,6 +408,14 @@ impl Runtime {
                 s.cursor_on = Some(screen);
             }),
             ServerNotice::ClipboardFiles(notice) => self.on_files_notice(notice),
+            ServerNotice::ClientScreenChanged { name, screen, monitors } => self.update(|s| {
+                if let Some(c) = s.clients.iter_mut().find(|c| c.name == name) {
+                    (c.width, c.height, c.monitors) = (screen.width, screen.height, monitors);
+                }
+            }),
+            ServerNotice::LocalScreenChanged { screen, monitors } => self.update(|s| {
+                s.local_screen = Some(LocalScreen { width: screen.width, height: screen.height, monitors });
+            }),
         }
     }
 
@@ -506,12 +528,14 @@ impl Runtime {
                 injector: Box::new(LogInjector),
                 clipboard: Box::new(MemoryClipboard::default()),
                 screen: Box::new(|| Rect::new(0, 0, 1920, 1080)),
+                monitors: Box::new(Vec::new),
             }
         } else {
             ClientPlatform {
                 injector: qross_platform::injector()?,
                 clipboard: qross_platform::clipboard(),
                 screen: Box::new(qross_platform::screen_bounds),
+                monitors: Box::new(qross_platform::monitors),
             }
         };
 

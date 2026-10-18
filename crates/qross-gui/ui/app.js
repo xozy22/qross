@@ -253,6 +253,52 @@ function renderTopbar() {
 
 // ------------------------------------------------------------------ Layout-Editor
 
+/** Monitore eines Rechners, sofern es mehrere sind (sonst null: Darstellung wie bisher) */
+function multipleMonitors(screen) {
+  return screen?.monitors?.length > 1 ? screen.monitors : null;
+}
+
+/** Zusatz für Beschriftungen, z. B. „ · 2 Monitore“ */
+function monitorNote(screen) {
+  const monitors = multipleMonitors(screen);
+  return monitors ? ` · ${monitors.length} Monitore` : "";
+}
+
+/** Tooltip: Name, dann jeder Monitor von links nach rechts und die Gesamtauflösung */
+function screenTitle(name, screen) {
+  const monitors = multipleMonitors(screen);
+  if (!monitors) return name;
+  const sorted = [...monitors].sort((a, b) => a.x - b.x || a.y - b.y);
+  return [name, ...sorted.map((m, i) => `Monitor ${i + 1}: ${m.width} × ${m.height}`), `Gesamt: ${screen.width} × ${screen.height}`].join("\n");
+}
+
+/** Maßstäbliche Skizze der Monitore hinter der Beschriftung des Kastens */
+function monitorSketch(screen) {
+  const monitors = multipleMonitors(screen);
+  if (!monitors) return null;
+  const left = Math.min(...monitors.map((m) => m.x));
+  const top = Math.min(...monitors.map((m) => m.y));
+  const width = Math.max(...monitors.map((m) => m.x + m.width)) - left;
+  const height = Math.max(...monitors.map((m) => m.y + m.height)) - top;
+  // Schmale Fuge, damit aneinanderstoßende Monitore einzeln erkennbar bleiben
+  const gap = Math.max(width, height) * 0.012;
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("class", "monitors");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("aria-hidden", "true");
+  for (const m of monitors) {
+    const rect = document.createElementNS(ns, "rect");
+    rect.setAttribute("x", m.x - left + gap / 2);
+    rect.setAttribute("y", m.y - top + gap / 2);
+    rect.setAttribute("width", Math.max(m.width - gap, 1));
+    rect.setAttribute("height", Math.max(m.height - gap, 1));
+    rect.setAttribute("rx", gap);
+    svg.append(rect);
+  }
+  return svg;
+}
+
 function renderServer() {
   if (state.dragging) {
     state.renderPending = true;
@@ -317,9 +363,12 @@ function renderServer() {
     const isOnline = online.has(s.name);
     const hasCursor = cursorOn === s.name;
     let sub = isServer ? "dieser Rechner" : "nicht verbunden";
+    // Gesamtfläche und Monitore: vom laufenden Server selbst und von verbundenen Clients
+    let screen = isServer && serverRunning ? status.local_screen : null;
     if (isOnline) {
       const c = status.clients.find((x) => x.name === s.name);
       sub = `${c.width} × ${c.height}`;
+      screen = c;
     }
     if (hasCursor && locked) sub = "Cursor gesperrt";
     const classes = ["screen", isServer && "server", isOnline && "online", hasCursor && "has-cursor", hasCursor && locked && "locked"]
@@ -332,10 +381,11 @@ function renderServer() {
         tabindex: "0",
         role: "button",
         "data-name": s.name,
-        "aria-label": `${s.name}, ${isServer ? "Server" : sub}`,
+        "aria-label": `${s.name}, ${isServer ? "Server" : sub}${monitorNote(screen)}`,
         style: `grid-column:${s.col + 1};grid-row:${s.row + 1}`,
-        title: s.name,
+        title: screenTitle(s.name, screen),
       },
+      monitorSketch(screen),
       isServer ? el("span", { class: "tag", text: "Server" }) : null,
       hasCursor ? el("span", { class: "marker", title: locked ? "Cursor hier gesperrt (Rollen-Taste)" : "Cursor ist hier" }, icon(locked ? "lock" : "cursor")) : null,
       el("span", { class: "name", text: s.name }),
@@ -575,7 +625,7 @@ function renderClients() {
           {},
           el("span", { class: "dot" }),
           el("div", {}, el("strong", { text: c.name }), s.cursor_on === c.name ? el("div", { class: "here", text: "Cursor ist hier" }) : null),
-          el("span", { class: "meta" }, `${c.width} × ${c.height}`, el("br"), c.addr),
+          el("span", { class: "meta", title: multipleMonitors(c) && screenTitle(c.name, c) }, `${c.width} × ${c.height}${monitorNote(c)}`, el("br"), c.addr),
         ),
       ),
     );

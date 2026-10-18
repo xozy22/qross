@@ -17,7 +17,7 @@ tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.14", features = ["xtest"] }
+x11rb = { version = "0.14", features = ["randr", "xtest"] }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

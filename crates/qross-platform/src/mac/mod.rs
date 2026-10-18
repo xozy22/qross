@@ -40,6 +40,14 @@ pub fn screen_bounds() -> Rect {
     Rect::new(left as i32, top as i32, (right - left) as u32, (bottom - top) as u32)
 }
 
+/// `CGDisplayBounds` je aktivem Display, in Punkten wie `screen_bounds()`
+pub fn monitors() -> Vec<Rect> {
+    displays()
+        .iter()
+        .map(|r| Rect::new(r.origin.x as i32, r.origin.y as i32, r.size.width as u32, r.size.height as u32))
+        .collect()
+}
+
 pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> {
     capture::start(events)
 }
