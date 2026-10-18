@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -163,8 +164,12 @@ impl Staging {
     /// werden aufgeräumt.
     pub fn create(base: &Path) -> Result<Arc<Self>> {
         remove_older_than(base, DAY, None);
+        // Zähler dazu: Mehrere Instanzen im selben Prozess (Server und Client, parallele Tests) dürfen
+        // nie denselben Ordner bekommen – sonst löscht die erste beim Beenden die Dateien der anderen.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let root = base.join(format!("{}-{nanos}", std::process::id()));
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = base.join(format!("{}-{nanos}-{n}", std::process::id()));
         fs::create_dir_all(&root).with_context(|| format!("{} anlegen", root.display()))?;
         Ok(Arc::new(Self { root, cancelled: Mutex::new(HashSet::new()), keep: false }))
     }
@@ -520,6 +525,16 @@ mod tests {
         let roots = [base.join("Ordner")];
         assert_eq!(collect_up_to(&roots, 1200).unwrap().map(|e| e.len()), Some(3));
         assert!(collect_up_to(&roots, 1199).unwrap().is_none());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn every_staging_gets_its_own_folder() {
+        let base = std::env::temp_dir().join(format!("qross-staging-unique-{}", std::process::id()));
+        let stagings: Vec<_> = (0..50).map(|_| Staging::create(&base).unwrap()).collect();
+        let roots: HashSet<_> = stagings.iter().map(|s| s.root.clone()).collect();
+        assert_eq!(roots.len(), stagings.len(), "auch bei gleicher Uhrzeit verschiedene Ordner");
+        drop(stagings);
         let _ = fs::remove_dir_all(&base);
     }
 
