@@ -3415,7 +3415,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "qross"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3434,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "qross-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "qross-proto",
  "serde",
@@ -3443,7 +3443,7 @@ dependencies = [
 
 [[package]]
 name = "qross-gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3466,7 +3466,7 @@ dependencies = [
 
 [[package]]
 name = "qross-net"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3488,7 +3488,7 @@ dependencies = [
 
 [[package]]
 name = "qross-platform"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3507,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "qross-proto"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "postcard",
  "serde",

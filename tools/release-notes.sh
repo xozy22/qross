@@ -37,7 +37,10 @@ cat <<'EOF'
 | macOS Apple Silicon | `.dmg` | `…-aarch64-apple-darwin.tar.gz` |
 | Linux x64 | `.AppImage` oder `.deb` | `…-x86_64-unknown-linux-gnu.tar.gz` |
 
-Die Programme sind nicht signiert. Unter Windows zeigt SmartScreen beim ersten Start eine Warnung („Weitere Informationen → Trotzdem ausführen“). Unter macOS beim ersten Start per Rechtsklick → Öffnen starten und danach unter Datenschutz & Sicherheit „Bedienungshilfen“ und „Eingabeüberwachung“ erlauben.
+Die Programme sind nicht von Microsoft bzw. Apple beglaubigt, deshalb fragt das System beim ersten Start nach:
+
+- **Windows:** SmartScreen meldet sich, dann „Weitere Informationen → Trotzdem ausführen“.
+- **macOS:** Qross aus dem DMG in „Programme“ ziehen und öffnen. Meldet macOS, dass es die App nicht überprüfen kann, unter **Systemeinstellungen → Datenschutz & Sicherheit** ganz unten „Dennoch öffnen“ wählen und danach dort „Bedienungshilfen“ und „Eingabeüberwachung“ für Qross erlauben. Alternativ im Terminal: `xattr -dr com.apple.quarantine /Applications/Qross.app`
 
 Prüfsummen: `SHA256SUMS.txt` · Alle Versionen: [CHANGELOG.md](https://github.com/xozy22/qross/blob/main/CHANGELOG.md)
 EOF

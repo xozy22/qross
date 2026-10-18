@@ -110,6 +110,21 @@ jobs:
         working-directory: crates/qross-gui
         run: npx --yes @tauri-apps/cli@2 build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
+      # Ohne gültige Signatur des ganzen App-Pakets meldet macOS nach dem Download „beschädigt“
+      # statt „nicht verifizierter Entwickler“ (das sich in den Einstellungen freigeben lässt).
+      - name: macOS-Signatur prüfen (App und DMG)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          bundle="target/${{ matrix.target }}/release/bundle"
+          codesign --verify --deep --strict --verbose=2 "${bundle}/macos/Qross.app"
+          codesign --display --verbose=2 "${bundle}/macos/Qross.app" 2>&1 | grep -E "^(Identifier|Format|Signature|Sealed Resources)"
+          mount="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "${bundle}"/dmg/*.dmg > /dev/null
+          codesign --verify --deep --strict --verbose=2 "${mount}/Qross.app"
+          spctl --assess --type execute --verbose=2 "${mount}/Qross.app" || true
+          hdiutil detach "$mount" > /dev/null
+
       - name: Artefakte sammeln
         shell: bash
         run: |

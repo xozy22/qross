@@ -66,8 +66,9 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Dateien per Drag & Drop **empfangen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔² |
 
-¹ macOS ist nur per `cargo check` geprüft, weil kein Mac zur Verfügung stand. Qross braucht dort die Rechte
-„Bedienungshilfen“ und „Eingabeüberwachung“.
+¹ macOS wird in der CI auf Apple Silicon gebaut und getestet, auch mit der echten Zwischenablage. Erfassung und
+Einspeisung sind auf einem echten Mac noch nicht geprüft. Qross braucht dort die Rechte „Bedienungshilfen“ und
+„Eingabeüberwachung“.
 ² Die Oberfläche basiert auf Tauri; gebaut und geprüft wurde sie unter Windows.
 
 **Wie geprüft wurde:**
@@ -94,8 +95,18 @@ Fertige Pakete gibt es unter [Releases](https://github.com/xozy22/qross/releases
 | macOS Apple Silicon | `.dmg` | `qross-…-aarch64-apple-darwin.tar.gz` |
 | Linux x64 | `.AppImage` oder `.deb` | `qross-…-x86_64-unknown-linux-gnu.tar.gz` |
 
-Die Programme sind nicht signiert. Unter Windows meldet sich beim ersten Start SmartScreen
-(„Weitere Informationen → Trotzdem ausführen“), unter macOS per Rechtsklick → Öffnen starten.
+Die Programme sind nicht von Microsoft bzw. Apple beglaubigt, deshalb fragt das System beim ersten Start nach:
+
+- **Windows:** SmartScreen meldet sich, dann „Weitere Informationen → Trotzdem ausführen“.
+- **macOS:** Qross aus dem DMG in „Programme“ ziehen und öffnen. macOS meldet, dass es die App nicht
+  überprüfen kann. Dann unter **Systemeinstellungen → Datenschutz & Sicherheit** ganz unten „Dennoch öffnen“
+  wählen. Danach dort „Bedienungshilfen“ und „Eingabeüberwachung“ für Qross erlauben. Alternativ im Terminal:
+
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/Qross.app
+  ```
+
+  Für die Kommandozeile entsprechend `xattr -d com.apple.quarantine qross` im entpackten Ordner.
 
 Was sich in jeder Version geändert hat, steht im [Changelog](CHANGELOG.md) und in der App unter „Neuigkeiten“.
 

@@ -8,6 +8,18 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.3.1] - 2026-10-18
+
+### Behoben
+
+- macOS: Nach dem Download meldete macOS „Qross ist beschädigt und kann nicht geöffnet werden“. Das App-Paket
+  ist jetzt vollständig signiert, macOS fragt stattdessen nach, ob Qross geöffnet werden soll.
+
+### Verbessert
+
+- Die Anleitung für den ersten Start beschreibt den Weg über „Dennoch öffnen“ in den Systemeinstellungen,
+  wie ihn aktuelle macOS-Versionen verlangen.
+
 ## [0.3.0] - 2026-10-18
 
 ### Neu
@@ -95,6 +107,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.3.1]: https://github.com/xozy22/qross/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/xozy22/qross/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/xozy22/qross/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/xozy22/qross/compare/v0.1.2...v0.2.0
