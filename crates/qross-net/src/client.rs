@@ -15,7 +15,7 @@ use qross_platform::{Clipboard, Injector};
 use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
     FileEntry, FrameError, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, Sharing, StreamKind,
-    DEFAULT_PORT, GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SHARING_SINCE, TEXT_SINCE,
+    DEFAULT_PORT, GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SCREEN_SAVER_SINCE, SHARING_SINCE, TEXT_SINCE,
 };
 use quinn::{Connection, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -28,6 +28,7 @@ use crate::game::{self, Detector};
 use crate::progress::{Progress, Transfers};
 use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
+use crate::screensaver;
 use crate::streams::{read_kind, send_drag_message};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
@@ -72,6 +73,8 @@ struct ScreenQuery {
     game: watch::Receiver<GameState>,
     /// Das Einspeisen kann Zeichen eingeben (Zeichenmodus)
     types_text: bool,
+    /// Das Einspeisen kann den Bildschirmschoner starten und beenden
+    follows_saver: bool,
 }
 
 /// Fehler, bei denen eine Wiederverbindung sinnlos ist.
@@ -99,6 +102,8 @@ enum FromServer {
     DragQuery { probe: u32 },
     /// Was der Server mit diesem Rechner teilt (seit Qross 0.7)
     Sharing(Sharing),
+    /// Bildschirmschoner des Servers begonnen bzw. beendet (seit Qross 0.8)
+    ScreenSaver { active: bool, lock: bool },
 }
 
 /// Zwischenablage dieses Clients: Zugriff, ankommende kopierte Dateien, Meldungen dazu.
@@ -117,6 +122,8 @@ enum ToInjector {
     DropFolder { x: i32, y: i32, reply: oneshot::Sender<Option<PathBuf>> },
     /// Gezogene Dateien übernehmen (der lokale Drag wird dabei abgebrochen)
     TakeDragged { x: i32, y: i32, reply: oneshot::Sender<Vec<PathBuf>> },
+    /// Dem Bildschirmschoner des Servers folgen
+    ScreenSaver { active: bool, lock: bool },
 }
 
 fn inject_all(inject: &Sender<ToInjector>, events: impl IntoIterator<Item = Inject>) {
@@ -214,8 +221,8 @@ async fn run_inner(
     transfers: Transfers,
 ) -> Result<()> {
     let ClientPlatform { mut injector, clipboard, screen, monitors, game } = platform;
-    let types_text = injector.types_text();
-    let screen = ScreenQuery { bounds: screen, monitors, game: game::watch(game), types_text };
+    let (types_text, follows_saver) = (injector.types_text(), injector.follows_screen_saver());
+    let screen = ScreenQuery { bounds: screen, monitors, game: game::watch(game), types_text, follows_saver };
     let _progress = {
         let notices = notices.cloned();
         transfers.spawn_reporter(move |progress| {
@@ -262,6 +269,9 @@ async fn run_inner(
                 }
                 ToInjector::TakeDragged { x, y, reply } => {
                     let _ = reply.send(injector.take_dragged_files(x, y));
+                }
+                ToInjector::ScreenSaver { active, lock } => {
+                    screensaver::report(active, &injector.screen_saver(active, lock));
                 }
             }
         }
@@ -335,6 +345,10 @@ async fn session(
     // unbekannten Nachrichten. Ohne diese Meldung bleibt es bei Tastenpositionen.
     if server_version >= TEXT_SINCE && screen.types_text {
         write_frame(&mut control, &Control::TypesText).await?;
+    }
+    // Ebenso den Bildschirmschoner: Nur wer sich meldet, bekommt `Control::ScreenSaver`.
+    if server_version >= SCREEN_SAVER_SINCE && screen.follows_saver {
+        write_frame(&mut control, &Control::FollowsScreenSaver).await?;
     }
     // Die einzelnen Monitore nur an Server, die sie kennen: ältere trennen bei unbekannten Nachrichten.
     let report_monitors = server_version >= MONITORS_SINCE;
@@ -506,6 +520,10 @@ async fn session(
                         sharing = now;
                         notify(notices, ClientNotice::Sharing(now));
                     }
+                    // Im Einspeise-Thread: Start und Ende dürfen dort kurz warten.
+                    FromServer::ScreenSaver { active, lock } => {
+                        let _ = inject.send(ToInjector::ScreenSaver { active, lock });
+                    }
                 },
                 _ = screen_poll.tick() => {
                     let now = (screen.bounds)();
@@ -617,12 +635,16 @@ async fn resolve(server: &str) -> Result<SocketAddr> {
         .with_context(|| format!("„{server}“ hat keine Adresse"))
 }
 
-/// Was der Server nach dem `Welcome` auf dem Control-Stream schickt (seit Qross 0.7: die Rechte).
+/// Was der Server nach dem `Welcome` auf dem Control-Stream schickt (seit Qross 0.7: die Rechte, seit
+/// 0.8 den Bildschirmschoner).
 async fn receive_control(mut control: RecvStream, tx: mpsc::UnboundedSender<FromServer>) {
     loop {
         match read_frame::<_, Control>(&mut control).await {
             Ok(Some(Control::Sharing(sharing))) => {
                 let _ = tx.send(FromServer::Sharing(sharing));
+            }
+            Ok(Some(Control::ScreenSaver { active, lock })) => {
+                let _ = tx.send(FromServer::ScreenSaver { active, lock });
             }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht vom Server"),
             // Von einer neueren Version: überspringen, der Frame ist gelesen

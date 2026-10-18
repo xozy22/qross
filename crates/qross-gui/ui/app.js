@@ -1624,6 +1624,7 @@ function renderSettings() {
   $("#prefResume").checked = state.settings.resume_role;
   $("#prefAutoUpdate").checked = state.settings.auto_update;
   $("#prefGameMode").checked = state.settings.game_mode;
+  renderSaver();
   $("#prefKeepSecrets").checked = !state.settings.clipboard_share_concealed;
   $("#aboutVersion").textContent = state.version;
   $("#aboutDataDir").textContent = prefs.data_dir;
@@ -1734,6 +1735,17 @@ function hotkeyLabel(text) {
 function machinesForRemap() {
   const server = state.settings.server;
   return server.screens.map((s) => s.name).filter((n) => n !== server.name).sort((a, b) => a.localeCompare(b, "de"));
+}
+
+/** Bereich „Bildschirmschoner“: wirkt nur als Server; Mitsperren nur mit Abgleich */
+function renderSaver() {
+  const { screensaver_sync: sync, screensaver_lock_clients: lock } = state.settings;
+  $("#saverClientNote").hidden = state.settings.role !== "client";
+  $("#prefSaverSync").checked = sync;
+  const lockBox = $("#prefSaverLock");
+  lockBox.checked = sync && lock;
+  lockBox.disabled = !sync;
+  lockBox.closest(".setting").classList.toggle("disabled", !sync);
 }
 
 function renderKeys() {
@@ -2197,6 +2209,17 @@ function setupSettings() {
   });
   $("#prefGameMode").addEventListener("change", (e) => {
     state.settings.game_mode = e.target.checked;
+    saveSoon.flush();
+  });
+  $("#prefSaverSync").addEventListener("change", (e) => {
+    state.settings.screensaver_sync = e.target.checked;
+    renderSaver();
+    updatePreview();
+    saveSoon.flush();
+  });
+  $("#prefSaverLock").addEventListener("change", (e) => {
+    state.settings.screensaver_lock_clients = e.target.checked;
+    updatePreview();
     saveSoon.flush();
   });
   $("#prefKeepSecrets").addEventListener("change", (e) => {

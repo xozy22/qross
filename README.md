@@ -77,6 +77,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Spielemodus: bei Vollbild festhalten, relative Mausbewegung für Spiele | ✔ Vollbild, eingefangener Zeiger | ✔ Vollbild | – | ✔ Vollbild¹ |
 | Dateiübertragungen: Fortschritt, Rate und Restzeit, Abbrechen auf beiden Seiten | ✔ | ✔ | ✔ | ✔¹ |
 | Rechte je Rechner: Zwischenablage, kopierte Dateien, Drag & Drop je Richtung erlauben oder sperren | ✔ | ✔ | ✔ | ✔¹ |
+| Bildschirmschoner abgleichen: startet und endet mit dem des Servers, auf Wunsch Clients mitsperren⁶ | ✔ | ✔ über den Dienst des Desktops, sonst den X-Server | ✔ über den Dienst des Desktops | ✔¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
 | Profile je Ort, automatisch nach Netzwerk (Gateway, ohne Zusatzrechte)⁴ | ✔ mit Netzwerkname | ✔, Name über NetworkManager | ✔ wie X11 | ✔ ohne WLAN-Namen¹ |
 | [Autostart](docs/autostart.md) bei der Anmeldung, unsichtbar im Tray⁵ | ✔ `HKCU\…\Run` | ✔ XDG-Autostart | ✔ XDG-Autostart | ✔ LaunchAgent¹ |
@@ -102,6 +103,19 @@ geprüft.
 wird. Die CI schreibt, prüft und entfernt auf allen drei Systemen einen echten Eintrag, unter Windows auch
 lokal geprüft; den Start bei der Anmeldung selbst prüft kein Test. Ohne Oberfläche: `qross` als
 systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autostart.md).
+⁶ Startet ein Client seinen Bildschirmschoner über Qross, gilt dort dasselbe wie nach Ablauf seiner eigenen
+Wartezeit: **Verlangt er danach ein Passwort, ist er gesperrt** – Windows mit „Anmeldeseite bei
+Reaktivierung“, macOS mit „Passwort erforderlich“ (bei „Sofort“ gleich, sonst nach der eingestellten Zeit),
+GNOME mit automatischer Bildschirmsperre, KDE immer (dort ist der Bildschirmschoner die Sperre). Entsperren
+musst du ihn dann **an seiner eigenen Tastatur**; Qross kann nicht in den Sperrbildschirm tippen. Das gilt
+erst recht mit „Clients mitsperren“. Ohne eingerichteten Bildschirmschoner (Windows „(Kein)“, macOS „Nie“,
+GNOME „Bildschirm abschalten: Nie“, KDE ohne automatische Sperre) oder während dort ein Video den Bildschirm
+wach hält, passiert auf dem Client nichts, auch keine Sperre. In einer Windows-Remotedesktop-Sitzung startet
+Windows keinen Bildschirmschoner, Qross versucht es dort nicht. Geprüft: Logik, Protokoll und ältere
+Gegenstellen im Test; unter Windows echt das Erkennen und „keiner eingerichtet“, Starten und Beenden nur bis zur
+Systemschnittstelle (der Testrechner lief per Remotedesktop). Ob ein Client sich sperrt, folgt aus dem
+Verhalten der Systeme, auf echter Hardware ist es noch nicht geprüft; macOS ist nur übersetzt, Linux nur gegen
+Xvfb getestet.
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
@@ -110,7 +124,9 @@ systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autost
   Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5,
   Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Rechte je Rechner für jede
   Art und Richtung samt sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene
-  vertrauliche Inhalte, Ablehnung unbekannter Clients, LAN-Suche).
+  vertrauliche Inhalte, Bildschirmschoner samt Ende durch Eingaben für einen Client, Sperren und
+  Gegenstellen aus 0.7,
+  Ablehnung unbekannter Clients, LAN-Suche).
 - Windows-Tastaturlayouts: echter Test mit dem deutschen und dem US-Layout (AltGr, tote Tasten, Kürzel), soweit
   sie auf dem Rechner eingerichtet sind.
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
@@ -148,6 +164,10 @@ systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autost
   tippst, auch bei anderem Layout (z. B. Server Deutsch, Mac US): Y und Z, Umlaute, @, €, Klammern, ^ und ´.
   Kürzel wie Strg+Z gehen nach dem Zeichen, Pfeile, F-Tasten und Co. bleiben Tasten. Für Spiele die
   Tastenposition lassen. Clients mit älterem Qross oder unter Wayland bekommen weiter Tastenpositionen.
+- **Bildschirmschoner** (Einstellungen → Bildschirmschoner bzw. `[screensaver]`, Standard an): Startet er auf
+  dem Server, starten ihn auch die Clients; bewegst du dort die Maus, enden alle. Der Cursor bleibt dabei, wo
+  er ist, auch auf einem Client. „Clients mitsperren“ (Standard aus) sperrt die Clients stattdessen. **Ein gesperrter Client wird an seiner eigenen Tastatur entsperrt**, siehe ⁶.
+  Clients ab Qross 0.8; ältere laufen unverändert weiter.
 
 ## Download
 

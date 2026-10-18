@@ -9,6 +9,7 @@ pub mod keymap_linux;
 pub mod keymap_mac;
 pub mod keymap_windows;
 pub mod network;
+pub mod screensaver;
 pub mod wayland_logic;
 
 #[cfg(windows)]
@@ -68,6 +69,14 @@ pub trait Capture: Send + Sync {
     fn drop_folder(&self, _x: i32, _y: i32) -> Option<PathBuf> {
         None
     }
+    /// Läuft hier gerade der Bildschirmschoner? Der Server fragt das regelmäßig, wenn er ihn mit den
+    /// Clients abgleicht. Die Erfassungen der Systeme fragen [`screensaver::running`]; ohne: nie.
+    fn screen_saver_active(&self) -> bool {
+        false
+    }
+    /// Den Bildschirmschoner hier beenden, ohne zu warten: Die Eingaben gehen gerade an einen Client
+    /// und erreichen ihn nicht (siehe [`screensaver::stop_in_background`]).
+    fn stop_screen_saver(&self) {}
 }
 
 pub trait Injector: Send {
@@ -87,6 +96,17 @@ pub trait Injector: Send {
     /// Drag abgebrochen und die Pfade geliefert – die Dateien wandern zum Server. Leer: kein Datei-Drag.
     fn take_dragged_files(&mut self, _x: i32, _y: i32) -> Vec<PathBuf> {
         Vec::new()
+    }
+    /// Kann dieser Rechner seinen Bildschirmschoner auf Zuruf starten und beenden? Nur dann meldet der
+    /// Client das dem Server, und der gleicht ihn mit seinem eigenen ab.
+    fn follows_screen_saver(&self) -> bool {
+        false
+    }
+    /// Der Bildschirmschoner des Servers hat begonnen (`active`) bzw. geendet: hier ebenso, mit
+    /// `lock` beim Beginn stattdessen sperren (siehe [`screensaver::follow`]).
+    fn screen_saver(&mut self, active: bool, lock: bool) -> screensaver::Outcome {
+        let _ = (active, lock);
+        screensaver::Outcome::Unsupported("diese Einspeisung kann es nicht")
     }
 }
 

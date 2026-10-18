@@ -33,6 +33,8 @@ pub enum ServerEvent {
     ClientGame { name: String, game: GameState },
     /// Der Client kann Zeichen eingeben (`Control::TypesText`, seit Qross 0.7)
     ClientTypesText { name: String },
+    /// Der Bildschirmschoner des Servers hat begonnen bzw. geendet (nur, wenn er abgeglichen wird)
+    LocalScreenSaver(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +67,12 @@ pub enum Action {
     CancelIncoming { transfer: u64 },
     /// Als Datagramm senden: relative Bewegung statt Position (Spielemodus)
     MoveBy { to: String, delta: MouseDelta },
+    /// Allen Clients, die ihm folgen können, den Bildschirmschoner des Servers melden: Sie starten
+    /// bzw. beenden ihren eigenen; mit `lock` sperren sie sich beim Start stattdessen.
+    ScreenSaver { active: bool, lock: bool },
+    /// Den Bildschirmschoner des Servers beenden: Jemand ist zurück, aber seine Eingaben gehen gerade
+    /// an einen Client und erreichen den Bildschirmschoner hier nicht.
+    StopLocalScreenSaver,
 }
 
 /// Warum der Cursor gerade auf seinem Bildschirm bleibt
@@ -157,6 +165,12 @@ pub struct ServerState {
     incoming: Option<u64>,
     /// Rechte je Rechner; hier zählt nur Drag & Drop (Zwischenablage und Dateien prüft die Netzschicht)
     sharing: SharingRules,
+    /// Clients sperren sich, wenn der Bildschirmschoner des Servers beginnt
+    lock_clients: bool,
+    /// Der Bildschirmschoner des Servers läuft (nur, wenn er abgeglichen wird)
+    saver_running: bool,
+    /// Ihn zu beenden ist schon veranlasst
+    saver_waking: bool,
 }
 
 impl ServerState {
@@ -189,7 +203,16 @@ impl ServerState {
             remote_probe_failed: false,
             incoming: None,
             sharing: SharingRules::default(),
+            lock_clients: false,
+            saver_running: false,
+            saver_waking: false,
         }
+    }
+
+    /// Bildschirmschoner abgleichen: Clients sperren sich, sobald er beginnt (Standard: nein, sie
+    /// starten nur ihren eigenen).
+    pub fn set_lock_clients(&mut self, lock: bool) {
+        self.lock_clients = lock;
     }
 
     /// Rechte je Rechner (Standard: alles erlaubt). Gilt ab dem nächsten Ereignis: Wohin Drag &
@@ -291,7 +314,10 @@ impl ServerState {
     pub fn handle_at(&mut self, event: ServerEvent, now: Instant) -> Vec<Action> {
         let mut out = Vec::new();
         match event {
-            ServerEvent::Capture(c) => self.on_capture(c, now, &mut out),
+            ServerEvent::Capture(c) => {
+                self.wake_screen_saver(&mut out);
+                self.on_capture(c, now, &mut out)
+            }
             ServerEvent::ClientConnected { name, screen } => {
                 self.clients.insert(name, Screen::new(screen));
             }
@@ -335,8 +361,27 @@ impl ServerState {
                     }
                 }
             }
+            ServerEvent::LocalScreenSaver(active) => self.on_screen_saver(active, &mut out),
         }
         out
+    }
+
+    /// Bildschirmschoner des Servers: Beginnt er, starten die Clients ihren, endet er, beenden sie
+    /// ihn. Der Cursor bleibt dabei, wo er ist; jede Bewegung des Zeigers würde ihn sofort beenden.
+    fn on_screen_saver(&mut self, active: bool, out: &mut Vec<Action>) {
+        self.saver_running = active;
+        self.saver_waking = false;
+        out.push(Action::ScreenSaver { active, lock: active && self.lock_clients });
+    }
+
+    /// Eine Eingabe am Server, während der Bildschirmschoner läuft: Steht der Cursor auf einem
+    /// Client, fängt der Server sie ab, und sie erreicht den Bildschirmschoner nicht. Dann beendet
+    /// der Server ihn selbst (einmal; sein Ende melden die Clients wie sonst auch).
+    fn wake_screen_saver(&mut self, out: &mut Vec<Action>) {
+        if self.saver_running && !self.saver_waking && self.active != Active::Local {
+            self.saver_waking = true;
+            out.push(Action::StopLocalScreenSaver);
+        }
     }
 
     fn on_remote_offer(&mut self, client: String, probe: u32, transfer: u64, has_files: bool, out: &mut Vec<Action>) {
@@ -1517,6 +1562,58 @@ mod tests {
         s.handle(switch_to("pc"));
         // Die Mitte der Gesamtfläche liegt auf dem externen Monitor
         assert!(s.handle(switch_to("mac")).contains(&enter_mac(2, 2628, 500)));
+    }
+
+    fn saver(active: bool) -> ServerEvent {
+        ServerEvent::LocalScreenSaver(active)
+    }
+
+    #[test]
+    fn screen_saver_on_the_server_reaches_the_clients() {
+        let mut s = state();
+        assert_eq!(s.handle(saver(true)), vec![Action::ScreenSaver { active: true, lock: false }]);
+        assert_eq!(s.handle(saver(false)), vec![Action::ScreenSaver { active: false, lock: false }]);
+        assert_eq!(s.active_screen(), "pc");
+        // Mitsperren gilt nur für den Beginn
+        s.set_lock_clients(true);
+        assert_eq!(s.handle(saver(true)), vec![Action::ScreenSaver { active: true, lock: true }]);
+        assert_eq!(s.handle(saver(false)), vec![Action::ScreenSaver { active: false, lock: false }]);
+    }
+
+    #[test]
+    fn screen_saver_leaves_the_cursor_where_it_is() {
+        let mut s = state();
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        // Keine Bewegung des Zeigers: Die würde ihn sofort wieder beenden.
+        assert_eq!(s.handle(saver(true)), vec![Action::ScreenSaver { active: true, lock: false }]);
+        assert_eq!(s.active_screen(), "laptop");
+        assert_eq!(s.handle(saver(false)), vec![Action::ScreenSaver { active: false, lock: false }]);
+        assert_eq!(s.active_screen(), "laptop");
+    }
+
+    #[test]
+    fn input_for_a_client_ends_the_screen_saver_of_the_server() {
+        let mut s = state();
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        s.handle(saver(true));
+        // Die erste abgefangene Eingabe beendet ihn, sie selbst geht weiter an den Laptop.
+        assert_eq!(s.handle(delta(5, 0)), vec![Action::StopLocalScreenSaver, move_laptop(1, 6, 399)]);
+        assert_eq!(s.handle(delta(5, 0)), vec![move_laptop(2, 11, 399)], "nur einmal");
+        assert_eq!(s.handle(saver(false)), vec![Action::ScreenSaver { active: false, lock: false }]);
+        assert_eq!(s.handle(delta(5, 0)), vec![move_laptop(3, 16, 399)]);
+
+        // Beginnt er erneut, gilt das wieder, auch für Tasten
+        s.handle(saver(true));
+        let key = ServerEvent::Capture(CaptureEvent::Key { key: KeyCode::A, down: true });
+        assert_eq!(s.handle(key)[0], Action::StopLocalScreenSaver);
+    }
+
+    #[test]
+    fn input_on_the_server_itself_reaches_its_screen_saver() {
+        // Steht der Cursor auf dem Server, beendet die Eingabe ihn wie ohne Qross.
+        let mut s = state();
+        s.handle(saver(true));
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).iter().all(|a| *a != Action::StopLocalScreenSaver));
     }
 
     #[test]

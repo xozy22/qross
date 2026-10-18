@@ -62,6 +62,11 @@ pub struct Settings {
     /// Spielemodus: Als Server bei Vollbild auf dem Rechner mit dem Cursor festhalten, als Client
     /// dem Server melden, dass hier etwas im Vollbild läuft.
     pub game_mode: bool,
+    /// Bildschirmschoner abgleichen (wirkt als Server): Startet er hier, starten ihn auch die
+    /// Clients; endet er, beenden sie ihn.
+    pub screensaver_sync: bool,
+    /// Als Server: Clients sperren sich, wenn der Bildschirmschoner hier beginnt (Standard: nein)
+    pub screensaver_lock_clients: bool,
     /// Profil, zu dem Rolle, Server- und Client-Werte gehören (siehe [`profiles`]); leer bei
     /// Einstellungen aus einer Version ohne Profile
     pub profile: String,
@@ -145,6 +150,8 @@ impl Settings {
             resume_role: true,
             auto_update: true,
             game_mode: true,
+            screensaver_sync: true,
+            screensaver_lock_clients: false,
             profile: String::new(),
         }
     }
@@ -158,6 +165,10 @@ impl Settings {
     pub fn server_toml(&self) -> String {
         self.server.to_toml(self.clipboard_files_mb, self.clipboard_share_concealed)
             + &format!("\n[game]\nenabled = {}\n", self.game_mode)
+            + &format!(
+                "\n[screensaver]\nsync = {}\nlock_clients = {}\n",
+                self.screensaver_sync, self.screensaver_lock_clients
+            )
     }
 
     /// Lädt `gui.json` aus `dir`; `None`, wenn es die Datei noch nicht gibt.
@@ -529,6 +540,21 @@ mod tests {
     }
 
     #[test]
+    fn exported_toml_carries_the_screen_saver() {
+        let mut settings = Settings::for_host("pc");
+        let section = |s: &Settings| {
+            let file: toml::Table = toml::from_str(&s.server_toml()).unwrap();
+            let saver = &file["screensaver"];
+            (saver["sync"].as_bool().unwrap(), saver["lock_clients"].as_bool().unwrap())
+        };
+        assert_eq!(section(&settings), (true, false));
+        settings.screensaver_lock_clients = true;
+        assert_eq!(section(&settings), (true, true));
+        settings.screensaver_sync = false;
+        assert!(!section(&settings).0);
+    }
+
+    #[test]
     fn every_client_in_the_layout_gets_its_own_rights() {
         // Eine gui.json aus 0.6 kennt keine Rechte: Alles bleibt erlaubt, nichts landet in der Datei.
         let dir = std::env::temp_dir().join(format!("qross-gui-rechte-{}", std::process::id()));
@@ -619,6 +645,8 @@ mod tests {
         assert!(!old.clipboard_share_concealed);
         // … und Fortsetzen, automatische Updates und der Spielemodus sind an
         assert!(old.resume_role && old.auto_update && old.game_mode);
+        // … und der Bildschirmschoner wird abgeglichen, ohne Clients zu sperren
+        assert!(old.screensaver_sync && !old.screensaver_lock_clients);
         // … und die Tasten-Standards des Servers (Rollen, Medientasten an den aktiven Rechner)
         assert_eq!(old.server.keys, crate::keys::KeySettings::default());
         assert_eq!(old.server.keys.config().unwrap(), qross_core::keys::KeyConfig::default());

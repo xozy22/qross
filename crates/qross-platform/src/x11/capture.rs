@@ -133,6 +133,14 @@ fn blank_cursor(conn: &RustConnection, root: Window) -> Result<Cursor> {
 struct X11Capture(Arc<Shared>);
 
 impl Capture for X11Capture {
+    fn screen_saver_active(&self) -> bool {
+        crate::screensaver::running()
+    }
+
+    fn stop_screen_saver(&self) {
+        crate::screensaver::stop_in_background();
+    }
+
     fn set_key_options(&self, options: KeyOptions) {
         let s = &self.0;
         let mut grabbed = s.grabbed.lock().unwrap_or_else(|e| e.into_inner());

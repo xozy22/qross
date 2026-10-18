@@ -34,6 +34,26 @@ pub struct ServerFile {
     pub game: GameSection,
     #[serde(default)]
     pub sharing: SharingSection,
+    #[serde(default)]
+    pub screensaver: ScreenSaverSection,
+}
+
+/// Abschnitt `[screensaver]`: den Bildschirmschoner mit den Clients abgleichen.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenSaverSection {
+    /// Beginnt er hier, starten die Clients ihren; endet er, beenden sie ihn.
+    #[serde(default = "yes")]
+    pub sync: bool,
+    /// Beim Beginn sperren sich die Clients stattdessen (entsperrt wird an ihrer eigenen Tastatur).
+    #[serde(default)]
+    pub lock_clients: bool,
+}
+
+impl Default for ScreenSaverSection {
+    fn default() -> Self {
+        Self { sync: true, lock_clients: false }
+    }
 }
 
 /// Abschnitt `[sharing]`: Rechte je Rechner. Die Werte direkt darunter gelten für jeden Rechner,
@@ -255,6 +275,17 @@ mod tests {
         assert_eq!(keys.options.media, MediaKeys::Active);
         assert_eq!(keys.remap["laptop"].len(), 1, "Beispiel: Alt und Windows-Taste am Mac");
         assert!(file.game.enabled);
+    }
+
+    #[test]
+    fn screen_saver_is_synced_without_locking_unless_configured() {
+        let file: ServerFile = toml::from_str("").unwrap();
+        assert!(file.screensaver.sync && !file.screensaver.lock_clients);
+        let file: ServerFile = toml::from_str("[screensaver]\nlock_clients = true").unwrap();
+        assert!(file.screensaver.sync && file.screensaver.lock_clients);
+        let file: ServerFile = toml::from_str("[screensaver]\nsync = false").unwrap();
+        assert!(!file.screensaver.sync);
+        assert!(toml::from_str::<ServerFile>("[screensaver]\nlock = true").is_err(), "Tippfehler fallen auf");
     }
 
     #[test]

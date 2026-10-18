@@ -10,6 +10,23 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 
 ## [Unreleased]
 
+### Neu
+
+- **Bildschirmschoner abgleichen, wie bei Synergy:** Startet auf dem Server der Bildschirmschoner, starten ihn
+  auch die verbundenen Clients; bewegst du am Server die Maus oder drückst eine Taste, enden alle, auch wenn
+  der Cursor gerade auf einem Client steht. Er bleibt dabei, wo er ist. Clients ohne eingerichteten
+  Bildschirmschoner oder mit laufendem Video bleiben, wie sie sind. Standard an, einstellbar
+  unter Einstellungen → Bildschirmschoner bzw. mit `[screensaver]` in `qross.toml`.
+- **Clients mitsperren** (Standard aus): Beginnt der Bildschirmschoner des Servers, sperren sich die Clients,
+  statt nur ihren eigenen zu starten.
+
+### Wichtig
+
+- Verlangt ein Client nach seinem Bildschirmschoner ein Passwort, oder ist „Clients mitsperren“ an, ist er
+  danach gesperrt. Entsperren musst du ihn an seiner eigenen Tastatur: Qross kann nicht in den Sperrbildschirm
+  tippen. Unter KDE ist der Bildschirmschoner immer die Sperre.
+- Dem Bildschirmschoner folgen Clients ab dieser Version. Ältere Clients bleiben verbunden und unverändert.
+
 ### Verbessert
 
 - **Einstellungen mit Bereichen:** Allgemein, Profile, Tastatur, Spielemodus, Updates, Zwischenablage und Info

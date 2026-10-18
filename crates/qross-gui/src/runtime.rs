@@ -472,6 +472,7 @@ impl Runtime {
             .with_share_concealed(settings.clipboard_share_concealed)
             .with_keys(keys)
             .with_game_mode(settings.game_mode)
+            .with_screen_saver(settings.screensaver_sync, settings.screensaver_lock_clients)
             .with_sharing(s.effective_sharing());
         let (stop, sharing) = (server.stop_handle(), server.sharing());
         *self.transfers.lock().unwrap() = Some(server.transfers());

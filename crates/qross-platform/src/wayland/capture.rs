@@ -60,6 +60,14 @@ struct WaylandCapture {
 }
 
 impl Capture for WaylandCapture {
+    fn screen_saver_active(&self) -> bool {
+        crate::screensaver::running()
+    }
+
+    fn stop_screen_saver(&self) {
+        crate::screensaver::stop_in_background();
+    }
+
     fn capture_remote(&self) {
         let _ = self.tx.send(Command::Remote);
     }

@@ -2,7 +2,7 @@
 //!
 //! Kanäle einer QUIC-Verbindung:
 //! - **Control** (bidirektionaler Stream, vom Client geöffnet): Hello/Welcome, Bildschirmänderungen,
-//!   Rechte je Rechner
+//!   Rechte je Rechner, Bildschirmschoner
 //! - **Input** (unidirektionaler Stream Server → Client): Tasten, Maustasten, Rad, Enter/Leave
 //! - **Datagramme** (Server → Client): Mausposition bzw. im Spielemodus Mausbewegung,
 //!   unzuverlässig, die neueste gewinnt
@@ -31,7 +31,9 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// - 6: `Control::TypesText`, `Input::Text` und `Input::Shortcut`: Zeichen statt Tastenposition
 ///   (seit Qross 0.7)
 /// - 7: `Control::Sharing`, Rechte je Rechner (seit Qross 0.7)
-pub const SERVER_VERSION: u16 = 7;
+/// - 11: `Control::FollowsScreenSaver` und `Control::ScreenSaver`, Bildschirmschoner abgleichen
+///   (seit Qross 0.8)
+pub const SERVER_VERSION: u16 = 11;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
 /// die Verbindung bei unbekannten Control-Nachrichten.
 pub const MONITORS_SINCE: u16 = 4;
@@ -44,6 +46,9 @@ pub const TEXT_SINCE: u16 = 6;
 /// Ab dieser `Welcome`-Version schickt der Server `Control::Sharing`: nach dem `Welcome` und bei
 /// jeder Änderung der Rechte.
 pub const SHARING_SINCE: u16 = 7;
+/// Ab dieser `Welcome`-Version darf der Client `Control::FollowsScreenSaver` senden. Nur wer das
+/// gesendet hat, bekommt `Control::ScreenSaver`.
+pub const SCREEN_SAVER_SINCE: u16 = 11;
 /// Höchstzahl Monitore, die der Server aus `Control::Monitors` übernimmt
 pub const MAX_MONITORS: usize = 16;
 /// ALPN-Kennung im TLS-Handshake
@@ -119,6 +124,13 @@ pub enum Control {
     /// und versucht Verbotenes gar nicht erst; durchgesetzt wird es ohnehin auf dem Server, auch
     /// gegenüber älteren Clients, die die Nachricht nie lesen.
     Sharing(Sharing),
+    /// Client → Server (seit Qross 0.8, nur ab `SCREEN_SAVER_SINCE`): Der Client kann seinen
+    /// Bildschirmschoner auf Zuruf starten und beenden. Folgt direkt auf das `Welcome`.
+    FollowsScreenSaver,
+    /// Server → Client (seit Qross 0.8, nur an Clients, die `FollowsScreenSaver` gemeldet haben):
+    /// Der Bildschirmschoner des Servers hat begonnen (`active`) bzw. geendet. Der Client startet
+    /// bzw. beendet daraufhin seinen eigenen. Mit `lock` (nur beim Beginn) sperrt er sich stattdessen.
+    ScreenSaver { active: bool, lock: bool },
 }
 
 /// Rechte je Rechner: In welche Richtung eine Art von Inhalten zwischen Server und Client wandern
@@ -565,5 +577,43 @@ mod tests {
         }
         let emoji = Input::Text { key: KeyCode(0x08), text: "é😀".into() };
         assert_eq!(postcard::from_bytes::<Input>(&postcard::to_stdvec(&emoji).unwrap()).unwrap(), emoji);
+    }
+
+    /// So sah `Control` in Qross 0.7 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ControlV07 {
+        Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+        Welcome { version: u16, server_name: String, platform: Platform },
+        Reject { reason: String },
+        ScreenChanged(ScreenInfo),
+        Monitors(Vec<Rect>),
+        Game(GameState),
+        TypesText,
+        Sharing(Sharing),
+    }
+
+    #[test]
+    fn screen_saver_reaches_only_peers_that_understand_it() {
+        // Ein Server aus 0.7 meldet Version 7: Der Client schickt ihm kein `FollowsScreenSaver`,
+        // das er nicht lesen könnte (er würde trennen).
+        const { assert!(SHARING_SINCE < SCREEN_SAVER_SINCE && SCREEN_SAVER_SINCE <= SERVER_VERSION) };
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV07>(&bytes).unwrap(), ControlV07::Welcome { version: SERVER_VERSION, .. }));
+        let bytes = postcard::to_stdvec(&Control::FollowsScreenSaver).unwrap();
+        assert!(postcard::from_bytes::<ControlV07>(&bytes).is_err(), "ein Server aus 0.7 kann die Meldung nicht lesen");
+        assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), Control::FollowsScreenSaver);
+
+        // Ein Client aus 0.7 überspringt, was er nicht lesen kann; er bekommt die Nachricht aber
+        // ohnehin nie, denn er meldet sich nicht dafür.
+        for msg in [Control::ScreenSaver { active: true, lock: false }, Control::ScreenSaver { active: false, lock: false }] {
+            let bytes = postcard::to_stdvec(&msg).unwrap();
+            assert!(postcard::from_bytes::<ControlV07>(&bytes).is_err(), "{msg:?}");
+            assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), msg);
+            assert!(bytes.len() <= 3, "{} Bytes", bytes.len());
+        }
+        // Rechte liest ein Client aus 0.7 weiter wie bisher
+        let bytes = postcard::to_stdvec(&Control::Sharing(Sharing::ALL)).unwrap();
+        assert_eq!(postcard::from_bytes::<ControlV07>(&bytes).unwrap(), ControlV07::Sharing(Sharing::ALL));
     }
 }

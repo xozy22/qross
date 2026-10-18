@@ -15,6 +15,7 @@ pub mod game;
 mod identity;
 pub mod progress;
 pub mod quality;
+pub mod screensaver;
 pub mod server;
 mod rights;
 mod streams;

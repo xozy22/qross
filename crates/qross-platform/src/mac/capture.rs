@@ -317,6 +317,14 @@ fn set_detached(detached: bool) {
 struct MacCapture(Arc<Shared>);
 
 impl Capture for MacCapture {
+    fn screen_saver_active(&self) -> bool {
+        crate::screensaver::running()
+    }
+
+    fn stop_screen_saver(&self) {
+        crate::screensaver::stop_in_background();
+    }
+
     fn set_key_options(&self, options: KeyOptions) {
         *self.0.keys.lock().unwrap_or_else(|e| e.into_inner()) = options;
     }

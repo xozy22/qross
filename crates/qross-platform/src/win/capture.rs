@@ -172,6 +172,14 @@ struct WinCapture {
 }
 
 impl Capture for WinCapture {
+    fn screen_saver_active(&self) -> bool {
+        crate::screensaver::running()
+    }
+
+    fn stop_screen_saver(&self) {
+        crate::screensaver::stop_in_background();
+    }
+
     fn set_key_options(&self, options: KeyOptions) {
         if let Some(shared) = SHARED.get() {
             *shared.keys.lock().unwrap_or_else(|e| e.into_inner()) = options;

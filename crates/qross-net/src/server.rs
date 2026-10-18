@@ -27,6 +27,7 @@ use crate::game::{self, Detector};
 use crate::progress::{Direction, Kind, Progress, Transfers};
 use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
+use crate::screensaver;
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
 use crate::tls::{peer_fingerprint, server_config};
@@ -72,6 +73,9 @@ pub struct Server {
     transfers: Transfers,
     /// Rechte je Rechner, auch während des Laufs änderbar
     sharing: SharingHandle,
+    /// Bildschirmschoner mit den Clients abgleichen; mit `lock_clients` sperren sie sich stattdessen
+    screen_saver: bool,
+    lock_clients: bool,
 }
 
 /// Ändert die Rechte je Rechner eines laufenden Servers (siehe [`Server::sharing`]). Sie gelten
@@ -163,6 +167,7 @@ enum NetEvent {
     Monitors { name: String, id: usize, monitors: Vec<Rect> },
     Game { name: String, id: usize, game: GameState },
     TypesText { name: String, id: usize },
+    FollowsScreenSaver { name: String, id: usize },
     Clipboard { name: String, id: usize, data: ClipboardData },
     ClipboardFiles { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     ClipboardFile { name: String, id: usize, outcome: FileOutcome },
@@ -172,10 +177,12 @@ enum NetEvent {
     Closed { name: String, id: usize },
 }
 
-/// Angenommen: Name des Servers fürs `Welcome` und die Rechte des Clients, die sich mit den Regeln ändern
+/// Angenommen: Name des Servers fürs `Welcome`, die Rechte des Clients, die sich mit den Regeln
+/// ändern, und weitere Nachrichten an ihn auf dem Control-Stream
 struct Admitted {
     server_name: String,
     sharing: watch::Receiver<Sharing>,
+    control: mpsc::UnboundedReceiver<Control>,
 }
 
 /// Zwischenordner für ankommende Dateien
@@ -203,6 +210,10 @@ struct ClientHandle {
     types_text: bool,
     /// Schon ins Log geschrieben, dass er trotz Zeichenmodus Tastenpositionen bekommt
     told_positions: std::sync::atomic::AtomicBool,
+    /// Nachrichten auf dem Control-Stream nach dem `Welcome` (außer den Rechten)
+    control: mpsc::UnboundedSender<Control>,
+    /// Folgt dem Bildschirmschoner des Servers (`Control::FollowsScreenSaver`)
+    follows_saver: bool,
 }
 
 impl Server {
@@ -224,7 +235,18 @@ impl Server {
             fingerprint: identity.fingerprint(),
             transfers: Transfers::new(),
             sharing: SharingHandle(Arc::new(watch::channel(SharingRules::default()).0)),
+            screen_saver: true,
+            lock_clients: false,
         })
+    }
+
+    /// Bildschirmschoner abgleichen (Standard: an, ohne Sperren): Beginnt er hier, starten Clients
+    /// ab Qross 0.8 ihren, mit `lock_clients` sperren sie sich stattdessen; endet er, beenden sie
+    /// ihren. Ein Client, den das sperrt, wird an seiner eigenen Tastatur entsperrt.
+    pub fn with_screen_saver(mut self, sync: bool, lock_clients: bool) -> Self {
+        self.screen_saver = sync;
+        self.lock_clients = lock_clients;
+        self
     }
 
     /// Rechte je Rechner (Standard: alles in beide Richtungen). Ändern im Betrieb über [`Server::sharing`].
@@ -346,6 +368,12 @@ impl Server {
         if self.game_mode {
             local_game = game::watch(game);
         }
+        // Ebenso beim Bildschirmschoner
+        let (_no_saver, mut local_saver) = watch::channel(false);
+        if self.screen_saver {
+            let capture = capture.clone();
+            local_saver = screensaver::watch(Box::new(move || capture.screen_saver_active()));
+        }
         let clipboard = ClipboardHub::spawn(clipboard, self.share_concealed, {
             let notices = self.notices.clone();
             move || {
@@ -368,6 +396,7 @@ impl Server {
         state.handle(ServerEvent::LocalMonitors(local_monitors.clone()));
         state.set_switch_options(self.switching);
         state.set_game_mode(self.game_mode);
+        state.set_lock_clients(self.lock_clients);
         state.set_key_maps(self.keys.remap.clone());
         state.set_key_modes(self.keys.modes.clone());
         for (hotkey, target) in &self.keys.options.switch {
@@ -435,6 +464,7 @@ impl Server {
                                 let quality = self.monitor_quality(&conn, &name);
                                 let sharing = rules.borrow().for_client(&name);
                                 let (sharing_tx, sharing_rx) = watch::channel(sharing);
+                                let (control_tx, control_rx) = mpsc::unbounded_channel();
                                 let handle = ClientHandle {
                                     id: conn.stable_id(),
                                     conn,
@@ -445,10 +475,13 @@ impl Server {
                                     sharing: sharing_tx,
                                     types_text: false,
                                     told_positions: Default::default(),
+                                    control: control_tx,
+                                    follows_saver: false,
                                 };
                                 clients.insert(name.clone(), handle);
                                 clip_synced.lock().unwrap().remove(&name);
-                                let _ = reply.send(Ok(Admitted { server_name: self.config.name.clone(), sharing: sharing_rx }));
+                                let server_name = self.config.name.clone();
+                                let _ = reply.send(Ok(Admitted { server_name, sharing: sharing_rx, control: control_rx }));
                                 info!("Client „{name}“ verbunden ({}×{})", screen.width, screen.height);
                                 if sharing != Sharing::ALL {
                                     info!("Rechte für „{name}“: {}", describe_sharing(sharing));
@@ -503,6 +536,13 @@ impl Server {
                         }
                         self.notify(ServerNotice::ClientTypesText { name: name.clone() });
                         state.handle(ServerEvent::ClientTypesText { name })
+                    }
+                    NetEvent::FollowsScreenSaver { name, id } if is_current(&clients, &name, id) => {
+                        if let Some(client) = clients.get_mut(&name) {
+                            client.follows_saver = true;
+                        }
+                        debug!("„{name}“ folgt dem Bildschirmschoner");
+                        Vec::new()
                     }
                     NetEvent::Clipboard { name, id, data } if is_current(&clients, &name, id) => {
                         info!("Zwischenablage von „{name}“: {}", data.summary());
@@ -571,6 +611,16 @@ impl Server {
                     }
                     state.set_sharing(rules);
                     Vec::new()
+                }
+                Ok(()) = local_saver.changed() => {
+                    let active = *local_saver.borrow_and_update();
+                    let following = clients.values().filter(|c| c.follows_saver).count();
+                    match (active, self.lock_clients) {
+                        (true, false) => info!("Bildschirmschoner gestartet – {following} Client(s) starten ihren"),
+                        (true, true) => info!("Bildschirmschoner gestartet – {following} Client(s) sperren sich"),
+                        (false, _) => info!("Bildschirmschoner beendet – {following} Client(s) beenden ihren"),
+                    }
+                    state.handle(ServerEvent::LocalScreenSaver(active))
                 }
                 Ok(()) = local_game.changed() => {
                     let game = *local_game.borrow_and_update();
@@ -837,6 +887,15 @@ fn apply(
             debug!("Übertragung {transfer} nicht abgelegt");
             drops.cancel_undropped();
         }
+        Action::ScreenSaver { active, lock } => {
+            for client in clients.values().filter(|c| c.follows_saver) {
+                let _ = client.control.send(Control::ScreenSaver { active, lock });
+            }
+        }
+        Action::StopLocalScreenSaver => {
+            info!("Eingabe für einen Client – Bildschirmschoner hier wird beendet");
+            capture.stop_screen_saver();
+        }
     }
 }
 
@@ -930,13 +989,14 @@ async fn handle_connection(
         reply_rx.await.map_err(|_| anyhow!("Server wurde beendet"))?
     };
     let sharing = match verdict {
-        Ok(Admitted { server_name, sharing }) => {
+        Ok(Admitted { server_name, sharing, control }) => {
             debug!("„{name}“ läuft unter {platform:?}");
             // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore,
-            // ob sie Zeichen eingeben können und, sobald dort etwas im Vollbild läuft, den Spielemodus.
+            // ob sie Zeichen eingeben können und dem Bildschirmschoner folgen und, sobald dort etwas
+            // im Vollbild läuft, den Spielemodus.
             let welcome = Control::Welcome { version: SERVER_VERSION, server_name, platform: Platform::current() };
             write_frame(&mut send, &welcome).await?;
-            tokio::spawn(send_sharing(send, sharing.clone(), name.clone()));
+            tokio::spawn(send_control(send, sharing.clone(), control, name.clone()));
             sharing
         }
         Err(reason) => {
@@ -965,6 +1025,9 @@ async fn handle_connection(
             Ok(Some(Control::TypesText)) => {
                 let _ = tx.send(NetEvent::TypesText { name: name.clone(), id });
             }
+            Ok(Some(Control::FollowsScreenSaver)) => {
+                let _ = tx.send(NetEvent::FollowsScreenSaver { name: name.clone(), id });
+            }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht"),
             Ok(None) | Err(_) => break,
         }
@@ -974,18 +1037,31 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Schickt dem Client seine Rechte: gleich nach dem `Welcome` und nach jeder Änderung. Clients bis
-/// Qross 0.6 lesen den Control-Stream danach nicht mehr; bei ihnen bleibt das ungelesen liegen.
-async fn send_sharing(mut control: SendStream, mut sharing: watch::Receiver<Sharing>, name: String) {
+/// Schreibt nach dem `Welcome` auf den Control-Stream: gleich die Rechte des Clients und nach jeder
+/// Änderung erneut, dazu, was sonst ansteht (Bildschirmschoner). Clients bis Qross 0.6 lesen den
+/// Control-Stream danach nicht mehr; bei ihnen bleibt das ungelesen liegen.
+async fn send_control(
+    mut stream: SendStream,
+    mut sharing: watch::Receiver<Sharing>,
+    mut messages: mpsc::UnboundedReceiver<Control>,
+    name: String,
+) {
+    let mut message = Control::Sharing(*sharing.borrow_and_update());
     loop {
-        let current = *sharing.borrow_and_update();
-        if let Err(e) = write_frame(&mut control, &Control::Sharing(current)).await {
-            return debug!("Rechte an „{name}“ nicht gesendet: {e}");
+        if let Err(e) = write_frame(&mut stream, &message).await {
+            return debug!("Control-Nachricht an „{name}“ nicht gesendet: {e}");
         }
         // Endet, sobald der Client getrennt ist
-        if sharing.changed().await.is_err() {
-            return;
-        }
+        message = tokio::select! {
+            changed = sharing.changed() => match changed {
+                Ok(()) => Control::Sharing(*sharing.borrow_and_update()),
+                Err(_) => return,
+            },
+            next = messages.recv() => match next {
+                Some(message) => message,
+                None => return,
+            },
+        };
     }
 }
 

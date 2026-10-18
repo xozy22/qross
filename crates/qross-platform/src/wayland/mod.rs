@@ -52,7 +52,7 @@ fn runtime() -> &'static Runtime {
 
 /// Wartet blockierend höchstens `timeout` auf `future`, das in der Portal-Laufzeit läuft. Darf aus
 /// einer anderen Tokio-Laufzeit heraus aufgerufen werden; läuft es zu lange, wird es abgebrochen.
-fn block_on<T: Send + 'static>(timeout: Duration, future: impl Future<Output = T> + Send + 'static) -> Option<T> {
+pub(crate) fn block_on<T: Send + 'static>(timeout: Duration, future: impl Future<Output = T> + Send + 'static) -> Option<T> {
     let (tx, rx) = std::sync::mpsc::channel();
     let task = runtime().spawn(async move {
         let _ = tx.send(future.await);

@@ -453,6 +453,7 @@ main { overflow: auto; overflow-x: hidden; min-height: 0; }
 .note.error { background: var(--coral-soft); color: var(--coral); }
 .note.game-note { margin: 0 0 14px; }
 .settings-section .game-more { margin: 10px 0 0; }
+.settings-section .saver-more { margin: 10px 0 0; }
 
 /* ------------------------------------------------------------ Seitenleiste */
 

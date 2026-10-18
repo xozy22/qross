@@ -17,7 +17,7 @@ tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.14", features = ["randr", "xkb", "xtest"] }
+x11rb = { version = "0.14", features = ["randr", "screensaver", "xkb", "xtest"] }
 # wayland-data-control: Zwischenablage ohne Fenster unter KDE, Sway, Hyprland; sonst über XWayland
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 # Markierungen der Passwortmanager unter Wayland lesen (dieselbe Version, die arboard mitbringt)
@@ -49,8 +49,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 if-addrs.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# IpHelper: Netzwerkkarten, Gateway und dessen MAC für Profile je Ort
-windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+# IpHelper: Netzwerkkarten, Gateway und dessen MAC für Profile je Ort; Power, Registry und Shutdown
+# für den Bildschirmschoner (wach gehalten? eingerichtet? sperren)
+windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Shutdown"] }
 # COM (Drag & Drop, Shell) – mit windows-sys nicht umsetzbar
 windows = { version = "0.62", features = [
     "Win32_Foundation",
