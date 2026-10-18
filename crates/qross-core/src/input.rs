@@ -26,6 +26,9 @@ pub enum CaptureEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Inject {
     MoveTo { x: i32, y: i32 },
+    /// Relativ bewegen (Spielemodus), so wie eine echte Maus: Spiele mit eingefangenem Zeiger
+    /// lesen die Bewegung, nicht die Position.
+    MoveBy { dx: i32, dy: i32 },
     Button { button: MouseButton, down: bool },
     Wheel { dx: i16, dy: i16 },
     Key { key: KeyCode, down: bool },

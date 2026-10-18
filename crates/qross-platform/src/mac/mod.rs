@@ -7,6 +7,7 @@
 
 mod capture;
 mod drag;
+mod game;
 mod inject;
 mod media;
 mod permissions;
@@ -23,6 +24,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::arboard_clipboard::ArboardClipboard;
 use crate::{Capture, Clipboard, Injector, Permission};
 
+pub use game::game_state;
 pub use permissions::{granted as has_permission, request as request_permission};
 
 pub fn init_process() {}

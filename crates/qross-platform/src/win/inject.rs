@@ -35,6 +35,9 @@ impl Injector for WinInjector {
                 let flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
                 send(&[mouse(normalize(x - b.x, b.width), normalize(y - b.y, b.height), 0, flags)]);
             }
+            // Ohne MOUSEEVENTF_ABSOLUTE wie eine echte Maus: Raw Input meldet die Bewegung, und ein
+            // per ClipCursor eingesperrter Zeiger bleibt, wo das Spiel ihn haben will.
+            Inject::MoveBy { dx, dy } => send(&[mouse(dx, dy, 0, MOUSEEVENTF_MOVE)]),
             Inject::Button { button, down } => {
                 let (flags, data) = match (button, down) {
                     (MouseButton::Left, true) => (MOUSEEVENTF_LEFTDOWN, 0),

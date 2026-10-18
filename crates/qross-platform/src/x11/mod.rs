@@ -8,12 +8,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use qross_core::CaptureEvent;
-use qross_proto::Rect;
+use qross_proto::{GameState, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::ConnectionExt as _;
-use x11rb::protocol::xproto::{ConnectionExt as _, Window};
+use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
 use x11rb::rust_connection::RustConnection;
+use x11rb::NONE;
 
 use crate::arboard_clipboard::ArboardClipboard;
 use crate::{Capture, Clipboard, Injector};
@@ -59,6 +60,31 @@ fn randr_monitors(conn: &RustConnection, root: Window) -> Result<Vec<Rect>> {
     }
     let reply = conn.randr_get_monitors(root, true)?.reply()?;
     Ok(reply.monitors.iter().map(|m| Rect::new(m.x.into(), m.y.into(), m.width.into(), m.height.into())).collect())
+}
+
+/// Spielemodus: Ist das aktive Fenster im Vollbild (EWMH `_NET_WM_STATE_FULLSCREEN`)? Ob ein
+/// Programm den Zeiger gegriffen hat, ließe sich nur prüfen, indem Qross selbst kurz nach ihm
+/// greift; das unterbleibt.
+pub fn game_state() -> GameState {
+    let slot = QUERY.get_or_init(|| Mutex::new(connect().ok()));
+    let guard = slot.lock().unwrap();
+    let fullscreen = guard.as_ref().and_then(|(conn, root)| active_fullscreen(conn, *root).ok()).unwrap_or(false);
+    GameState { fullscreen, captured: false }
+}
+
+fn active_fullscreen(conn: &RustConnection, root: Window) -> Result<bool> {
+    // Ohne Fenstermanager mit EWMH gibt es die Atome nicht
+    let atom = |name: &str| -> Result<Atom> { Ok(conn.intern_atom(true, name.as_bytes())?.reply()?.atom) };
+    let (active, state, fullscreen) = (atom("_NET_ACTIVE_WINDOW")?, atom("_NET_WM_STATE")?, atom("_NET_WM_STATE_FULLSCREEN")?);
+    if [active, state, fullscreen].contains(&NONE) {
+        return Ok(false);
+    }
+    let reply = conn.get_property(false, root, active, AtomEnum::WINDOW, 0, 1)?.reply()?;
+    let Some(window) = reply.value32().and_then(|mut values| values.next()).filter(|&w| w != NONE) else {
+        return Ok(false);
+    };
+    let states = conn.get_property(false, window, state, AtomEnum::ATOM, 0, 64)?.reply()?;
+    Ok(states.value32().is_some_and(|mut values| values.any(|a| a == fullscreen)))
 }
 
 pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> {

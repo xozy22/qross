@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use qross_proto::{Input, KeyCode, MouseButton, MouseMove};
+use qross_proto::{Input, KeyCode, MouseButton, MouseDelta, MouseMove};
 
 use crate::input::Inject;
 
@@ -21,6 +21,9 @@ pub struct ClientState {
     held_buttons: BTreeSet<MouseButton>,
     /// Strg ↔ Cmd tauschen (PC steuert Mac oder umgekehrt), damit Strg+C dort Kopieren bleibt
     swap_ctrl_cmd: bool,
+    /// Der Server schickt gerade relative Bewegungen (Spielemodus). Klicks springen dann nicht
+    /// an ihre Position: Ein Spiel mit eingefangenem Zeiger sähe darin einen Ruck.
+    relative: bool,
 }
 
 /// Strg und Windows-/Cmd-Taste vertauschen (links und rechts getrennt)
@@ -47,11 +50,17 @@ impl ClientState {
         self.epoch.is_some()
     }
 
+    /// Kommen gerade relative Bewegungen (Spielemodus)?
+    pub fn is_relative(&self) -> bool {
+        self.relative
+    }
+
     pub fn on_input(&mut self, input: Input) -> (Vec<Inject>, Option<Transition>) {
         match input {
             Input::Enter { epoch, x, y } => {
                 self.epoch = Some(epoch);
                 self.last_seq = None;
+                self.relative = false;
                 (vec![Inject::MoveTo { x, y }], Some(Transition::Entered))
             }
             Input::Leave => {
@@ -74,7 +83,11 @@ impl ClientState {
                 } else {
                     self.held_buttons.remove(&button);
                 }
-                (vec![Inject::MoveTo { x, y }, Inject::Button { button, down }], None)
+                if self.relative {
+                    (vec![Inject::Button { button, down }], None)
+                } else {
+                    (vec![Inject::MoveTo { x, y }, Inject::Button { button, down }], None)
+                }
             }
             Input::Wheel { dx, dy } => (vec![Inject::Wheel { dx, dy }], None),
             // Dateiübertragung: übernimmt die Laufzeit; die Position kommt mit dem Drop.
@@ -85,16 +98,35 @@ impl ClientState {
 
     /// Nur neuere Positionen des aktuellen Besuchs übernehmen.
     pub fn on_move(&mut self, mv: MouseMove) -> Option<Inject> {
-        if self.epoch != Some(mv.epoch) {
+        if !self.accept(mv.epoch, mv.seq) {
             return None;
         }
+        self.relative = false;
+        Some(Inject::MoveTo { x: mv.x, y: mv.y })
+    }
+
+    /// Relative Bewegung (Spielemodus). Positionen und Bewegungen zählen gemeinsam: Was älter ist
+    /// als das zuletzt übernommene Datagramm, fällt weg wie ein verlorenes.
+    pub fn on_delta(&mut self, delta: MouseDelta) -> Option<Inject> {
+        if !self.accept(delta.epoch, delta.seq) {
+            return None;
+        }
+        self.relative = true;
+        Some(Inject::MoveBy { dx: delta.dx, dy: delta.dy })
+    }
+
+    /// Gehört das Datagramm zum aktuellen Besuch und ist es neuer als das zuletzt übernommene?
+    fn accept(&mut self, epoch: u16, seq: u32) -> bool {
+        if self.epoch != Some(epoch) {
+            return false;
+        }
         if let Some(last) = self.last_seq {
-            if (mv.seq.wrapping_sub(last) as i32) <= 0 {
-                return None;
+            if (seq.wrapping_sub(last) as i32) <= 0 {
+                return false;
             }
         }
-        self.last_seq = Some(mv.seq);
-        Some(Inject::MoveTo { x: mv.x, y: mv.y })
+        self.last_seq = Some(seq);
+        true
     }
 
     /// Alle noch gedrückten Tasten und Maustasten loslassen.
@@ -175,6 +207,42 @@ mod tests {
         let mut c = ClientState::new();
         let (injects, _) = c.on_input(Input::Key { key: KeyCode::A, down: true });
         assert!(injects.is_empty());
+    }
+
+    fn delta(epoch: u16, seq: u32, dx: i32) -> MouseDelta {
+        MouseDelta { epoch, seq, dx, dy: -dx }
+    }
+
+    #[test]
+    fn deltas_become_relative_moves_in_order() {
+        let mut c = ClientState::new();
+        assert_eq!(c.on_delta(delta(1, 1, 5)), None, "vor Enter");
+        c.on_input(Input::Enter { epoch: 1, x: 0, y: 0 });
+        assert!(!c.is_relative());
+        assert_eq!(c.on_delta(delta(1, 2, 5)), Some(Inject::MoveBy { dx: 5, dy: -5 }));
+        assert!(c.is_relative());
+        assert_eq!(c.on_delta(delta(1, 1, 9)), None, "überholt");
+        assert_eq!(c.on_delta(delta(0, 9, 9)), None, "alte Epoche");
+        // Eine Position, die älter ist als die letzte Bewegung, kommt nicht mehr zum Zug
+        assert_eq!(c.on_move(mv(1, 2, 7)), None);
+        assert_eq!(c.on_move(mv(1, 3, 7)), Some(Inject::MoveTo { x: 7, y: 0 }));
+        assert!(!c.is_relative(), "wieder absolute Positionen");
+        assert_eq!(c.on_delta(delta(1, 4, -1)), Some(Inject::MoveBy { dx: -1, dy: 1 }));
+        // Ein neuer Besuch beginnt wieder absolut
+        c.on_input(Input::Enter { epoch: 2, x: 3, y: 4 });
+        assert!(!c.is_relative());
+    }
+
+    #[test]
+    fn clicks_stay_put_while_moving_relatively() {
+        let mut c = ClientState::new();
+        c.on_input(Input::Enter { epoch: 1, x: 0, y: 0 });
+        c.on_delta(delta(1, 1, 3));
+        let (injects, _) = c.on_input(Input::Button { button: MouseButton::Left, down: true, x: 10, y: 20 });
+        assert_eq!(injects, vec![Inject::Button { button: MouseButton::Left, down: true }], "kein Sprung im Spiel");
+        // Losgelassen wird die Taste trotzdem beim Verlassen
+        let (injects, _) = c.on_input(Input::Leave);
+        assert_eq!(injects, vec![Inject::Button { button: MouseButton::Left, down: false }]);
     }
 
     #[test]

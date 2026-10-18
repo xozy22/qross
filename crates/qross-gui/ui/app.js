@@ -60,6 +60,7 @@ const ICONS = {
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>',
   cursor: '<path d="M5 3l14 7.5-6.2 1.7L10 19z" fill="currentColor" stroke="none"/>',
   lock: '<rect x="5" y="11" width="14" height="9" rx="2" fill="currentColor" stroke="none"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  game: '<path d="M7.5 7h9a5 5 0 0 1 4.9 6l-.7 3.4a2.2 2.2 0 0 1-3.7 1.1L14.6 15H9.4l-2.4 2.5a2.2 2.2 0 0 1-3.7-1.1L2.6 13a5 5 0 0 1 4.9-6z"/><path d="M8 9.5v3M6.5 11h3"/><path d="M15.5 10.5h.01M17.5 12h.01"/>',
 };
 
 function icon(name) {
@@ -244,7 +245,7 @@ function renderTopbar() {
   const status = $("#status");
   status.dataset.phase = s.phase;
   status.dataset.clients = s.clients.length ? "yes" : "no";
-  status.dataset.locked = s.role === "server" && s.locked ? "yes" : "no";
+  status.dataset.locked = s.role === "server" && (s.locked || s.game_hold) ? "yes" : "no";
 
   let text = s.message || "Gestoppt";
   if (s.phase === "stopped") text = "Gestoppt";
@@ -252,6 +253,7 @@ function renderTopbar() {
     text = s.clients.length === 1 ? "1 Rechner verbunden" : `${s.clients.length} Rechner verbunden`;
   }
   if (s.role === "server" && s.locked) text += `, Cursor auf „${s.cursor_on}“ gesperrt`;
+  else if (s.role === "server" && s.game_hold) text += `, Spielemodus hält den Cursor auf „${s.cursor_on}“`;
   $("#statusText").textContent = text;
   status.title = s.message || "";
 
@@ -310,6 +312,27 @@ function monitorSketch(screen) {
   return svg;
 }
 
+/** Hinweis über dem Layout, solange der Spielemodus den Cursor festhält */
+function renderGameNote() {
+  const note = $("#gameNote");
+  const s = state.status;
+  const game = s.role === "server" && !s.locked ? s.game_hold : null;
+  note.hidden = !game;
+  if (!game) return;
+  const where = s.cursor_on === state.settings.server.name ? "Auf diesem Rechner" : `Auf „${s.cursor_on}“`;
+  const what =
+    game === "captured"
+      ? `${where} hat ein Spiel den Zeiger eingefangen. Der Cursor bleibt dort, bis es ihn freigibt.`
+      : `${where} läuft ein Programm im Vollbild. Der Cursor bleibt dort, bis es endet.`;
+  const lock = state.settings.server.keys.lock;
+  // Die Tastennamen („Rollen“) lädt sonst erst der Einstellungsbereich
+  if (lock && !state.keyNames) loadKeyNames().then(renderGameNote);
+  const release = lock
+    ? ` ${hotkeyLabel(lock)} gibt ihn sofort frei.`
+    : " Die Fang-Taste ist aus; Strg+Alt+Umschalt+Esc holt ihn zu diesem Rechner zurück.";
+  note.replaceChildren(el("strong", { text: "Spielemodus: " }), what + release);
+}
+
 function renderServer() {
   if (state.dragging) {
     state.renderPending = true;
@@ -321,6 +344,8 @@ function renderServer() {
   const online = new Set(serverRunning ? status.clients.map((c) => c.name) : []);
   const cursorOn = serverRunning ? status.cursor_on : null;
   const locked = serverRunning && status.locked;
+  // Spielemodus: festgehalten wie mit der Fang-Taste, nur mit anderem Grund
+  const game = serverRunning && !locked && status.game_hold;
   const [cols, rows] = state.grid;
   const grid = $("#grid");
   grid.style.setProperty("--cols", cols);
@@ -382,7 +407,14 @@ function renderServer() {
       screen = c;
     }
     if (hasCursor && locked) sub = "Cursor gesperrt";
-    const classes = ["screen", isServer && "server", isOnline && "online", hasCursor && "has-cursor", hasCursor && locked && "locked"]
+    if (hasCursor && game) sub = game === "captured" ? "Spiel hält den Zeiger" : "Vollbild, Cursor bleibt";
+    const held = hasCursor && (locked || game);
+    const marker = locked
+      ? { title: "Cursor hier gesperrt (Rollen-Taste)", icon: "lock" }
+      : game
+        ? { title: "Spielemodus: Cursor bleibt hier, bis das Vollbild endet (Fang-Taste gibt ihn frei)", icon: "game" }
+        : { title: "Cursor ist hier", icon: "cursor" };
+    const classes = ["screen", isServer && "server", isOnline && "online", hasCursor && "has-cursor", held && "locked"]
       .filter(Boolean)
       .join(" ");
     const card = el(
@@ -398,7 +430,7 @@ function renderServer() {
       },
       monitorSketch(screen),
       isServer ? el("span", { class: "tag", text: "Server" }) : null,
-      hasCursor ? el("span", { class: "marker", title: locked ? "Cursor hier gesperrt (Rollen-Taste)" : "Cursor ist hier" }, icon(locked ? "lock" : "cursor")) : null,
+      hasCursor ? el("span", { class: "marker", title: marker.title }, icon(marker.icon)) : null,
       el("span", { class: "name", text: s.name }),
       el("span", { class: "sub", text: sub }),
       isServer
@@ -1227,6 +1259,7 @@ function renderSettings() {
     : "Im Entwicklungsbuild trägt sich Qross nicht in den Autostart ein.";
   $("#prefResume").checked = state.settings.resume_role;
   $("#prefAutoUpdate").checked = state.settings.auto_update;
+  $("#prefGameMode").checked = state.settings.game_mode;
   $("#aboutVersion").textContent = state.version;
   $("#aboutDataDir").textContent = prefs.data_dir;
   renderClipLimit();
@@ -1580,6 +1613,10 @@ function setupSettings() {
     state.settings.auto_update = e.target.checked;
     saveSoon.flush();
   });
+  $("#prefGameMode").addEventListener("change", (e) => {
+    state.settings.game_mode = e.target.checked;
+    saveSoon.flush();
+  });
   $("#updateCheck").addEventListener("click", () => invoke("check_updates"));
   $("#updateInstall").addEventListener("click", () => invoke("install_update"));
   $("#openDataDir").addEventListener("click", () => invoke("open_data_dir").catch((e) => toast(String(e), "error")));
@@ -1909,6 +1946,7 @@ function render() {
   pruneQualities();
   renderPermissions();
   renderTopbar();
+  renderGameNote();
   renderServer();
   renderClients();
   renderClient();

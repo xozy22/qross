@@ -2,6 +2,7 @@ mod capture;
 mod clipboard;
 mod cursor;
 mod dnd;
+mod game;
 mod inject;
 mod shell;
 
@@ -19,6 +20,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 pub use capture::start_capture;
 pub use clipboard::clipboard;
+pub use game::game_state;
 pub use inject::injector;
 pub use shell::folder_of_window;
 

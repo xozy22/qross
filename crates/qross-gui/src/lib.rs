@@ -52,6 +52,9 @@ pub struct Settings {
     pub resume_role: bool,
     /// Updates im Hintergrund laden und in einem ruhigen Moment installieren
     pub auto_update: bool,
+    /// Spielemodus: Als Server bei Vollbild auf dem Rechner mit dem Cursor festhalten, als Client
+    /// dem Server melden, dass hier etwas im Vollbild läuft.
+    pub game_mode: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -126,6 +129,7 @@ impl Settings {
             clipboard_files_mb: qross_net::clipfiles::DEFAULT_LIMIT / 1_000_000,
             resume_role: true,
             auto_update: true,
+            game_mode: true,
         }
     }
 
@@ -136,7 +140,7 @@ impl Settings {
 
     /// Inhalt einer `qross.toml` für `qross server --config`.
     pub fn server_toml(&self) -> String {
-        self.server.to_toml(self.clipboard_files_mb)
+        self.server.to_toml(self.clipboard_files_mb) + &format!("\n[game]\nenabled = {}\n", self.game_mode)
     }
 
     /// Lädt `gui.json` aus `dir`; `None`, wenn es die Datei noch nicht gibt.
@@ -414,6 +418,18 @@ mod tests {
     }
 
     #[test]
+    fn exported_toml_carries_the_game_mode() {
+        let mut settings = Settings::for_host("pc");
+        let enabled = |s: &Settings| {
+            let file: toml::Table = toml::from_str(&s.server_toml()).unwrap();
+            file["game"]["enabled"].as_bool().unwrap()
+        };
+        assert!(enabled(&settings));
+        settings.game_mode = false;
+        assert!(!enabled(&settings));
+    }
+
+    #[test]
     fn new_screens_go_next_to_the_server() {
         let mut s = Settings::for_host("pc").server;
         assert!(s.add_screen("laptop"));
@@ -452,8 +468,8 @@ mod tests {
         assert!(old.server.discovery);
         // … und die Standardgrenze für kopierte Dateien (1 GB)
         assert_eq!(old.clipboard_files_mb, 1000);
-        // … und Fortsetzen sowie automatische Updates sind an
-        assert!(old.resume_role && old.auto_update);
+        // … und Fortsetzen, automatische Updates und der Spielemodus sind an
+        assert!(old.resume_role && old.auto_update && old.game_mode);
         // … und die Tasten-Standards des Servers (Rollen, Medientasten an den aktiven Rechner)
         assert_eq!(old.server.keys, crate::keys::KeySettings::default());
         assert_eq!(old.server.keys.config().unwrap(), qross_core::keys::KeyConfig::default());

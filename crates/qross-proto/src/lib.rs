@@ -3,7 +3,8 @@
 //! Kanäle einer QUIC-Verbindung:
 //! - **Control** (bidirektionaler Stream, vom Client geöffnet): Hello/Welcome, Bildschirmänderungen
 //! - **Input** (unidirektionaler Stream Server → Client): Tasten, Maustasten, Rad, Enter/Leave
-//! - **Datagramme** (Server → Client): Mausposition, unzuverlässig, die neueste gewinnt
+//! - **Datagramme** (Server → Client): Mausposition bzw. im Spielemodus Mausbewegung,
+//!   unzuverlässig, die neueste gewinnt
 //! - **Clipboard** (je Übertragung ein eigener unidirektionaler Stream, beide Richtungen)
 //! - **Datei** (je Datei ein eigener unidirektionaler Stream, niedrige Priorität): Drag & Drop
 //!   (Server → Client) und kopierte Dateien aus der Zwischenablage (beide Richtungen)
@@ -25,10 +26,14 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// Qross 0.3 werten das Feld nicht aus.
 /// - 3: Qross 0.2 und 0.3
 /// - 4: `Control::Monitors` (seit Qross 0.5)
-pub const SERVER_VERSION: u16 = 4;
+/// - 5: `Control::Game` und `Datagram::MouseDelta`, der Spielemodus (seit Qross 0.6)
+pub const SERVER_VERSION: u16 = 5;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
 /// die Verbindung bei unbekannten Control-Nachrichten.
 pub const MONITORS_SINCE: u16 = 4;
+/// Ab dieser `Welcome`-Version darf der Client `Control::Game` senden. Ein Client, der sie
+/// sendet, versteht damit auch `Datagram::MouseDelta`.
+pub const GAME_MODE_SINCE: u16 = 5;
 /// Höchstzahl Monitore, die der Server aus `Control::Monitors` übernimmt
 pub const MAX_MONITORS: usize = 16;
 /// ALPN-Kennung im TLS-Handshake
@@ -88,6 +93,28 @@ pub enum Control {
     /// Der Server hält den Cursor dann auf den Monitorflächen und wechselt nur an Kantenstücken,
     /// an denen ein Monitor an der äußeren Kante liegt.
     Monitors(Vec<Rect>),
+    /// Client → Server (seit Qross 0.6, nur ab `GAME_MODE_SINCE`): Läuft im Vordergrund des Clients
+    /// ein Vollbildprogramm, bzw. hat ein Spiel den Zeiger eingefangen? Kommt bei jeder Änderung,
+    /// nach dem `Welcome` nur, wenn schon etwas läuft. Steht der Cursor dort, hält der Server ihn
+    /// fest und schickt solange `Datagram::MouseDelta` statt `Datagram::MouseMove`.
+    Game(GameState),
+}
+
+/// Spielemodus: Was auf einem Rechner gerade im Vordergrund läuft.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GameState {
+    /// Das Programm im Vordergrund füllt einen ganzen Monitor (Spiel, Video, Präsentation).
+    pub fullscreen: bool,
+    /// Ein Programm hat den Zeiger eingefangen (Windows: `ClipCursor` auf weniger als den
+    /// Bildschirm), wie es Spiele mit Maussteuerung tun.
+    pub captured: bool,
+}
+
+impl GameState {
+    /// Hält der Spielemodus den Cursor auf diesem Rechner?
+    pub const fn is_active(self) -> bool {
+        self.fullscreen || self.captured
+    }
 }
 
 /// Zuverlässige, geordnete Eingabe-Ereignisse (Server → Client).
@@ -144,10 +171,26 @@ pub struct MouseMove {
     pub y: i32,
 }
 
+/// Relative Mausbewegung in Pixeln des Servers (Spielemodus). Teilt sich `epoch` und `seq` mit
+/// `MouseMove`: Auch hier gilt nur, was neuer ist als das zuletzt übernommene Datagramm.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseDelta {
+    pub epoch: u16,
+    pub seq: u32,
+    pub dx: i32,
+    pub dy: i32,
+}
+
 /// Alles, was als QUIC-Datagramm übertragen wird.
+///
+/// Neue Varianten werden nur hinten angefügt. Ein älterer Client verwirft ein Datagramm, das er
+/// nicht lesen kann (und bleibt verbunden); der Server schickt sie trotzdem nur an Clients, die
+/// sie kennen.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Datagram {
     MouseMove(MouseMove),
+    /// Seit Qross 0.6, nur an Clients, die `Control::Game` gesendet haben
+    MouseDelta(MouseDelta),
 }
 
 /// Nachricht auf einem Clipboard-Stream.
@@ -319,7 +362,7 @@ mod tests {
         // Ältere Clients lesen das Welcome eines neuen Servers (die Version werten sie nicht aus).
         let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
         let bytes = postcard::to_stdvec(&welcome).unwrap();
-        assert!(matches!(postcard::from_bytes::<ControlV03>(&bytes).unwrap(), ControlV03::Welcome { version: 4, .. }));
+        assert!(matches!(postcard::from_bytes::<ControlV03>(&bytes).unwrap(), ControlV03::Welcome { version: SERVER_VERSION, .. }));
 
         // Monitors kann ein älterer Server nicht lesen (er würde trennen). Er meldet im Welcome
         // Version 3 und bekommt die Nachricht deshalb nie.
@@ -328,5 +371,49 @@ mod tests {
         let bytes = postcard::to_stdvec(&monitors).unwrap();
         assert!(postcard::from_bytes::<ControlV03>(&bytes).is_err(), "ältere Version kann Monitors nicht lesen");
         assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), monitors);
+    }
+
+    /// So sah `Control` in Qross 0.5 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ControlV05 {
+        Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+        Welcome { version: u16, server_name: String, platform: Platform },
+        Reject { reason: String },
+        ScreenChanged(ScreenInfo),
+        Monitors(Vec<Rect>),
+    }
+
+    /// So sah `Datagram` bis Qross 0.5 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum DatagramV05 {
+        MouseMove(MouseMove),
+    }
+
+    #[test]
+    fn game_mode_reaches_only_peers_that_understand_it() {
+        // Ein Server aus 0.5 liest das Welcome-Format unverändert und meldet Version 4: Der Client
+        // schickt ihm kein `Game`, das er nicht lesen könnte.
+        const { assert!(MONITORS_SINCE < GAME_MODE_SINCE && GAME_MODE_SINCE <= SERVER_VERSION) };
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV05>(&bytes).unwrap(), ControlV05::Welcome { version: SERVER_VERSION, .. }));
+        let game = Control::Game(GameState { fullscreen: true, captured: false });
+        let bytes = postcard::to_stdvec(&game).unwrap();
+        assert!(postcard::from_bytes::<ControlV05>(&bytes).is_err(), "ein Server aus 0.5 kann Game nicht lesen");
+        assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), game);
+
+        // Ein älterer Client liest absolute Positionen wie bisher; ein Delta kann er nicht lesen
+        // (er verwirft nur dieses Datagramm), bekommt aber auch keins.
+        let mv = MouseMove { epoch: 2, seq: 9, x: 100, y: 200 };
+        let bytes = crate::encode_datagram(&Datagram::MouseMove(mv));
+        assert_eq!(postcard::from_bytes::<DatagramV05>(&bytes).unwrap(), DatagramV05::MouseMove(mv));
+        let delta = Datagram::MouseDelta(MouseDelta { epoch: 2, seq: 10, dx: -3, dy: 40_000 });
+        let bytes = crate::encode_datagram(&delta);
+        assert!(postcard::from_bytes::<DatagramV05>(&bytes).is_err());
+        assert_eq!(crate::decode_datagram(&bytes).unwrap(), delta);
+        assert!(bytes.len() <= 12, "{} Bytes", bytes.len());
+
+        assert!(!GameState::default().is_active());
+        assert!(GameState { fullscreen: false, captured: true }.is_active());
     }
 }

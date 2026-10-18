@@ -29,6 +29,24 @@ pub struct ServerFile {
     pub clipboard: ClipboardSection,
     #[serde(default)]
     pub keys: KeysSection,
+    #[serde(default)]
+    pub game: GameSection,
+}
+
+/// Abschnitt `[game]`: der Spielemodus.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct GameSection {
+    /// Bei Vollbild bzw. eingefangenem Zeiger auf dem Rechner mit dem Cursor festhalten und
+    /// Clients dort relative Bewegungen schicken
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+impl Default for GameSection {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Abschnitt `[keys]`: Fang-Taste, Medientasten, Umbelegung je Rechner.
@@ -166,6 +184,16 @@ mod tests {
         assert_eq!(keys.options.lock, Some(Hotkey::SCROLL_LOCK));
         assert_eq!(keys.options.media, MediaKeys::Active);
         assert_eq!(keys.remap["laptop"].len(), 1, "Beispiel: Alt und Windows-Taste am Mac");
+        assert!(file.game.enabled);
+    }
+
+    #[test]
+    fn game_mode_is_on_unless_switched_off() {
+        let file: ServerFile = toml::from_str("name = \"pc\"").unwrap();
+        assert!(file.game.enabled);
+        let file: ServerFile = toml::from_str("[game]\nenabled = false").unwrap();
+        assert!(!file.game.enabled);
+        assert!(toml::from_str::<ServerFile>("[game]\nan = true").is_err(), "Tippfehler fallen auf");
     }
 
     #[test]

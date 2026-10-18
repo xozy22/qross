@@ -59,6 +59,7 @@
             Bildschirm
           </button>
         </div>
+        <p id="gameNote" class="note game-note" role="status" hidden></p>
         <div class="desk">
           <div id="grid" class="grid" aria-label="Bildschirm-Anordnung"></div>
         </div>
@@ -237,6 +238,7 @@
         <nav class="settings-nav" aria-label="Bereiche der Einstellungen">
           <button type="button" data-section="set-general">Allgemein</button>
           <button type="button" data-section="set-keys">Tastatur</button>
+          <button type="button" data-section="set-game">Spielemodus</button>
           <button type="button" data-section="set-updates">Updates</button>
           <button type="button" data-section="set-clipboard">Zwischenablage</button>
           <button type="button" data-section="set-about">Info</button>
@@ -320,6 +322,18 @@
                 </div>
               </div>
             </fieldset>
+          </section>
+
+          <section class="settings-section" id="set-game" aria-labelledby="setGameTitle">
+            <h3 id="setGameTitle">Spielemodus</h3>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">Bei Vollbild auf dem Bildschirm bleiben</span>
+                <span class="hint">Läuft auf dem Rechner mit dem Cursor ein Spiel, ein Video oder eine Präsentation im Vollbild, wechselt der Cursor nicht zu einem anderen Bildschirm. Die Fang-Taste gibt ihn frei.</span>
+              </span>
+              <span class="switch"><input type="checkbox" role="switch" id="prefGameMode"><span class="track"><span class="thumb"></span></span></span>
+            </label>
+            <p class="hint game-more">Spiele auf einem Client bekommen dabei relative Mausbewegungen statt Positionen, so wie von einer echten Maus. Das brauchen Spiele, die den Zeiger einfangen, etwa für die Kamera. Als Client meldet dieser Rechner dem Server nur bei eingeschaltetem Spielemodus, dass hier etwas im Vollbild läuft. Clients und Server ab Qross 0.6.</p>
           </section>
 
           <section class="settings-section" id="set-updates" aria-labelledby="setUpdatesTitle">

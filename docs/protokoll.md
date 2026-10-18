@@ -1,7 +1,8 @@
 # Qross-Protokoll, Version 3
 
 Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischenablage, seit Qross 0.4 um
-Drag & Drop vom Client zum Server und seit Qross 0.5 um die einzelnen Monitore eines Clients (siehe unten).
+Drag & Drop vom Client zum Server, seit Qross 0.5 um die einzelnen Monitore eines Clients und seit Qross 0.6
+um den Spielemodus (siehe unten).
 
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
@@ -20,10 +21,10 @@ Implementierung: `crates/qross-proto`.
 
 | Kanal | Richtung | Zuverlässig | Inhalt |
 |---|---|---|---|
-| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors` |
+| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game` |
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel` |
-| Datagramm | Server → Client | **nein** | `MouseMove` |
+| Datagramm | Server → Client | **nein** | `MouseMove`, im Spielemodus `MouseDelta` |
 | Clipboard (je Übertragung ein eigener Stream, Priorität −10) | ⇄ | ja | `Clipboard::Data { text, html, png }`, `Clipboard::Files { transfer, entries, data }` |
 | Datei für Drag & Drop (je Datei ein eigener Stream, Priorität −10) | Server → Client | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
 | Datei aus der Zwischenablage (wie oben) | ⇄ | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
@@ -50,9 +51,10 @@ große Schwachpunkt von Synergy.
    antwortet mit `Welcome { version, …, platform }` oder `Reject { reason }`. Ist genau eine Seite ein Mac,
    tauscht der Client Strg und Cmd, damit etwa Strg+C auf dem Mac weiterhin kopiert.
    Meldet das `Welcome` mindestens Version 4, schickt der Client gleich danach `Monitors` (siehe unten).
+   Ab Version 5 meldet er außerdem mit `Game`, wenn bei ihm etwas im Vollbild läuft (siehe Spielemodus).
 3. Der Server öffnet den Input-Stream.
 4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`. Danach folgen
-   `MouseMove`-Datagramme mit dieser `epoch` und steigender `seq`.
+   `MouseMove`-Datagramme (im Spielemodus `MouseDelta`) mit dieser `epoch` und steigender `seq`.
 5. Verlässt der Cursor den Client: `Leave`. Der Client lässt alle Tasten los und schickt sein Clipboard,
    falls es sich geändert hat.
 
@@ -80,6 +82,46 @@ Rechteck als ein einziger Monitor, also das bisherige Verhalten.
 unbekannte Control-Nachricht kann ein solcher Server nicht lesen und trennt die Verbindung. Deshalb meldet
 ein neuer Server im `Welcome` die Version 4, die ältere Clients nicht auswerten. Nur dann sendet der Client
 `Monitors`. Ältere Server melden 3 und bekommen die Nachricht nie.
+
+## Spielemodus
+
+Seit Qross 0.6. Server und Clients sehen alle 250 ms in einem eigenen Thread nach, was bei ihnen im
+Vordergrund läuft (`GameState { fullscreen, captured }`):
+
+| System | Vollbild (`fullscreen`) | Zeiger eingefangen (`captured`) |
+|---|---|---|
+| Windows | `SHQueryUserNotificationState` meldet `QUNS_RUNNING_D3D_FULL_SCREEN` oder `QUNS_BUSY`, oder das Vordergrundfenster hat keine Titelleiste und bedeckt seinen Monitor. Desktop und Taskleiste zählen nie. | `GetClipCursor` liefert weniger als den virtuellen Bildschirm |
+| macOS | Das fokussierte Fenster ist im Vollbild (`AXFullScreen` über die Bedienungshilfen) oder bedeckt einen Bildschirm samt Menüleiste. | nicht erkennbar: macOS verrät nicht, ob ein Spiel den Zeiger mit `CGAssociateMouseAndMouseCursorPosition` vom Cursor gelöst hat |
+| Linux (X11) | Das aktive Fenster (`_NET_ACTIVE_WINDOW`) trägt `_NET_WM_STATE_FULLSCREEN`. | nicht erkannt: Qross müsste dafür selbst kurz nach dem Zeiger greifen (`XGrabPointer`) und könnte dabei Klicks schlucken |
+
+Der Server wertet seinen eigenen Zustand direkt aus. Ein Client meldet seinen mit `Control::Game(GameState)`,
+nach dem `Welcome` nur, wenn schon etwas läuft, danach bei jeder Änderung.
+
+Steht der Cursor auf einem Rechner, auf dem gerade etwas im Vollbild läuft oder den Zeiger eingefangen hat:
+
+- Er wechselt nicht, wie mit der Fang-Taste. Die Oberfläche zeigt das an (`ServerNotice::GameHold`).
+- Auf einem Client schickt der Server statt der Position die Bewegung selbst:
+  `MouseDelta { epoch, seq, dx, dy }` in Pixeln des Servers, nicht geklemmt. So dreht ein Spiel auch am
+  Bildschirmrand weiter. Der Client speist sie relativ ein: unter Windows mit `SendInput` ohne
+  `MOUSEEVENTF_ABSOLUTE`, sodass Raw Input eine echte Mausbewegung sieht und `ClipCursor` greift; unter macOS
+  als Mausereignis mit `kCGMouseEventDeltaX/Y`, ausgehend von der tatsächlichen Cursorposition; unter X11 per
+  XTest als relative Bewegung.
+- `MouseDelta` teilt sich `epoch` und `seq` mit `MouseMove`. Der Client übernimmt nur Datagramme, die neuer
+  sind als das zuletzt übernommene. Ein überholtes Delta fällt weg wie ein verlorenes.
+- Der Server führt die Position geklemmt mit, und `Button` trägt sie weiter. Nach einem `MouseDelta` springt
+  der Client beim Klicken aber nicht dorthin, sonst sähe ein Spiel einen Ruck. Endet der Spielemodus, kommen
+  wieder Positionen.
+- Die Fang-Taste löst den Halt, bis der Cursor den Bildschirm wechselt oder dort ein Vollbild beginnt oder
+  endet. Bis dahin kommen wieder Positionen, damit der sichtbare Cursor zur Kante findet. Ein zweiter Druck hält
+  wie gewohnt fest, und die Deltas laufen dann weiter.
+- Abschaltbar mit `[game] enabled = false` in `qross.toml` bzw. „Spielemodus“ in den Einstellungen. Ein Client
+  mit ausgeschaltetem Spielemodus meldet nichts (`qross client --no-game-mode`).
+
+**Kompatibilität:** Ein neuer Server meldet im `Welcome` die Version 5. Nur dann sendet der Client `Game`;
+Server aus Qross 0.5 (Version 4) und älter bekommen die Nachricht nie. Wer `Game` sendet, versteht auch
+`MouseDelta`. Der Server schickt Deltas deshalb nur an Clients, die einen aktiven Zustand gemeldet haben.
+Ältere Clients melden nie etwas und bekommen weiter Positionen; ein Vollbild bei ihnen hält den Cursor nicht.
+Ein Datagramm, das ein älterer Client nicht lesen kann, würde er nur verwerfen.
 
 ## Zwischenablage
 
@@ -159,7 +201,8 @@ Ein älterer Client antwortet nie auf die Nachfrage. Mit gedrückter Taste bleib
 
 - **Mausposition absolut**, in Client-Koordinaten (physische Pixel, virtueller Desktop), immer auf einem
   Monitor des Clients. Ein verlorenes
-  Datagramm wird vom nächsten überholt, Fehler summieren sich nicht auf.
+  Datagramm wird vom nächsten überholt, Fehler summieren sich nicht auf. Nur im Spielemodus gehen
+  Bewegungen relativ; ein verlorenes Delta fehlt dann wie bei einer echten Maus ein Ruckeln.
 - Der Client verwirft Datagramme mit falscher `epoch` (Nachzügler eines früheren Besuchs) und mit nicht
   neuerer `seq` (Umsortierung im Netz). Der Vergleich ist wrap-around-sicher.
 - `Button` enthält die Position. So landet ein Klick richtig, auch wenn das letzte Bewegungs-Datagramm fehlt.
@@ -205,7 +248,8 @@ Die Stufe richtet sich nach dem schlechtesten der drei Werte (Grenzen jeweils au
 ## Noch offen
 
 - Drag & Drop mit Linux als Quelle (XDND) und vom Mac-Server aus
-- Relative Mausbewegung für Spiele
+- Spielemodus: eingefangenen Zeiger unter macOS und Linux erkennen; Rohdaten der Maus am Server
+  (Raw Input) statt Cursor-Deltas, damit Zeigerbeschleunigung des Servers nicht mitwandert
 - Zwischenablage: RTF; virtuelle Dateien (z. B. Outlook-Anhänge) und Dateien erst beim Einfügen übertragen
 - Bildschirmschoner-Sync, Strg+Alt+Entf, Secure Desktop (UAC)
 - Wayland (libei/InputCapture-Portal)
