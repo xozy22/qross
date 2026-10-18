@@ -258,13 +258,28 @@ pub fn render(scene: &Scene, display: &Display, text: Option<&Text>) -> Frame {
     // Mitte des Bildpunkts (x, y) in Koordinaten des Systems
     let at = |x: u32, y: u32| (rect.x as f32 + (x as f32 + 0.5) / density, rect.y as f32 + (y as f32 + 0.5) / density);
 
+    // Nur die Bildpunkte, die `area` (in Koordinaten) berühren
+    let pixels = |area: Area, canvas: &Canvas| {
+        let to_px = |v: f32, origin: i32, limit: u32| (((v - origin as f32) * density).floor().max(0.0) as u32).min(limit);
+        let xs = to_px(area.x, rect.x, canvas.width)..to_px(area.right() + 1.0, rect.x, canvas.width);
+        let ys = to_px(area.y, rect.y, canvas.height)..to_px(area.bottom() + 1.0, rect.y, canvas.height);
+        (xs, ys)
+    };
+
     if let Some(ring) = scene.ring {
-        for y in 0..canvas.height {
-            for x in 0..canvas.width {
+        let half = ring.width / 2.0 * density;
+        let outer = half + ring.halo * density;
+        let reach = ring.radius + ring.width / 2.0 + ring.halo + 1.0;
+        let area = Area { x: ring.x - reach, y: ring.y - reach, width: 2.0 * reach, height: 2.0 * reach };
+        let (xs, ys) = pixels(area, &canvas);
+        for y in ys {
+            for x in xs.clone() {
                 let (px, py) = at(x, y);
                 let off = ((px - ring.x).hypot(py - ring.y) - ring.radius).abs() * density;
-                let half = ring.width / 2.0 * density;
-                canvas.blend(x, y, INK, HALO_ALPHA * coverage(half + ring.halo * density - off));
+                if off > outer + 1.0 {
+                    continue;
+                }
+                canvas.blend(x, y, INK, HALO_ALPHA * coverage(outer - off));
                 canvas.blend(x, y, TEAL, coverage(half - off));
             }
         }
@@ -273,8 +288,9 @@ pub fn render(scene: &Scene, display: &Display, text: Option<&Text>) -> Frame {
     if let Some(plate) = scene.label {
         let radius = plate.height / 2.0;
         let border = BORDER * display.scale;
-        for y in 0..canvas.height {
-            for x in 0..canvas.width {
+        let (xs, ys) = pixels(plate, &canvas);
+        for y in ys {
+            for x in xs.clone() {
                 let (px, py) = at(x, y);
                 let d = rounded_box(px, py, &plate, radius) * density;
                 if d > 1.0 {
