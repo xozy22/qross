@@ -21,6 +21,7 @@ mod streams;
 /// TLS-Konfiguration; öffentlich auch für Tests, die ältere Gegenstellen nachbauen
 pub mod tls;
 mod trust;
+pub mod wake;
 
 pub use identity::{Fingerprint, Identity};
 pub use trust::{TrustOutcome, TrustStore};

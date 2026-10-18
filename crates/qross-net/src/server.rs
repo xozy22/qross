@@ -30,6 +30,7 @@ use crate::rights::{self, Allowed};
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
 use crate::tls::{peer_fingerprint, server_config};
+use crate::wake::{self, SystemEvent};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore};
 
 pub struct ServerConfig {
@@ -72,6 +73,8 @@ pub struct Server {
     transfers: Transfers,
     /// Rechte je Rechner, auch während des Laufs änderbar
     sharing: SharingHandle,
+    /// Ruhezustand, Aufwachen, Netzwechsel; ohne Vorgabe vom Betriebssystem
+    system_events: Option<mpsc::UnboundedReceiver<SystemEvent>>,
 }
 
 /// Ändert die Rechte je Rechner eines laufenden Servers (siehe [`Server::sharing`]). Sie gelten
@@ -224,7 +227,16 @@ impl Server {
             fingerprint: identity.fingerprint(),
             transfers: Transfers::new(),
             sharing: SharingHandle(Arc::new(watch::channel(SharingRules::default()).0)),
+            system_events: None,
         })
+    }
+
+    /// Ruhezustand, Aufwachen und Netzwechsel aus `events` statt vom Betriebssystem (für Tests).
+    /// Vor dem Ruhezustand trennt der Server alle Clients; nach dem Aufwachen und bei einem Netzwechsel
+    /// trennt er jeden, von dem eine Weile nichts mehr kommt.
+    pub fn with_system_events(mut self, events: mpsc::UnboundedReceiver<SystemEvent>) -> Self {
+        self.system_events = Some(events);
+        self
     }
 
     /// Rechte je Rechner (Standard: alles in beide Richtungen). Ändern im Betrieb über [`Server::sharing`].
@@ -390,6 +402,7 @@ impl Server {
         let mut screen_poll = tokio::time::interval(Duration::from_secs(2));
         // Zuletzt gemeldetes Festhalten und der Bildschirm dazu
         let mut hold = (Hold::Free, self.config.name.clone());
+        let mut system_events = self.system_events.take().unwrap_or_else(wake::system_events);
         info!("Server „{}“ lauscht auf {}", self.config.name, self.local_addr()?);
         if !local_monitors.is_empty() {
             info!("eigene Monitore: {}", describe_monitors(&local_monitors));
@@ -428,8 +441,19 @@ impl Server {
                 Some(event) = net_rx.recv() => match event {
                     NetEvent::Hello { name, screen, fingerprint, conn, reply } => {
                         let addr = conn.remote_address();
-                        match self.admit(&name, &fingerprint, &clients) {
+                        match self.admit(&name, &fingerprint) {
                             Ok(()) => {
+                                // Derselbe Rechner (Name und Schlüssel) meldet sich neu, etwa nach dem
+                                // Aufwachen: Die alte Verbindung ist tot oder gleich überholt. Nicht
+                                // abweisen, bis sie ausläuft, sondern gleich ersetzen.
+                                let mut actions = Vec::new();
+                                if let Some(old) = clients.remove(&name) {
+                                    info!("„{name}“ meldet sich neu an – alte Verbindung ersetzt");
+                                    old.conn.close(wake::CLOSE_REPLACED, b"replaced");
+                                    transfers.abort_receiving(Some(&name), "Verbindung ersetzt");
+                                    self.notify(ServerNotice::ClientDisconnected { name: name.clone() });
+                                    actions = state.handle(ServerEvent::ClientDisconnected { name: name.clone() });
+                                }
                                 self.notify(ServerNotice::ClientConnected { name: name.clone(), addr, screen });
                                 let input = spawn_input_writer(conn.clone(), name.clone());
                                 let quality = self.monitor_quality(&conn, &name);
@@ -453,7 +477,8 @@ impl Server {
                                 if sharing != Sharing::ALL {
                                     info!("Rechte für „{name}“: {}", describe_sharing(sharing));
                                 }
-                                state.handle(ServerEvent::ClientConnected { name, screen })
+                                actions.extend(state.handle(ServerEvent::ClientConnected { name, screen }));
+                                actions
                             }
                             Err(reason) => {
                                 warn!("Client „{name}“ abgelehnt: {reason}");
@@ -577,6 +602,10 @@ impl Server {
                     debug!("Spielemodus: auf diesem Rechner {}", game::describe(game));
                     state.handle(ServerEvent::LocalGame(game))
                 }
+                Some(event) = system_events.recv() => {
+                    on_system_event(event, &clients);
+                    Vec::new()
+                }
                 _ = screen_poll.tick() => {
                     let (now, now_monitors) = (screen(), monitors());
                     let mut actions = Vec::new();
@@ -674,15 +703,14 @@ impl Server {
         actions
     }
 
-    fn admit(&mut self, name: &str, fingerprint: &Fingerprint, clients: &HashMap<String, ClientHandle>) -> Result<(), String> {
+    /// Darf `name` mit diesem Schlüssel herein? Ist er schon verbunden, ersetzt die neue Verbindung die
+    /// alte – denselben Namen mit einem anderen Schlüssel weist die Vertrauensliste ab.
+    fn admit(&mut self, name: &str, fingerprint: &Fingerprint) -> Result<(), String> {
         if name == self.config.name {
             return Err(format!("„{name}“ ist der Name des Servers"));
         }
         if !self.config.layout.contains(name) {
             return Err(format!("„{name}“ steht nicht im Layout des Servers"));
-        }
-        if clients.contains_key(name) {
-            return Err(format!("ein Client namens „{name}“ ist bereits verbunden"));
         }
         let mut outcome = self.trust.check(name, fingerprint);
         if outcome == TrustOutcome::Unknown {
@@ -713,6 +741,32 @@ impl Server {
 
 fn is_current(clients: &HashMap<String, ClientHandle>, name: &str, id: usize) -> bool {
     clients.get(name).is_some_and(|c| c.id == id)
+}
+
+/// Vor dem Ruhezustand alle Clients trennen: Sie merken es sofort, statt erst nach der
+/// Zeitüberschreitung. Nach dem Aufwachen und bei einem Netzwechsel jeden trennen, von dem nichts
+/// mehr kommt – unter macOS und Linux stand die Uhr im Ruhezustand still, quinn hielte tote
+/// Verbindungen sonst noch bis zu 5 s.
+fn on_system_event(event: SystemEvent, clients: &HashMap<String, ClientHandle>) {
+    match event {
+        SystemEvent::Sleeping => {
+            for (name, client) in clients {
+                debug!("Ruhezustand: trenne „{name}“");
+                client.conn.close(wake::CLOSE_SLEEPING, b"server sleeping");
+            }
+        }
+        SystemEvent::Woke | SystemEvent::NetworkChanged => {
+            for (name, client) in clients {
+                let (conn, name) = (client.conn.clone(), name.clone());
+                tokio::spawn(async move {
+                    if !wake::answers(conn.clone(), wake::SERVER_PROBE).await && conn.close_reason().is_none() {
+                        info!("„{name}“ antwortet nicht mehr – getrennt");
+                        conn.close(0u32.into(), b"no answer");
+                    }
+                });
+            }
+        }
+    }
 }
 
 /// Fürs Log, z. B. „2 Monitore (1512×982, 3744×1800)“
