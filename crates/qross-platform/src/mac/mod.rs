@@ -9,6 +9,7 @@ mod capture;
 mod drag;
 mod game;
 mod inject;
+mod layout;
 mod media;
 mod permissions;
 

@@ -34,6 +34,11 @@ impl KeyCode {
     pub fn is_media(self) -> bool {
         matches!(self, Self::MUTE | Self::VOLUME_UP | Self::VOLUME_DOWN) || self.0 & 0xF000 == Self::CONSUMER
     }
+
+    /// Strg, Umschalt, Alt bzw. Option, Windows bzw. Cmd (links und rechts)
+    pub fn is_modifier(self) -> bool {
+        (0xE0..=0xE7).contains(&self.0)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

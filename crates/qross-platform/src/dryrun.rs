@@ -19,20 +19,37 @@ impl Injector for LogInjector {
             _ => tracing::info!(?event, "würde einspeisen"),
         }
     }
+
+    fn types_text(&self) -> bool {
+        true
+    }
 }
 
 /// Merkt sich alle Ereignisse (für Tests); `1` ist der Ablageordner für Drag & Drop, `2` die
-/// Dateien, die hier gerade gezogen werden (Drag & Drop zum Server).
+/// Dateien, die hier gerade gezogen werden (Drag & Drop zum Server), `3`: kann Zeichen eingeben
+/// (Zeichenmodus, siehe [`RecordingInjector::typing`]).
 #[derive(Clone, Default)]
 pub struct RecordingInjector(
     pub Arc<Mutex<Vec<Inject>>>,
     pub Arc<Mutex<Option<PathBuf>>>,
     pub Arc<Mutex<Vec<PathBuf>>>,
+    pub bool,
 );
+
+impl RecordingInjector {
+    /// Einer, der Zeichen eingeben kann (wie Windows, macOS, X11)
+    pub fn typing() -> Self {
+        Self { 3: true, ..Self::default() }
+    }
+}
 
 impl Injector for RecordingInjector {
     fn inject(&mut self, event: &Inject) {
         self.0.lock().unwrap().push(*event);
+    }
+
+    fn types_text(&self) -> bool {
+        self.3
     }
 
     fn drop_folder(&mut self, _x: i32, _y: i32) -> Option<PathBuf> {

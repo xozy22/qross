@@ -28,6 +28,8 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// - 3: Qross 0.2 und 0.3
 /// - 4: `Control::Monitors` (seit Qross 0.5)
 /// - 5: `Control::Game` und `Datagram::MouseDelta`, der Spielemodus (seit Qross 0.6)
+/// - 6: `Control::TypesText`, `Input::Text` und `Input::Shortcut`: Zeichen statt Tastenposition
+///   (seit Qross 0.7)
 /// - 7: `Control::Sharing`, Rechte je Rechner (seit Qross 0.7)
 pub const SERVER_VERSION: u16 = 7;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
@@ -36,6 +38,9 @@ pub const MONITORS_SINCE: u16 = 4;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Game` senden. Ein Client, der sie
 /// sendet, versteht damit auch `Datagram::MouseDelta`.
 pub const GAME_MODE_SINCE: u16 = 5;
+/// Ab dieser `Welcome`-Version darf der Client `Control::TypesText` senden. Nur wer das gesendet
+/// hat, bekommt `Input::Text` und `Input::Shortcut`.
+pub const TEXT_SINCE: u16 = 6;
 /// Ab dieser `Welcome`-Version schickt der Server `Control::Sharing`: nach dem `Welcome` und bei
 /// jeder Änderung der Rechte.
 pub const SHARING_SINCE: u16 = 7;
@@ -105,6 +110,10 @@ pub enum Control {
     /// nach dem `Welcome` nur, wenn schon etwas läuft. Steht der Cursor dort, hält der Server ihn
     /// fest und schickt solange `Datagram::MouseDelta` statt `Datagram::MouseMove`.
     Game(GameState),
+    /// Client → Server (seit Qross 0.7, nur ab `TEXT_SINCE`): Der Client kann Zeichen eingeben,
+    /// unabhängig von seinem Tastaturlayout. Folgt direkt auf das `Welcome`. Ohne diese Meldung
+    /// bekommt er nur Tastenpositionen, auch wenn er auf dem Server auf „Zeichen“ steht.
+    TypesText,
     /// Server → Client (seit Qross 0.7, ab `SHARING_SINCE`): Was der Server mit diesem Client teilt.
     /// Folgt direkt auf das `Welcome` und kommt nach jeder Änderung erneut. Der Client zeigt das an
     /// und versucht Verbotenes gar nicht erst; durchgesetzt wird es ohnehin auf dem Server, auch
@@ -194,6 +203,15 @@ pub enum Input {
     DragStart { transfer: u64, entries: Vec<FileEntry> },
     /// Maustaste losgelassen: Dateien an der Position (x, y) ablegen.
     Drop { transfer: u64, x: i32, y: i32 },
+    /// Zeichenmodus (seit Qross 0.7, nur an Clients, die `Control::TypesText` gesendet haben): Die
+    /// Taste `key` ergab auf dem Server `text`, z. B. „@“ mit AltGr+Q. Der Client gibt den Text ein,
+    /// egal welches Tastaturlayout er hat, und hält das letzte Zeichen, bis `Key { key, down: false }`
+    /// kommt. Eine Wiederholung (Taste gehalten) kommt als weiteres `Text` mit derselben Taste.
+    Text { key: KeyCode, text: String },
+    /// Zeichenmodus: Kürzel wie Strg+Z. Der Client drückt die Taste, die bei ihm `ch` ergibt (ohne
+    /// Zusatztasten), und lässt sie bei `Key { key, down: false }` los. Kennt sein Layout das
+    /// Zeichen nicht, nimmt er die Taste `key`.
+    Shortcut { key: KeyCode, ch: char },
 }
 
 /// Eintrag einer Dateiübertragung. `path` ist relativ, mit `/` getrennt, und beginnt mit dem
@@ -510,5 +528,42 @@ mod tests {
         assert_eq!(to, [true, true, false, false]);
         assert_eq!(from, [true, false, true, false]);
         assert_eq!(Sharing::default(), Sharing::ALL, "ohne Angabe ist alles erlaubt (wie vor Qross 0.7)");
+    }
+
+    /// So sah `Input` bis Qross 0.6 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum InputV06 {
+        Enter { epoch: u16, x: i32, y: i32 },
+        Leave,
+        Key { key: KeyCode, down: bool },
+        Button { button: MouseButton, down: bool, x: i32, y: i32 },
+        Wheel { dx: i16, dy: i16 },
+        DragStart { transfer: u64, entries: Vec<FileEntry> },
+        Drop { transfer: u64, x: i32, y: i32 },
+    }
+
+    #[test]
+    fn typed_text_reaches_only_peers_that_understand_it() {
+        // Ein Server aus 0.6 meldet Version 5: Der Client schickt ihm kein `TypesText`.
+        const { assert!(GAME_MODE_SINCE < TEXT_SINCE && TEXT_SINCE <= SERVER_VERSION) };
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV06>(&bytes).unwrap(), ControlV06::Welcome { version: SERVER_VERSION, .. }));
+        let bytes = postcard::to_stdvec(&Control::TypesText).unwrap();
+        assert!(postcard::from_bytes::<ControlV06>(&bytes).is_err(), "ein Server aus 0.6 kann TypesText nicht lesen");
+        assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), Control::TypesText);
+
+        // Ein Client aus 0.6 liest Tasten wie bisher; Text und Kürzel bekommt er nie, denn er
+        // könnte sie nicht lesen (der ganze Input-Stream bräche ab).
+        let key = Input::Key { key: KeyCode::A, down: false };
+        let bytes = postcard::to_stdvec(&key).unwrap();
+        assert_eq!(postcard::from_bytes::<InputV06>(&bytes).unwrap(), InputV06::Key { key: KeyCode::A, down: false });
+        for input in [Input::Text { key: KeyCode(0x14), text: "@".into() }, Input::Shortcut { key: KeyCode(0x1C), ch: 'z' }] {
+            let bytes = postcard::to_stdvec(&input).unwrap();
+            assert!(postcard::from_bytes::<InputV06>(&bytes).is_err(), "{input:?}");
+            assert_eq!(postcard::from_bytes::<Input>(&bytes).unwrap(), input);
+        }
+        let emoji = Input::Text { key: KeyCode(0x08), text: "é😀".into() };
+        assert_eq!(postcard::from_bytes::<Input>(&postcard::to_stdvec(&emoji).unwrap()).unwrap(), emoji);
     }
 }

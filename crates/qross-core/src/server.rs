@@ -1,13 +1,14 @@
 //! Zustandsmaschine des Servers: Wo ist der Cursor gerade, und was muss wohin?
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use qross_proto::{Edge, GameState, Input, MouseButton, MouseDelta, MouseMove, Rect};
+use qross_proto::{Edge, GameState, Input, KeyCode, MouseButton, MouseDelta, MouseMove, Rect};
 
+use crate::chars::{KeyChars, Typist};
 use crate::input::CaptureEvent;
-use crate::keys::{KeyMap, SwitchTarget};
+use crate::keys::{KeyMap, KeyMode, SwitchTarget};
 use crate::layout::Layout;
 use crate::screen::{beyond, Screen};
 use crate::sharing::SharingRules;
@@ -30,6 +31,8 @@ pub enum ServerEvent {
     LocalGame(GameState),
     /// Spielemodus: Was im Vordergrund eines Clients läuft (seit Qross 0.6)
     ClientGame { name: String, game: GameState },
+    /// Der Client kann Zeichen eingeben (`Control::TypesText`, seit Qross 0.7)
+    ClientTypesText { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +140,12 @@ pub struct ServerState {
     push: Option<(Edge, Instant, Instant)>,
     /// Umbelegte Tasten je Rechner
     key_maps: HashMap<String, KeyMap>,
+    /// Tastenposition oder Zeichen je Rechner (fehlt: Tastenposition)
+    key_modes: HashMap<String, KeyMode>,
+    /// Verbundene Clients, die Zeichen eingeben können
+    typing: HashSet<String>,
+    /// Zeichenmodus für den Client mit dem Cursor; `None` auf dem Server und bei Tastenposition
+    typist: Option<Typist>,
     /// Auf dem aktiven Client gedrückte Maustasten (Bit je `MouseButton`)
     remote_buttons: u8,
     /// Nachfrage beim Client läuft: (Nummer, Kante, Position)
@@ -171,6 +180,9 @@ impl ServerState {
             options: SwitchOptions::IMMEDIATE,
             push: None,
             key_maps: HashMap::new(),
+            key_modes: HashMap::new(),
+            typing: HashSet::new(),
+            typist: None,
             remote_buttons: 0,
             remote_probe: None,
             next_probe: 1,
@@ -189,6 +201,20 @@ impl ServerState {
     /// Tasten je Rechner umbelegen (Name des Rechners → gedrückte Taste → gesendete Taste).
     pub fn set_key_maps(&mut self, maps: HashMap<String, KeyMap>) {
         self.key_maps = maps;
+    }
+
+    /// Tastenposition oder Zeichen je Rechner (fehlt einer: Tastenposition). Zeichen bekommt ein
+    /// Client nur, wenn er sie auch eingeben kann (`ServerEvent::ClientTypesText`).
+    pub fn set_key_modes(&mut self, modes: HashMap<String, KeyMode>) {
+        self.key_modes = modes;
+    }
+
+    /// Was `name` gerade bekommt: Zeichen nur, wenn eingestellt und der Client sie eingeben kann
+    pub fn key_mode(&self, name: &str) -> KeyMode {
+        match self.key_modes.get(name) {
+            Some(KeyMode::Chars) if self.typing.contains(name) => KeyMode::Chars,
+            _ => KeyMode::Position,
+        }
     }
 
     pub fn set_switch_options(&mut self, options: SwitchOptions) {
@@ -284,6 +310,7 @@ impl ServerState {
             ServerEvent::ClientDisconnected { name } => {
                 self.clients.remove(&name);
                 self.games.remove(&name);
+                self.typing.remove(&name);
                 if matches!(&self.active, Active::Remote { name: active, .. } if *active == name) {
                     self.go_local(self.local.center(), &mut out);
                 }
@@ -297,6 +324,15 @@ impl ServerState {
             ServerEvent::ClientGame { name, game } => {
                 if self.clients.contains_key(&name) {
                     self.set_game(Some(name), game);
+                }
+            }
+            ServerEvent::ClientTypesText { name } => {
+                if self.clients.contains_key(&name) {
+                    self.typing.insert(name);
+                    // Die Meldung kam erst, als der Cursor schon dort war
+                    if self.typist.is_none() && self.key_mode(self.active_screen()) == KeyMode::Chars {
+                        self.typist = Some(Typist::new());
+                    }
                 }
             }
         }
@@ -440,17 +476,23 @@ impl ServerState {
                         Some(_) => return,
                         None => Input::Button { button, down, x: *x, y: *y },
                     };
-                    out.push(Action::Send { to: name.clone(), input });
+                    // Zeichenmodus: zurückgehaltene Zusatztasten für Umschalt+Klick, Strg+Klick
+                    let modifiers = self.typist.as_mut().map(Typist::flush).unwrap_or_default();
+                    for input in modifiers.into_iter().chain([input]) {
+                        out.push(Action::Send { to: name.clone(), input });
+                    }
                 }
             }
-            CaptureEvent::Wheel { dx, dy } => self.send_remote(Input::Wheel { dx, dy }, out),
+            CaptureEvent::Wheel { dx, dy } => {
+                // Zeichenmodus: Strg+Rad zoomt
+                for input in self.typist.as_mut().map(Typist::flush).unwrap_or_default() {
+                    self.send_remote(input, out);
+                }
+                self.send_remote(Input::Wheel { dx, dy }, out)
+            }
             CaptureEvent::SwitchTo(target) => self.switch_to(target, out),
-            CaptureEvent::Key { key, down } => {
-                if let Active::Remote { name, .. } = &self.active {
-                    let key = self.key_maps.get(name).and_then(|map| map.get(&key)).copied().unwrap_or(key);
-                    out.push(Action::Send { to: name.clone(), input: Input::Key { key, down } });
-                }
-            }
+            CaptureEvent::Key { key, down } => self.on_key(key, down, None, out),
+            CaptureEvent::Typed { key, chars } => self.on_key(key, true, Some(&chars), out),
             CaptureEvent::PanicReturn => {
                 self.locked = false;
                 if let Active::Remote { name, .. } = &self.active {
@@ -517,6 +559,18 @@ impl ServerState {
         } else {
             self.enter(name, tx, ty, out);
         }
+    }
+
+    /// Taste an den Client mit dem Cursor: umbelegt, im Zeichenmodus als Text oder Kürzel
+    fn on_key(&mut self, key: KeyCode, down: bool, chars: Option<&KeyChars>, out: &mut Vec<Action>) {
+        let Active::Remote { name, .. } = &self.active else { return };
+        let remap = self.key_maps.get(name).and_then(|map| map.get(&key)).copied();
+        let inputs = match &mut self.typist {
+            Some(typist) if down => typist.press(key, remap, chars),
+            Some(typist) => typist.release(key, remap.unwrap_or(key)),
+            None => vec![Input::Key { key: remap.unwrap_or(key), down }],
+        };
+        out.extend(inputs.into_iter().map(|input| Action::Send { to: name.clone(), input }));
     }
 
     fn send_remote(&self, input: Input, out: &mut Vec<Action>) {
@@ -607,6 +661,7 @@ impl ServerState {
         }
         self.epoch = self.epoch.wrapping_add(1);
         self.game_released = false;
+        self.typist = (self.key_mode(&target) == KeyMode::Chars).then(Typist::new);
         out.push(Action::Send { to: target.clone(), input: Input::Enter { epoch: self.epoch, x, y } });
         out.push(Action::SyncClipboard { to: target.clone() });
         self.active = Active::Remote { name: target, x, y };
@@ -615,6 +670,7 @@ impl ServerState {
     fn go_local(&mut self, (x, y): (i32, i32), out: &mut Vec<Action>) {
         self.active = Active::Local;
         self.game_released = false;
+        self.typist = None;
         self.drag = None;
         self.reset_remote_drag(out);
         out.push(Action::ReleaseCapture { x, y });
@@ -938,6 +994,91 @@ mod tests {
             vec![Action::Send { to: "laptop".into(), input: Input::Key { key: KeyCode::A, down: true } }],
             "nicht umbelegte Tasten bleiben"
         );
+    }
+
+    const KEY_Q: KeyCode = KeyCode(0x14);
+    const SHIFT: KeyCode = KeyCode::LEFT_SHIFT;
+
+    /// Cursor auf dem Laptop, der auf `mode` steht und (`can_type`) Zeichen eingeben kann
+    fn on_laptop(mode: KeyMode, can_type: bool) -> ServerState {
+        let mut s = state();
+        s.set_key_modes(HashMap::from([("laptop".to_owned(), mode)]));
+        if can_type {
+            s.handle(ServerEvent::ClientTypesText { name: "laptop".into() });
+        }
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        s
+    }
+
+    fn to_laptop(inputs: Vec<Input>) -> Vec<Action> {
+        inputs.into_iter().map(|input| Action::Send { to: "laptop".into(), input }).collect()
+    }
+
+    fn typed_at() -> ServerEvent {
+        ServerEvent::Capture(CaptureEvent::Typed { key: KEY_Q, chars: KeyChars::text("@", 'q') })
+    }
+
+    fn key(key: KeyCode, down: bool) -> ServerEvent {
+        ServerEvent::Capture(CaptureEvent::Key { key, down })
+    }
+
+    #[test]
+    fn characters_go_only_to_clients_set_to_and_able_to_type_them() {
+        let mut s = on_laptop(KeyMode::Chars, true);
+        assert_eq!(s.key_mode("laptop"), KeyMode::Chars);
+        assert_eq!(s.handle(typed_at()), to_laptop(vec![Input::Text { key: KEY_Q, text: "@".into() }]));
+        assert_eq!(s.handle(key(KEY_Q, false)), to_laptop(vec![Input::Key { key: KEY_Q, down: false }]));
+
+        // Auf Tastenposition, oder er kann es nicht (älteres Qross, Wayland): die Taste wie bisher
+        for mut s in [on_laptop(KeyMode::Position, true), on_laptop(KeyMode::Chars, false)] {
+            assert_eq!(s.key_mode("laptop"), KeyMode::Position);
+            assert_eq!(s.handle(key(SHIFT, true)), to_laptop(vec![Input::Key { key: SHIFT, down: true }]));
+            assert_eq!(s.handle(typed_at()), to_laptop(vec![Input::Key { key: KEY_Q, down: true }]));
+        }
+        // Auf dem Server selbst geht nichts raus
+        let mut s = on_laptop(KeyMode::Chars, true);
+        s.handle(ServerEvent::Capture(CaptureEvent::PanicReturn));
+        assert!(s.handle(typed_at()).is_empty());
+    }
+
+    #[test]
+    fn held_modifiers_reach_the_client_before_clicks_and_wheels() {
+        let mut s = on_laptop(KeyMode::Chars, true);
+        assert!(s.handle(key(SHIFT, true)).is_empty(), "Umschalt wartet");
+        let click = ServerEvent::Capture(CaptureEvent::Button { button: MouseButton::Left, down: true });
+        assert_eq!(
+            s.handle(click),
+            to_laptop(vec![
+                Input::Key { key: SHIFT, down: true },
+                Input::Button { button: MouseButton::Left, down: true, x: 1, y: 399 },
+            ])
+        );
+        let wheel = ServerEvent::Capture(CaptureEvent::Wheel { dx: 0, dy: 120 });
+        assert_eq!(s.handle(wheel), to_laptop(vec![Input::Wheel { dx: 0, dy: 120 }]));
+        assert_eq!(s.handle(key(SHIFT, false)), to_laptop(vec![Input::Key { key: SHIFT, down: false }]));
+    }
+
+    #[test]
+    fn the_ability_to_type_counts_from_its_report_until_disconnecting() {
+        // Die Meldung kommt erst, als der Cursor schon auf dem Laptop ist
+        let mut s = on_laptop(KeyMode::Chars, false);
+        s.handle(ServerEvent::ClientTypesText { name: "laptop".into() });
+        assert_eq!(s.handle(typed_at()), to_laptop(vec![Input::Text { key: KEY_Q, text: "@".into() }]));
+        // Neu verbunden: wieder Tastenposition, bis er es erneut meldet
+        s.handle(ServerEvent::ClientDisconnected { name: "laptop".into() });
+        s.handle(ServerEvent::ClientConnected { name: "laptop".into(), screen: LAPTOP });
+        assert_eq!(s.key_mode("laptop"), KeyMode::Position);
+        // Unbekannte Rechner melden nichts an
+        s.handle(ServerEvent::ClientTypesText { name: "tablet".into() });
+        assert!(!s.typing.contains("tablet"));
+    }
+
+    #[test]
+    fn remapping_applies_in_character_mode_too() {
+        let mut s = on_laptop(KeyMode::Chars, true);
+        s.set_key_maps(HashMap::from([("laptop".to_owned(), HashMap::from([(KEY_Q, KeyCode::A)]))]));
+        assert_eq!(s.handle(typed_at()), to_laptop(vec![Input::Key { key: KeyCode::A, down: true }]));
+        assert_eq!(s.handle(key(KEY_Q, false)), to_laptop(vec![Input::Key { key: KeyCode::A, down: false }]));
     }
 
     #[test]

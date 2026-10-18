@@ -3,6 +3,7 @@
 
 mod capture;
 mod inject;
+mod keymap;
 
 use std::sync::{Arc, Mutex, OnceLock};
 

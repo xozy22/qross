@@ -4,6 +4,7 @@
 
 use std::time::{Duration, Instant};
 
+use qross_core::chars::KeyChars;
 use qross_core::keys::{KeyOptions, SwitchTarget};
 use qross_core::{CaptureEvent, Inject};
 use qross_proto::{Edge, KeyCode, MouseButton};
@@ -67,6 +68,23 @@ fn x11_capture_and_injection() {
     let keycodes = collect_keys(&conn, Duration::from_secs(2), 2);
     assert_eq!(keycodes, vec![(38, true), (38, false)], "A = evdev 30 + 8");
 
+    // Zeichenmodus: a über die vorhandene Taste, € über einen vorübergehend belegten Keycode
+    assert!(injector.types_text());
+    injector.inject(&Inject::Char { ch: 'a', down: true });
+    injector.inject(&Inject::Char { ch: 'a', down: false });
+    assert_eq!(collect_keys(&conn, Duration::from_secs(2), 2), vec![(38, true), (38, false)]);
+    injector.inject(&Inject::Char { ch: '€', down: true });
+    injector.inject(&Inject::Char { ch: '€', down: false });
+    let keycodes = collect_keys(&conn, Duration::from_secs(2), 2);
+    assert_eq!(keycodes.len(), 2, "{keycodes:?}");
+    let code = keycodes[0].0;
+    let mapping = conn.get_keyboard_mapping(code, 1).unwrap().reply().unwrap();
+    assert_eq!(mapping.keysyms.first(), Some(&0x0100_20ac), "Keycode {code} trägt EuroSign");
+    // Kürzel gehen über die Taste, die das Zeichen ergibt (hier US: z = evdev 44 + 8)
+    injector.inject(&Inject::Shortcut { ch: 'z', key: KeyCode(0x1C), down: true });
+    injector.inject(&Inject::Shortcut { ch: 'z', key: KeyCode(0x1C), down: false });
+    assert_eq!(collect_keys(&conn, Duration::from_secs(2), 2), vec![(52, true), (52, false)]);
+
     // --- Erfassen -----------------------------------------------------------------------
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let capture = qross_platform::start_capture(tx).unwrap();
@@ -113,10 +131,18 @@ fn x11_capture_and_injection() {
     assert_eq!(click, CaptureEvent::Button { button: MouseButton::Right, down: true });
     conn.xtest_fake_input(x11rb::protocol::xproto::BUTTON_RELEASE_EVENT, 3, CURRENT_TIME, root, 0, 0, 0).unwrap();
 
+    // Zeichentasten kommen mit dem, was sie in der Belegung des X-Servers ergeben (Zeichenmodus)
     injector.inject(&Inject::Key { key: KeyCode::A, down: true });
-    let key = wait_event(&mut rx, |e| matches!(e, CaptureEvent::Key { .. }));
-    assert_eq!(key, CaptureEvent::Key { key: KeyCode::A, down: true });
+    let key = wait_event(&mut rx, |e| matches!(e, CaptureEvent::Typed { .. }));
+    assert_eq!(key, CaptureEvent::Typed { key: KeyCode::A, chars: KeyChars::text("a", 'a') });
     injector.inject(&Inject::Key { key: KeyCode::A, down: false });
+    assert_eq!(wait_event(&mut rx, |e| matches!(e, CaptureEvent::Key { .. })), CaptureEvent::Key { key: KeyCode::A, down: false });
+    let shift = KeyCode::LEFT_SHIFT;
+    for (key, down) in [(shift, true), (KeyCode::A, true), (KeyCode::A, false), (shift, false)] {
+        injector.inject(&Inject::Key { key, down });
+    }
+    let key = wait_event(&mut rx, |e| matches!(e, CaptureEvent::Typed { .. }));
+    assert_eq!(key, CaptureEvent::Typed { key: KeyCode::A, chars: KeyChars::text("A", 'a') });
     assert!(collect_keys(&conn, Duration::from_millis(300), 1).is_empty(), "abgefangene Tasten erreichen das Fenster nicht");
 
     // Remote: Das Kürzel meldet den Wechsel, die 2 selbst geht nicht an den Client

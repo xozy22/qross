@@ -4,6 +4,9 @@
 //!
 //! Medientasten sind unter macOS Systemereignisse, die dieser Tap nicht abfängt – sie wirken
 //! deshalb immer auf dem Mac selbst.
+//!
+//! Im Remote-Modus meldet der Tap zu jeder Zeichentaste, was sie im Tastaturlayout der aktuellen
+//! Eingabequelle ergibt (`CaptureEvent::Typed`, für Clients im Zeichenmodus).
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -21,11 +24,13 @@ use core_graphics::event::{
     EventField,
 };
 use core_graphics::geometry::CGPoint;
+use qross_core::chars::is_typing_key;
 use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions};
 use qross_core::CaptureEvent;
 use qross_proto::{Edge, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::layout;
 use crate::keymap_mac::{hid_from_mac, is_modifier};
 use crate::Capture;
 
@@ -63,6 +68,8 @@ pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> 
         keys: Mutex::new(KeyOptions::default()),
         await_drop: AtomicBool::new(false),
     });
+    // Tastaturlayout für den Zeichenmodus
+    layout::refresh(Duration::ZERO);
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let worker = shared.clone();
     thread::Builder::new().name("qross-mac-tap".into()).spawn(move || run(worker, ready_tx))?;
@@ -245,6 +252,11 @@ fn handle(s: &Shared, state: &RefCell<TapState>, kind: CGEventType, event: &CGEv
                     send(CaptureEvent::Key { key, down: true });
                     Some(CaptureEvent::Key { key, down: false })
                 }
+                // Zeichenmodus: was die Taste im Layout ergibt (ohne gelesenes Layout: Position)
+                Some(key) if matches!(kind, KeyDown) && is_typing_key(key) => Some(match layout::current() {
+                    Some(layout) => CaptureEvent::Typed { key, chars: layout.key_chars(code, event.get_flags()) },
+                    None => CaptureEvent::Key { key, down },
+                }),
                 Some(key) if is_modifier(code) || matches!(kind, KeyDown | KeyUp) => Some(CaptureEvent::Key { key, down }),
                 _ => None,
             }
@@ -315,6 +327,8 @@ impl Capture for MacCapture {
 
     fn capture_remote(&self) {
         self.0.remote.store(true, Ordering::Release);
+        // Die Eingabequelle kann sich seit dem letzten Mal geändert haben
+        layout::refresh(Duration::ZERO);
         let b = CGDisplay::main().bounds();
         let center = CGPoint::new(b.origin.x + b.size.width / 2.0, b.origin.y + b.size.height / 2.0);
         let _ = CGDisplay::warp_mouse_cursor_position(center);

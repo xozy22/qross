@@ -29,6 +29,11 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 - Eingeschränkte Rechner tragen in der Anordnung ein Schild. Clients zeigen an, was der Server für sie
   einschränkt, und versuchen es gar nicht erst: Wohin Drag & Drop nicht darf, wechselt der Cursor mit gedrückter
   Taste auch nicht.
+- **Zeichen statt Tastenposition, je Rechner:** Steht ein Rechner unter Einstellungen → Tastatur auf „Zeichen“,
+  kommt dort an, was du auf dem Server tippst, auch wenn er ein anderes Tastaturlayout hat (z. B. Server
+  Deutsch, Mac US): Y und Z, Umlaute, @, €, Klammern, tote Tasten wie ^ und ´ sowie alle AltGr-Zeichen. Kürzel
+  wie Strg+Z gehen nach dem Zeichen und bleiben dort „Rückgängig“, Pfeile, F-Tasten und Co. bleiben Tasten.
+  Standard bleibt „Tastenposition“, wie sie Spiele brauchen. In `qross.toml`: `[keys.mode]`.
 
 ### Behoben
 
@@ -42,6 +47,9 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
   Ortungsdiensten heraus; dort zeigt Qross das Subnetz und erkennt das Netzwerk trotzdem.
 - Der Server setzt die Rechte auch gegenüber Clients mit Qross 0.5 und 0.6 durch: Was sie trotzdem schicken,
   weist er ab, ohne Reste zu hinterlassen. Anzeigen können die Rechte erst Clients ab dieser Version.
+- Zeichen bekommen nur Rechner mit dem neuen Qross unter Windows, macOS oder X11. Ältere Clients und Clients
+  unter Wayland bekommen weiter Tastenpositionen; die Oberfläche zeigt das beim Rechner an. Ein Server unter
+  Wayland schickt immer Tastenpositionen.
 
 ## [0.6.0] - 2026-10-18
 

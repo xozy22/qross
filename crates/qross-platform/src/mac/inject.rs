@@ -13,6 +13,8 @@ use core_graphics::geometry::CGPoint;
 use qross_core::Inject;
 use qross_proto::MouseButton;
 
+use super::layout;
+
 use crate::keymap_mac::mac_from_hid;
 use crate::Injector;
 
@@ -40,6 +42,8 @@ impl MacInjector {
     pub fn new() -> Result<Self> {
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .map_err(|_| anyhow!("CGEventSource nicht verfügbar (Bedienungshilfen-Recht fehlt?)"))?;
+        // Tastaturlayout für Kürzel im Zeichenmodus
+        layout::refresh(Duration::ZERO);
         Ok(Self {
             source,
             pos: CGPoint::new(0.0, 0.0),
@@ -106,6 +110,10 @@ impl MacInjector {
 }
 
 impl Injector for MacInjector {
+    fn types_text(&self) -> bool {
+        true
+    }
+
     fn take_dragged_files(&mut self, _x: i32, _y: i32) -> Vec<std::path::PathBuf> {
         // Nur ein Drag, der nach dem Drücken der Taste begonnen hat, zählt.
         let Some(mark) = self.drag_mark.filter(|_| self.buttons[MouseButton::Left as usize]) else { return Vec::new() };
@@ -205,6 +213,30 @@ impl Injector for MacInjector {
                     e.set_flags(self.flags);
                 }
                 self.post(event);
+            }
+            Inject::Char { ch, down } => {
+                let event = CGEvent::new_keyboard_event(self.source.clone(), 0, down).ok();
+                if let Some(e) = &event {
+                    let mut buf = [0u16; 2];
+                    e.set_string_from_utf16_unchecked(ch.encode_utf16(&mut buf));
+                    // Das Zeichen steht fest; mit Option o. Ä. wäre es womöglich ein Kürzel.
+                    e.set_flags(CGEventFlags::CGEventFlagNull);
+                }
+                self.post(event);
+            }
+            Inject::Shortcut { ch, key, down } => {
+                // Menüs prüfen das Zeichen der Taste: Cmd+Z braucht die Taste, die hier z ergibt.
+                layout::refresh(Duration::from_secs(2));
+                match layout::current().and_then(|layout| layout.find(ch)) {
+                    Some((code, shift)) => {
+                        let event = CGEvent::new_keyboard_event(self.source.clone(), code, down).ok();
+                        if let Some(e) = &event {
+                            e.set_flags(if shift { self.flags | CGEventFlags::CGEventFlagShift } else { self.flags });
+                        }
+                        self.post(event);
+                    }
+                    None => self.inject(&Inject::Key { key, down }),
+                }
             }
         }
     }

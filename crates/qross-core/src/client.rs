@@ -1,7 +1,7 @@
 //! Zustand des Clients: veraltete Datagramme verwerfen und gedrückte Tasten verfolgen,
 //! damit beim Verlassen oder Verbindungsabbruch nichts „hängen“ bleibt.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use qross_proto::{Input, KeyCode, MouseButton, MouseDelta, MouseMove};
 
@@ -19,6 +19,9 @@ pub struct ClientState {
     last_seq: Option<u32>,
     held_keys: BTreeSet<KeyCode>,
     held_buttons: BTreeSet<MouseButton>,
+    /// Zeichenmodus: Tasten des Servers, die hier als Zeichen bzw. Kürzel gedrückt sind, und wie
+    /// sie wieder losgelassen werden
+    typed: BTreeMap<KeyCode, Inject>,
     /// Strg ↔ Cmd tauschen (PC steuert Mac oder umgekehrt), damit Strg+C dort Kopieren bleibt
     swap_ctrl_cmd: bool,
     /// Der Server schickt gerade relative Bewegungen (Spielemodus). Klicks springen dann nicht
@@ -68,6 +71,16 @@ impl ClientState {
                 (self.release_all(), Some(Transition::Left))
             }
             _ if !self.is_active() => (Vec::new(), None),
+            Input::Key { key, down: false } if self.typed.contains_key(&key) => {
+                (self.typed.remove(&key).into_iter().collect(), None)
+            }
+            Input::Text { key, text } => (self.type_text(key, &text), None),
+            Input::Shortcut { key, ch } => {
+                let mut out = self.release_typed(key, Inject::Shortcut { ch, key, down: false });
+                out.push(Inject::Shortcut { ch, key, down: true });
+                self.typed.insert(key, Inject::Shortcut { ch, key, down: false });
+                (out, None)
+            }
             Input::Key { key, down } => {
                 let key = if self.swap_ctrl_cmd { swap_ctrl_cmd(key) } else { key };
                 if down {
@@ -93,6 +106,29 @@ impl ClientState {
             // Dateiübertragung: übernimmt die Laufzeit; die Position kommt mit dem Drop.
             Input::DragStart { .. } => (Vec::new(), None),
             Input::Drop { x, y, .. } => (vec![Inject::MoveTo { x, y }], None),
+        }
+    }
+
+    /// Zeichenmodus: `text` eingeben. Das letzte Zeichen bleibt gedrückt, bis die Taste des Servers
+    /// losgelassen wird; eine Wiederholung drückt es erneut, wie eine gehaltene Taste.
+    fn type_text(&mut self, key: KeyCode, text: &str) -> Vec<Inject> {
+        let chars: Vec<char> = text.chars().collect();
+        let Some((&last, first)) = chars.split_last() else { return Vec::new() };
+        let release = Inject::Char { ch: last, down: false };
+        let mut out = self.release_typed(key, release);
+        for &ch in first {
+            out.extend([Inject::Char { ch, down: true }, Inject::Char { ch, down: false }]);
+        }
+        out.push(Inject::Char { ch: last, down: true });
+        self.typed.insert(key, release);
+        out
+    }
+
+    /// Ist für `key` gerade etwas anderes als `next` gedrückt, erst das loslassen.
+    fn release_typed(&mut self, key: KeyCode, next: Inject) -> Vec<Inject> {
+        match self.typed.get(&key) {
+            Some(&held) if held != next => self.typed.remove(&key).into_iter().collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -131,11 +167,12 @@ impl ClientState {
 
     /// Alle noch gedrückten Tasten und Maustasten loslassen.
     pub fn release_all(&mut self) -> Vec<Inject> {
+        let typed = std::mem::take(&mut self.typed);
         let keys = std::mem::take(&mut self.held_keys);
         let buttons = std::mem::take(&mut self.held_buttons);
-        keys.into_iter()
-            .rev()
-            .map(|key| Inject::Key { key, down: false })
+        typed
+            .into_values()
+            .chain(keys.into_iter().rev().map(|key| Inject::Key { key, down: false }))
             .chain(buttons.into_iter().map(|button| Inject::Button { button, down: false }))
             .collect()
     }
@@ -200,6 +237,52 @@ mod tests {
         let (injects, _) = c.on_input(Input::Leave);
         assert_eq!(injects, vec![Inject::Key { key: KeyCode(0xE3), down: false }]);
         assert_eq!(swap_ctrl_cmd(KeyCode::A), KeyCode::A);
+    }
+
+    const KEY_Q: KeyCode = KeyCode(0x14);
+    const KEY_Y: KeyCode = KeyCode(0x1C);
+
+    #[test]
+    fn typed_characters_are_held_until_their_key_is_released() {
+        let mut c = ClientState::new();
+        c.on_input(Input::Enter { epoch: 1, x: 0, y: 0 });
+        let (injects, _) = c.on_input(Input::Text { key: KEY_Q, text: "@".into() });
+        assert_eq!(injects, vec![Inject::Char { ch: '@', down: true }]);
+        // Gehalten: noch einmal drücken, ohne loszulassen
+        let (injects, _) = c.on_input(Input::Text { key: KEY_Q, text: "@".into() });
+        assert_eq!(injects, vec![Inject::Char { ch: '@', down: true }]);
+        let (injects, _) = c.on_input(Input::Key { key: KEY_Q, down: false });
+        assert_eq!(injects, vec![Inject::Char { ch: '@', down: false }]);
+        assert!(c.typed.is_empty());
+
+        // Mehrere Zeichen (z. B. „^x“ nach einer toten Taste): alle bis aufs letzte tippen
+        let (injects, _) = c.on_input(Input::Text { key: KEY_Q, text: "^x".into() });
+        assert_eq!(
+            injects,
+            vec![Inject::Char { ch: '^', down: true }, Inject::Char { ch: '^', down: false }, Inject::Char { ch: 'x', down: true }]
+        );
+        let (injects, _) = c.on_input(Input::Leave);
+        assert_eq!(injects, vec![Inject::Char { ch: 'x', down: false }], "beim Verlassen losgelassen");
+    }
+
+    #[test]
+    fn shortcuts_press_the_key_for_their_character() {
+        let mut c = ClientState::new();
+        c.set_swap_ctrl_cmd(true);
+        c.on_input(Input::Enter { epoch: 1, x: 0, y: 0 });
+        let (injects, _) = c.on_input(Input::Key { key: KeyCode::LEFT_CTRL, down: true });
+        assert_eq!(injects, vec![Inject::Key { key: KeyCode(0xE3), down: true }], "Strg wird am Mac zu Cmd");
+        let (injects, _) = c.on_input(Input::Shortcut { key: KEY_Y, ch: 'z' });
+        assert_eq!(injects, vec![Inject::Shortcut { ch: 'z', key: KEY_Y, down: true }]);
+        let (injects, _) = c.on_input(Input::Key { key: KEY_Y, down: false });
+        assert_eq!(injects, vec![Inject::Shortcut { ch: 'z', key: KEY_Y, down: false }]);
+        // Ohne Shortcut gedrückt: eine ganz normale Taste
+        let (injects, _) = c.on_input(Input::Key { key: KEY_Y, down: false });
+        assert_eq!(injects, vec![Inject::Key { key: KEY_Y, down: false }]);
+        let (injects, _) = c.on_input(Input::Leave);
+        assert_eq!(injects, vec![Inject::Key { key: KeyCode(0xE3), down: false }]);
+        let (injects, _) = c.on_input(Input::Text { key: KEY_Q, text: "a".into() });
+        assert!(injects.is_empty(), "nicht aktiv");
     }
 
     #[test]

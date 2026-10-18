@@ -215,10 +215,12 @@ impl ServerSettings {
         self.screens.iter().any(|s| s.name == name)
     }
 
-    /// Tasten-Einstellungen, wie sie gelten: Wechsel-Kürzel nur zu Rechnern im Layout
+    /// Tasten-Einstellungen, wie sie gelten: Wechsel-Kürzel und Tastenposition oder Zeichen nur für
+    /// Rechner im Layout
     pub fn effective_keys(&self) -> KeySettings {
         let mut keys = self.keys.clone();
         keys.switch.screens.retain(|name, _| self.contains(name));
+        keys.modes.retain(|name, _| self.contains(name));
         keys
     }
 
@@ -461,6 +463,8 @@ mod tests {
             media: qross_core::keys::MediaKeys,
             #[serde(default)]
             remap: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+            #[serde(default)]
+            mode: std::collections::HashMap<String, qross_core::keys::KeyMode>,
         }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -483,7 +487,14 @@ mod tests {
             "lap\"top".into(),
             vec![crate::keys::KeyRule { from: "AltLeft".into(), to: "MetaLeft".into() }],
         );
+        s.keys.modes.insert("lap\"top".into(), qross_core::keys::KeyMode::Chars);
+        s.keys.modes.insert("entfernt".into(), qross_core::keys::KeyMode::Chars);
         let file: ServerFile = toml::from_str(&s.to_toml(250)).unwrap();
+        assert_eq!(
+            file.keys.mode.into_iter().collect::<Vec<_>>(),
+            [("lap\"top".to_owned(), qross_core::keys::KeyMode::Chars)],
+            "nur Rechner im Layout"
+        );
         assert_eq!(file.keys.lock, "Ctrl+Alt+KeyL");
         assert_eq!(file.keys.media, qross_core::keys::MediaKeys::Local);
         let remap = qross_core::keys::parse_key_map(&file.keys.remap["lap\"top"]).unwrap();

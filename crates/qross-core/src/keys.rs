@@ -1,5 +1,5 @@
-//! Tasten-Einstellungen: Namen, Tastenkombinationen (Fang-Taste, Wechsel-Kürzel), Medientasten
-//! und Umbelegung je Rechner.
+//! Tasten-Einstellungen: Namen, Tastenkombinationen (Fang-Taste, Wechsel-Kürzel), Medientasten,
+//! Umbelegung und Tastenposition oder Zeichen je Rechner.
 //!
 //! Tasten heißen wie `KeyboardEvent.code` im Browser („KeyA“, „ScrollLock“, „AltLeft“). So kann
 //! die Oberfläche eine gedrückte Taste direkt übernehmen, und `qross.toml` bleibt lesbar.
@@ -397,12 +397,37 @@ impl KeyOptions {
 /// Umbelegung für einen Rechner: gedrückte Taste → gesendete Taste
 pub type KeyMap = HashMap<KeyCode, KeyCode>;
 
+/// Was bei einem Rechner ankommt, wenn auf dem Server eine Taste gedrückt wird
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyMode {
+    /// Die Taste an derselben Stelle; das Tastaturlayout des Rechners bestimmt das Zeichen
+    /// (wie eine dort angeschlossene Tastatur, nötig für Spiele)
+    #[default]
+    Position,
+    /// Das Zeichen, das die Taste auf dem Server ergibt, egal welches Layout der Rechner hat.
+    /// Kürzel wie Strg+Z gehen nach dem Zeichen, Pfeile, F-Tasten und Co. bleiben Tasten.
+    Chars,
+}
+
+impl KeyMode {
+    /// Für Log und Oberfläche
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Position => "Tastenposition",
+            Self::Chars => "Zeichen",
+        }
+    }
+}
+
 /// Alle Tasten-Einstellungen des Servers
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyConfig {
     pub options: KeyOptions,
     /// Name des Rechners → Umbelegung
     pub remap: HashMap<String, KeyMap>,
+    /// Name des Rechners → Tastenposition oder Zeichen (fehlt: Tastenposition)
+    pub modes: HashMap<String, KeyMode>,
 }
 
 /// Liest eine Umbelegung wie in `qross.toml` (`AltLeft = "MetaLeft"`).
@@ -628,6 +653,19 @@ mod tests {
         }
         let parsed: Wrap = toml_like("local", "Ctrl+KeyL");
         assert_eq!((parsed.media, parsed.lock.to_string()), (MediaKeys::Local, "Ctrl+KeyL".to_owned()));
+    }
+
+    #[test]
+    fn key_modes_read_like_the_config() {
+        use serde::de::value::Error;
+        use serde::de::IntoDeserializer;
+        let mode = |text: &str| KeyMode::deserialize(IntoDeserializer::<Error>::into_deserializer(text)).ok();
+        assert_eq!(mode("chars"), Some(KeyMode::Chars));
+        assert_eq!(mode("position"), Some(KeyMode::Position));
+        assert_eq!(mode("zeichen"), None);
+        assert_eq!(KeyMode::default(), KeyMode::Position, "wie bisher");
+        assert_eq!(KeyMode::Chars.label(), "Zeichen");
+        assert!(KeyConfig::default().modes.is_empty());
     }
 
     /// Ohne toml-Abhängigkeit im Kern: dieselben serde-Pfade über den String-Deserializer

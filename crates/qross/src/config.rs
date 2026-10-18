@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use qross_core::keys::{parse_key_map, parse_switch_keys, Hotkey, KeyConfig, KeyOptions, MediaKeys};
+use qross_core::keys::{parse_key_map, parse_switch_keys, Hotkey, KeyConfig, KeyMode, KeyOptions, MediaKeys};
 use qross_core::server::SwitchOptions;
 use qross_core::sharing::{Share, Sharing, SharingRules};
 use qross_core::LinkConfig;
@@ -96,7 +96,8 @@ impl Default for GameSection {
     }
 }
 
-/// Abschnitt `[keys]`: Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung je Rechner.
+/// Abschnitt `[keys]`: Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung und Tastenposition
+/// oder Zeichen je Rechner.
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct KeysSection {
@@ -111,11 +112,20 @@ pub struct KeysSection {
     /// Kürzel → Rechner oder Richtung („left“, „right“, „up“, „down“)
     #[serde(default)]
     pub switch: HashMap<String, String>,
+    /// Name des Rechners → „position“ (Standard) oder „chars“
+    #[serde(default)]
+    pub mode: HashMap<String, KeyMode>,
 }
 
 impl Default for KeysSection {
     fn default() -> Self {
-        Self { lock: default_lock(), media: MediaKeys::default(), remap: HashMap::new(), switch: HashMap::new() }
+        Self {
+            lock: default_lock(),
+            media: MediaKeys::default(),
+            remap: HashMap::new(),
+            switch: HashMap::new(),
+            mode: HashMap::new(),
+        }
     }
 }
 
@@ -142,7 +152,7 @@ impl KeysSection {
         if let Some(conflict) = options.conflicts().into_iter().next() {
             anyhow::bail!("[keys]: {conflict}");
         }
-        Ok(KeyConfig { options, remap })
+        Ok(KeyConfig { options, remap, modes: self.mode.clone() })
     }
 }
 
@@ -282,6 +292,17 @@ mod tests {
         let twice = error("[keys.switch]\n\"Ctrl+Alt+KeyL\" = \"laptop\"\n\"Alt+Ctrl+KeyL\" = \"left\"");
         assert!(twice.contains("schon belegt"), "{twice}");
         assert!(error("[keys.switch]\n\"Ctrl+Alt+Shift+Escape\" = \"pc\"").contains("Notausgang"));
+    }
+
+    #[test]
+    fn key_modes_are_read_per_machine() {
+        let example: ServerFile = toml::from_str(include_str!("../../../qross.example.toml")).unwrap();
+        assert!(example.keys.config().unwrap().modes.is_empty(), "Standard: Tastenposition");
+        let file: ServerFile = toml::from_str("[keys.mode]\nlaptop = \"chars\"\nmac = \"position\"").unwrap();
+        let modes = file.keys.config().unwrap().modes;
+        assert_eq!((modes["laptop"], modes["mac"]), (KeyMode::Chars, KeyMode::Position));
+        let wrong = toml::from_str::<ServerFile>("[keys.mode]\nlaptop = \"zeichen\"").unwrap_err().to_string();
+        assert!(wrong.contains("chars"), "{wrong}");
     }
 
     #[test]
