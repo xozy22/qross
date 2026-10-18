@@ -1,12 +1,13 @@
 //! Betriebssystem-Anbindung: Eingaben abfangen (Server), Eingaben einspeisen (Client),
-//! Clipboard und Bildschirmgröße. Aktuell ist Windows implementiert; andere Plattformen
-//! liefern einen klaren Fehler, bis sie nachgezogen werden.
+//! Clipboard und Bildschirmgröße. Windows, macOS und Linux (X11 und Wayland); andere Plattformen
+//! liefern einen klaren Fehler.
 
 pub mod clipformat;
 pub mod dryrun;
 pub mod keymap_linux;
 pub mod keymap_mac;
 pub mod keymap_windows;
+pub mod wayland_logic;
 
 #[cfg(windows)]
 mod win;
@@ -14,9 +15,13 @@ mod win;
 use win as imp;
 
 #[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+mod wayland;
+#[cfg(target_os = "linux")]
 mod x11;
 #[cfg(target_os = "linux")]
-use x11 as imp;
+use linux as imp;
 
 #[cfg(target_os = "macos")]
 mod mac;
@@ -31,7 +36,7 @@ mod unsupported;
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 use unsupported as imp;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use qross_core::keys::KeyOptions;
@@ -113,7 +118,8 @@ pub enum Permission {
     InputMonitoring,
 }
 
-/// Hat Qross dieses Recht? Windows und Linux kennen solche Rechte nicht und liefern immer `true`.
+/// Hat Qross dieses Recht? Windows und Linux kennen solche Rechte nicht und liefern immer `true`
+/// (die Freigaben der Wayland-Portale stehen in [`portal_state`]).
 pub fn has_permission(permission: Permission) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -138,6 +144,94 @@ pub fn request_permission(permission: Permission) {
 /// Einmal beim Programmstart aufrufen (z. B. DPI-Awareness unter Windows).
 pub fn init_process() {
     imp::init_process();
+}
+
+/// Datenverzeichnis von Qross (z. B. `--data-dir`). Dort merkt sich Qross unter Wayland die
+/// Freigaben der Desktop-Portale; ohne Aufruf gilt `~/.config/Qross`.
+pub fn set_data_dir(dir: &Path) {
+    #[cfg(target_os = "linux")]
+    wayland::set_data_dir(dir);
+    #[cfg(not(target_os = "linux"))]
+    let _ = dir;
+}
+
+/// Grafische Sitzung, über die Qross Eingaben erfasst und einspeist
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Desktop {
+    Windows,
+    MacOs,
+    X11,
+    /// Wayland: über die Desktop-Portale (xdg-desktop-portal) und libei
+    Wayland,
+    Other,
+}
+
+pub fn desktop() -> Desktop {
+    #[cfg(windows)]
+    return Desktop::Windows;
+    #[cfg(target_os = "macos")]
+    return Desktop::MacOs;
+    #[cfg(target_os = "linux")]
+    return match linux::session() {
+        wayland_logic::LinuxSession::X11 => Desktop::X11,
+        wayland_logic::LinuxSession::Wayland => Desktop::Wayland,
+    };
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    return Desktop::Other;
+}
+
+/// Warum das Desktop-Portal unter Wayland keine Sitzung geöffnet hat
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PortalProblem {
+    /// Das Portal fehlt oder ist zu alt (was genau)
+    Missing(String),
+    /// Der Nutzer hat die Freigabe abgelehnt
+    Denied,
+    /// Sonstiger Fehler
+    Failed(String),
+}
+
+impl std::fmt::Display for PortalProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PortalProblem::Missing(what) => f.write_str(what),
+            PortalProblem::Denied => f.write_str("Freigabe abgelehnt"),
+            PortalProblem::Failed(error) => f.write_str(error),
+        }
+    }
+}
+
+/// Stand der Desktop-Portale unter Wayland, für Hinweise in der Oberfläche
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PortalState {
+    /// Version der Portal-Schnittstelle RemoteDesktop (Einspeisen; libei ab 2), `None`: fehlt
+    pub remote_desktop: Option<u32>,
+    /// Version der Portal-Schnittstelle InputCapture (Erfassen), `None`: fehlt
+    pub input_capture: Option<u32>,
+    /// Letztes Problem beim Einspeisen bzw. Erfassen; `None`, wenn es geklappt hat oder nie versucht wurde
+    pub injector: Option<PortalProblem>,
+    pub capture: Option<PortalProblem>,
+    /// Eine Freigabe ist gemerkt (Restore-Token), beim nächsten Start fragt das System nicht erneut
+    pub remembered_injector: bool,
+    pub remembered_capture: bool,
+}
+
+/// Unter Wayland der Stand der Portale (fragt beim ersten Mal den Portal-Dienst, bis zu 5 s);
+/// sonst `None`.
+pub fn portal_state() -> Option<PortalState> {
+    #[cfg(target_os = "linux")]
+    if desktop() == Desktop::Wayland {
+        return Some(wayland::state());
+    }
+    None
+}
+
+/// Gemerkte Freigaben der Portale vergessen: Beim nächsten Start fragt das System wieder.
+pub fn forget_portal_permissions() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    return wayland::forget_tokens();
+    #[cfg(not(target_os = "linux"))]
+    Ok(())
 }
 
 /// Bounding-Box aller Monitore in physischen Pixeln.
@@ -177,6 +271,14 @@ pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Ar
 
 pub fn injector() -> anyhow::Result<Box<dyn Injector>> {
     imp::injector()
+}
+
+/// Nur für Tests: Wayland-Einspeisung über eine schon geöffnete libei-Verbindung, z. B. von
+/// `org.gnome.Mutter.RemoteDesktop.Session.ConnectToEIS` eines mutter ohne Portal.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn injector_from_ei_fd(fd: std::os::fd::OwnedFd) -> anyhow::Result<Box<dyn Injector>> {
+    wayland::injector_from_fd(fd)
 }
 
 pub fn clipboard() -> Box<dyn Clipboard> {

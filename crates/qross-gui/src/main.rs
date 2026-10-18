@@ -13,7 +13,7 @@ use std::sync::Arc;
 use qross_gui::changelog::{self, Release};
 use qross_gui::lifecycle;
 use qross_gui::{Role, Settings, EXPORT_FILE, GRID_COLS, GRID_ROWS};
-use qross_platform::Permission;
+use qross_platform::{Desktop, Permission, PortalProblem};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
@@ -83,6 +83,8 @@ struct Snapshot {
     grid: (i32, i32),
     /// Betriebssystem dieses Rechners (`windows`, `macos`, `linux`)
     platform: &'static str,
+    /// Grafische Sitzung (`windows`, `macos`, `x11`, `wayland`, `other`)
+    desktop: &'static str,
     /// Version dieser App (für „Neuigkeiten“)
     version: &'static str,
     logs: Vec<LogLine>,
@@ -107,6 +109,13 @@ fn get_state(rt: Rt<'_>, logs: State<'_, Arc<LogBuffer>>) -> Result<Snapshot, St
         data_dir: rt.data_dir.display().to_string(),
         grid: (GRID_COLS, GRID_ROWS),
         platform: runtime::platform_name(qross_proto::Platform::current()),
+        desktop: match qross_platform::desktop() {
+            Desktop::Windows => "windows",
+            Desktop::MacOs => "macos",
+            Desktop::X11 => "x11",
+            Desktop::Wayland => "wayland",
+            Desktop::Other => "other",
+        },
         version: env!("CARGO_PKG_VERSION"),
         logs: logs.snapshot(),
     })
@@ -195,6 +204,61 @@ fn open_permission_settings(app: AppHandle, permission: String) -> Result<(), St
     qross_platform::request_permission(permission);
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Wayland: Stand der Desktop-Portale für Hinweise in der Oberfläche
+#[derive(Serialize)]
+struct PortalInfo {
+    /// Versionen der Portal-Schnittstellen, `None`: fehlt
+    remote_desktop: Option<u32>,
+    input_capture: Option<u32>,
+    /// Letztes Problem beim Einspeisen (Client) bzw. Erfassen (Server)
+    injector: Option<ProblemInfo>,
+    capture: Option<ProblemInfo>,
+    /// Freigabe gemerkt: Das System fragt beim nächsten Start nicht erneut
+    remembered_injector: bool,
+    remembered_capture: bool,
+}
+
+#[derive(Serialize)]
+struct ProblemInfo {
+    /// `missing`, `denied` oder `failed`
+    kind: &'static str,
+    text: String,
+}
+
+impl From<PortalProblem> for ProblemInfo {
+    fn from(problem: PortalProblem) -> Self {
+        let kind = match &problem {
+            PortalProblem::Missing(_) => "missing",
+            PortalProblem::Denied => "denied",
+            PortalProblem::Failed(_) => "failed",
+        };
+        Self { kind, text: problem.to_string() }
+    }
+}
+
+/// `None` außerhalb von Wayland. Fragt beim ersten Mal den Portal-Dienst (bis zu 5 s), deshalb
+/// nicht im Hauptthread.
+#[tauri::command]
+async fn portal_state() -> Option<PortalInfo> {
+    let state = tauri::async_runtime::spawn_blocking(qross_platform::portal_state).await.ok().flatten()?;
+    Some(PortalInfo {
+        remote_desktop: state.remote_desktop,
+        input_capture: state.input_capture,
+        injector: state.injector.map(ProblemInfo::from),
+        capture: state.capture.map(ProblemInfo::from),
+        remembered_injector: state.remembered_injector,
+        remembered_capture: state.remembered_capture,
+    })
+}
+
+/// Gemerkte Wayland-Freigaben löschen: Beim nächsten Start fragt das System wieder.
+#[tauri::command]
+fn forget_portal_permissions() -> Result<(), String> {
+    qross_platform::forget_portal_permissions().map_err(|e| format!("{e:#}"))?;
+    info!("Gemerkte Wayland-Freigaben gelöscht");
+    Ok(())
 }
 
 /// Fehlende Rechte gleich beim Start ins Protokoll schreiben, nicht erst beim ersten Ereignis.
@@ -398,6 +462,8 @@ fn main() {
     qross_platform::init_process();
 
     let data_dir = data_dir();
+    // Dort merkt sich Qross unter Wayland die Freigaben der Desktop-Portale
+    qross_platform::set_data_dir(&data_dir);
     let settings = match Settings::load(&data_dir) {
         Ok(Some(settings)) => settings,
         Ok(None) => Settings::for_host(&hostname()),
@@ -452,6 +518,8 @@ fn main() {
             open_project_page,
             permissions,
             open_permission_settings,
+            portal_state,
+            forget_portal_permissions,
         ])
         .setup(move |app| {
             logs.attach(app.handle().clone());
