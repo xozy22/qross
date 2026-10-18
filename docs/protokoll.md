@@ -1,8 +1,8 @@
 # Qross-Protokoll, Version 3
 
 Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischenablage, seit Qross 0.4 um
-Drag & Drop vom Client zum Server, seit Qross 0.5 um die einzelnen Monitore eines Clients und seit Qross 0.6
-um den Spielemodus (siehe unten).
+Drag & Drop vom Client zum Server, seit Qross 0.5 um die einzelnen Monitore eines Clients, seit Qross 0.6
+um den Spielemodus und seit Qross 0.7 um Rechte je Rechner (siehe unten).
 
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
@@ -21,7 +21,7 @@ Implementierung: `crates/qross-proto`.
 
 | Kanal | Richtung | Zuverlässig | Inhalt |
 |---|---|---|---|
-| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game` |
+| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `Sharing` |
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel` |
 | Datagramm | Server → Client | **nein** | `MouseMove`, im Spielemodus `MouseDelta` |
@@ -52,6 +52,8 @@ große Schwachpunkt von Synergy.
    tauscht der Client Strg und Cmd, damit etwa Strg+C auf dem Mac weiterhin kopiert.
    Meldet das `Welcome` mindestens Version 4, schickt der Client gleich danach `Monitors` (siehe unten).
    Ab Version 5 meldet er außerdem mit `Game`, wenn bei ihm etwas im Vollbild läuft (siehe Spielemodus).
+   Ab Version 7 schickt der Server gleich nach dem `Welcome` die Rechte des Clients (`Sharing`, siehe Rechte
+   je Rechner).
 3. Der Server öffnet den Input-Stream.
 4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`. Danach folgen
    `MouseMove`-Datagramme (im Spielemodus `MouseDelta`) mit dieser `epoch` und steigender `seq`.
@@ -208,6 +210,41 @@ Ein `Stopped` gilt beim Sender deshalb immer als Abbruch durch die Gegenseite, a
 verworfen hat. Ältere Versionen reagieren auf beides wie auf einen Fehler im Stream: Sie verwerfen die
 Übertragung bzw. hören auf zu senden und bleiben verbunden. Bricht die Verbindung ab, enden alle
 Übertragungen mit diesem Rechner als fehlgeschlagen; was schon im Staging lag, wird gelöscht.
+
+## Rechte je Rechner
+
+Der Server legt je Client fest, was geteilt wird, und setzt es selbst durch. Drei Arten, jede mit Richtung
+(`Share`: `Both`, `ToClient`, `FromClient`, `Off`; in `qross.toml` `"both"`, `"to-client"`, `"from-client"`,
+`"off"`):
+
+| Art | Betrifft |
+|---|---|
+| `clipboard` | `Clipboard::Data` und den Text, den `Clipboard::Files` mitbringt (`data`) |
+| `files` | `Clipboard::Files` und Streams vom Typ 4 |
+| `drag` | `Input::DragStart`/`Drop`, Streams vom Typ 3 und 5 |
+
+„Vom Client“ heißt: zum Server und von dort weiter zu anderen Clients, soweit diese empfangen dürfen.
+
+- **Senden:** Der Server liest seine Zwischenablage für einen Client nur, wenn `clipboard` oder `files` zu ihm
+  erlaubt ist, und schickt nur den erlaubten Teil: ohne `files` gehen kopierte Dateien als ihr Text, ohne
+  `clipboard` ohne Text. Ohne `drag` zum Client wechselt der Cursor mit gedrückter Taste nicht zu ihm und der
+  Server prüft gar nicht erst, ob Dateien gezogen werden.
+- **Empfangen:** Was ein Client nicht abgeben darf, verwirft der Server beim Eintreffen: `Clipboard::Data`
+  ganz, `Clipboard::Files` bis auf den erlaubten Text, `Offer` als „keine Dateien“. Datei-Streams vom Typ 3
+  und 4 hält er an (`STOP_SENDING`, Code 0), bevor etwas davon im Staging landet. Ohne `drag` vom Client fragt
+  er nicht mit `Query` nach; mit gedrückter Taste bleibt der Cursor dann auf dem Client.
+- **Ändern im Betrieb:** Neue Rechte gelten sofort, die Verbindung bleibt. Laufende Übertragungen, die nicht
+  mehr erlaubt sind, bricht der Server ab wie mit „Abbrechen“ (siehe oben), Ankommendes wird gelöscht.
+- **Mitteilen:** Nach dem `Welcome` und nach jeder Änderung schickt der Server auf dem Control-Stream
+  `Sharing { clipboard, files, drag }` aus Sicht des Clients. Ein Client ab Qross 0.7 zeigt das an und
+  versucht Verbotenes nicht: Er behält seine Zwischenablage, schickt ohne `files` nur den Text und antwortet
+  auf ein `Query` ohne Recht mit „keine Dateien“, ohne seinen Drag abzubrechen.
+
+**Kompatibilität:** Ein neuer Server meldet im `Welcome` die Version 7. Clients bis Qross 0.6 lesen den
+Control-Stream nach dem `Welcome` nicht mehr; `Sharing` bleibt bei ihnen ungelesen liegen. Sie kennen ihre
+Rechte nicht und senden wie bisher; der Server weist Verbotenes ab, sie bleiben verbunden. Ein neuer Client
+liest den Control-Stream nur bei Version 7 und mehr und überspringt Nachrichten, die er nicht kennt. Ältere
+Server schicken nichts; dann ist alles erlaubt.
 
 ## Tasten
 

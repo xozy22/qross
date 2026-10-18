@@ -74,6 +74,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Verbindungsqualität: Latenz, Jitter, Verlust, Durchsatz | ✔ | ✔ | ✔ | ✔¹ |
 | Spielemodus: bei Vollbild festhalten, relative Mausbewegung für Spiele | ✔ Vollbild, eingefangener Zeiger | ✔ Vollbild | – | ✔ Vollbild¹ |
 | Dateiübertragungen: Fortschritt, Rate und Restzeit, Abbrechen auf beiden Seiten | ✔ | ✔ | ✔ | ✔¹ |
+| Rechte je Rechner: Zwischenablage, kopierte Dateien, Drag & Drop je Richtung erlauben oder sperren | ✔ | ✔ | ✔ | ✔¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
 
 ¹ macOS wird in der CI auf Apple Silicon gebaut und getestet, auch mit der echten Zwischenablage. Erfassung und
@@ -94,7 +95,8 @@ einer X11-Sitzung. Details, Grenzen und Testanleitung: [Wayland](docs/wayland.md
   (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, kopierte
   Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, Fortschritt und Abbrechen von Sender und
   Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5,
-  Wechsel per Tastenkürzel, Ablehnung unbekannter Clients, LAN-Suche).
+  Wechsel per Tastenkürzel, Rechte je Rechner für jede Art und Richtung samt sofortiger Änderung und einem
+  älteren Client, der es trotzdem versucht, Ablehnung unbekannter Clients, LAN-Suche).
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
   die der Explorer anschließend selbst einfügt.
 - Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
@@ -117,6 +119,10 @@ einer X11-Sitzung. Details, Grenzen und Testanleitung: [Wayland](docs/wayland.md
   gegenüberliegenden Kante. Sie wirken auf jedem Rechner und erreichen keine Programme; hält die Fang-Taste den
   Cursor fest, wechselt er nicht. Unter X11 wirkt ein Kürzel, das der Desktop schon belegt (etwa Strg+Alt+Pfeil
   für Arbeitsflächen), nur, solange der Cursor auf einem anderen Rechner ist.
+- **Rechte je Rechner** (Server-Ansicht bzw. `[sharing]`): je Client und Art – Zwischenablage, kopierte Dateien,
+  Drag & Drop – senden und empfangen, nur empfangen, nur senden oder aus. Was ein Client sendet, erreicht über
+  den Server auch andere Rechner, soweit sie es empfangen dürfen. Der Server setzt das selbst durch, auch bei
+  älteren Clients; Änderungen gelten sofort.
 
 ## Download
 
@@ -223,6 +229,9 @@ Hinweise:
   `"local"`) und `[keys.remap.<rechner>]` zum Umbelegen. Tastennamen wie `KeyboardEvent.code` im Browser.
 - `[game] enabled` in `qross.toml` (Standard `true`) schaltet den Spielemodus; `qross client --no-game-mode`
   meldet dem Server nie, dass auf dem Client etwas im Vollbild läuft.
+- `[sharing]` in `qross.toml`: `clipboard`, `files` und `drag` je `"both"` (Standard), `"to-client"`,
+  `"from-client"` oder `"off"` für alle Rechner, `[sharing.clients.<rechner>]` für einzelne. Fehlende Angaben
+  übernimmt ein Rechner aus `[sharing]`.
 - `[clipboard] max_file_mb` in `qross.toml` bzw. `qross client --clipboard-max-mb`: kopierte Dateien bis zu
   dieser Gesamtgröße beim Wechsel mitgeben (Standard 1000, 0 = aus). Sie liegen danach im Cache
   (`%LOCALAPPDATA%\Qross\clipboard`) und werden nach einem Tag aufgeräumt.
