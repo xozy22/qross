@@ -77,6 +77,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Spielemodus: bei Vollbild festhalten, relative Mausbewegung für Spiele | ✔ Vollbild, eingefangener Zeiger | ✔ Vollbild | – | ✔ Vollbild¹ |
 | Dateiübertragungen: Fortschritt, Rate und Restzeit, Abbrechen auf beiden Seiten | ✔ | ✔ | ✔ | ✔¹ |
 | Rechte je Rechner: Zwischenablage, kopierte Dateien, Drag & Drop je Richtung erlauben oder sperren | ✔ | ✔ | ✔ | ✔¹ |
+| Server: [„Sichere Tastatureingabe“](#macos-sichere-tastatureingabe) erkennen, Hinweis, Cursor bleibt auf dem Mac | entfällt | entfällt | entfällt | ✔¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
 | Profile je Ort, automatisch nach Netzwerk (Gateway, ohne Zusatzrechte)⁴ | ✔ mit Netzwerkname | ✔, Name über NetworkManager | ✔ wie X11 | ✔ ohne WLAN-Namen¹ |
 | [Autostart](docs/autostart.md) bei der Anmeldung, unsichtbar im Tray⁵ | ✔ `HKCU\…\Run` | ✔ XDG-Autostart | ✔ XDG-Autostart | ✔ LaunchAgent¹ |
@@ -110,7 +111,10 @@ systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autost
   Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5,
   Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Rechte je Rechner für jede
   Art und Richtung samt sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene
-  vertrauliche Inhalte, Ablehnung unbekannter Clients, LAN-Suche).
+  vertrauliche Inhalte, Ablehnung unbekannter Clients, LAN-Suche, Zurückholen und Halten des Cursors bei
+  sicherer Tastatureingabe).
+- macOS, sichere Tastatureingabe: Die CI schaltet sie im Test selbst ein, erkennt sie samt Prozess und schaltet
+  sie wieder aus. Mit einem echten Passwortfeld oder Terminal ist es noch nicht geprüft.
 - Windows-Tastaturlayouts: echter Test mit dem deutschen und dem US-Layout (AltGr, tote Tasten, Kürzel), soweit
   sie auf dem Rechner eingerichtet sind.
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
@@ -198,6 +202,31 @@ tccutil reset Accessibility app.qross.desktop
 ```bash
 tccutil reset ListenEvent app.qross.desktop
 ```
+
+### macOS: Sichere Tastatureingabe
+
+Ein aktives Passwortfeld, Terminal mit „Sichere Tastatureingabe“ (Menü „Terminal“) oder ein Passwortmanager
+schaltet unter macOS die sichere Tastatureingabe ein. Solange sie an ist, gibt macOS Tasten an kein Programm
+weiter, das mitliest, auch nicht an Qross; die Maus funktioniert weiter. Mit dem Mac als Server hieße das: Der
+Cursor wechselt zum anderen Rechner, die Tasten aber landen im Programm vorn auf dem Mac, schlimmstenfalls in
+einem Terminal oder Chat.
+
+Qross sieht deshalb viermal pro Sekunde nach. Ist sie an, holt es den Cursor zurück auf den Mac und lässt ihn
+dort, bis sie endet, auch gegen Fang-Taste und Spielemodus. Ist ein Client verbunden, nennt ein Hinweis oben im
+Fenster und im Tray das Programm und was hilft; wird der Cursor zurückgeholt oder bleibt er an der Kante
+stehen, kommt einmal eine Systembenachrichtigung. Hält ein Programm sie fest, obwohl kein Passwortfeld offen ist:
+
+- **Terminal, iTerm2:** im Menü des Programms „Sichere Tastatureingabe“ bzw. „Secure Keyboard Entry“ ausschalten
+  oder ein anderes Programm nach vorn holen.
+- **loginwindow:** ein bekannter Fehler von macOS nach dem Sperren. Den Bildschirm sperren (⌃⌘Q) und wieder
+  entsperren, sonst ab- und wieder anmelden.
+- **Sonst** das genannte Programm beenden. Welches es ist, zeigt auch das Terminal:
+
+  ```bash
+  ioreg -l -w 0 | grep SecureInput
+  ```
+
+  Die Zahl hinter `kCGSSessionSecureInputPID` ist die Prozessnummer.
 
 Das Zertifikat ist selbst signiert, nicht von Apple ausgestellt. Gatekeeper fragt deshalb beim ersten Start wie
 bisher nach („kann nicht überprüft werden“, freizugeben unter Datenschutz & Sicherheit). Welche Anforderung eine

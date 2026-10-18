@@ -13,6 +13,7 @@ mod layout;
 mod media;
 mod pasteboard;
 mod permissions;
+mod secure_input;
 
 use std::sync::Arc;
 
@@ -29,6 +30,7 @@ use crate::{Capture, Clipboard, Injector, Permission};
 pub use game::game_state;
 pub(crate) use pasteboard::concealed;
 pub use permissions::{granted as has_permission, request as request_permission};
+pub use secure_input::state as secure_input;
 
 pub fn init_process() {}
 

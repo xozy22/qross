@@ -9,6 +9,7 @@ pub mod clipboard_files;
 pub mod keys;
 pub mod lifecycle;
 pub mod profiles;
+pub mod secure_input;
 pub mod transfers;
 
 use std::collections::HashSet;

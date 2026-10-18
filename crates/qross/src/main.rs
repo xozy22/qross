@@ -176,6 +176,9 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
         .with_keys(file.keys.config()?)
         .with_game_mode(file.game.enabled)
         .with_sharing(sharing);
+    // Hält ein Programm die sichere Tastatureingabe, bleibt der Cursor auf dem Mac (steht im Log)
+    #[cfg(target_os = "macos")]
+    let server = server.with_secure_input(Box::new(qross_platform::secure_input));
     let platform = ServerPlatform {
         capture,
         events: events_rx,

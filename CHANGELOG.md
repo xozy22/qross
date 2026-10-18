@@ -10,6 +10,18 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 
 ## [Unreleased]
 
+### Neu
+
+- **macOS: Hinweis bei „Sicherer Tastatureingabe“:** Schaltet auf dem Mac als Server ein Programm die sichere
+  Tastatureingabe ein – ein aktives Passwortfeld, Terminal mit „Sichere Tastatureingabe“, ein Passwortmanager –,
+  bekommt Qross keine Tasten mehr mit. Bisher landete dann unbemerkt im Programm vorn auf dem Mac, was du für
+  einen anderen Rechner getippt hast. Jetzt holt Qross den Cursor in diesem Moment zurück auf den Mac und hält
+  ihn dort, bis sie wieder aus ist. Oben im Fenster und im Tray steht, welches Programm sie hält und was hilft
+  (Passwortfeld verlassen, in Terminal ausschalten, Programm beenden, beim hängenden Anmeldefenster sperren und
+  entsperren). Wird der Cursor deshalb zurückgeholt oder bleibt er an der Kante stehen, kommt einmal eine
+  Systembenachrichtigung. Ohne verbundenen Client bleibt alles still. `qross server` hält den Cursor ebenso und
+  schreibt es ins Protokoll.
+
 ### Verbessert
 
 - **Einstellungen mit Bereichen:** Allgemein, Profile, Tastatur, Spielemodus, Updates, Zwischenablage und Info

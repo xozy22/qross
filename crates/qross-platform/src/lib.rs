@@ -9,6 +9,7 @@ pub mod keymap_linux;
 pub mod keymap_mac;
 pub mod keymap_windows;
 pub mod network;
+pub mod secure_input;
 pub mod wayland_logic;
 
 #[cfg(windows)]
@@ -47,6 +48,8 @@ use qross_core::keys::KeyOptions;
 use qross_core::{CaptureEvent, Inject};
 use qross_proto::{ClipboardData, GameState, Rect};
 use tokio::sync::mpsc::UnboundedSender;
+
+pub use secure_input::SecureInput;
 
 /// Steuerung der Eingabe-Erfassung auf dem Server.
 pub trait Capture: Send + Sync {
@@ -156,6 +159,16 @@ pub fn request_permission(permission: Permission) {
     mac::request_permission(permission);
     #[cfg(not(target_os = "macos"))]
     let _ = permission;
+}
+
+/// Hat unter macOS gerade ein Programm die „Sichere Tastatureingabe“ eingeschaltet (siehe
+/// [`mod@secure_input`])? Dann erreichen Tasten die Erfassung des Servers nicht. Wird regelmäßig
+/// abgefragt und ist dafür schnell genug; andere Systeme kennen sie nicht und liefern `None`.
+pub fn secure_input() -> Option<SecureInput> {
+    #[cfg(target_os = "macos")]
+    return mac::secure_input();
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
 /// Einmal beim Programmstart aufrufen (z. B. DPI-Awareness unter Windows).
