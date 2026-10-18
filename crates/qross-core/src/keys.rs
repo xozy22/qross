@@ -1,5 +1,5 @@
-//! Tasten-Einstellungen: Namen, Tastenkombinationen (z. B. die Fang-Taste), Medientasten und
-//! Umbelegung je Rechner.
+//! Tasten-Einstellungen: Namen, Tastenkombinationen (Fang-Taste, Wechsel-Kürzel), Medientasten
+//! und Umbelegung je Rechner.
 //!
 //! Tasten heißen wie `KeyboardEvent.code` im Browser („KeyA“, „ScrollLock“, „AltLeft“). So kann
 //! die Oberfläche eine gedrückte Taste direkt übernehmen, und `qross.toml` bleibt lesbar.
@@ -8,8 +8,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
-use qross_proto::KeyCode;
+use qross_proto::{Edge, KeyCode};
 use serde::{Deserialize, Serialize};
+
+use crate::input::CaptureEvent;
 
 /// Name (`KeyboardEvent.code`) und deutsche Beschriftung je Taste
 #[rustfmt::skip]
@@ -119,6 +121,11 @@ impl Hotkey {
         !self.mods.is_empty()
     }
 
+    /// Strg+Alt+Umschalt+Esc ist der Notausgang und kann kein Kürzel sein.
+    pub fn is_emergency_exit(&self) -> bool {
+        self.key == KeyCode(0x29) && self.mods.ctrl && self.mods.alt && self.mods.shift
+    }
+
     /// Für die Oberfläche, z. B. „Strg+Alt+L“
     pub fn label(&self, mac: bool) -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -182,60 +189,143 @@ impl From<Hotkey> for String {
     }
 }
 
-/// Was die Erfassung mit einem Tastendruck tun soll
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HotkeyEvent {
-    /// Keine Kombination – normal behandeln
-    None,
-    /// Die Kombination wurde gedrückt
-    Triggered,
-    /// Wiederholung oder Loslassen der ausgelösten Taste – ebenso behandeln wie das Auslösen
-    Consumed,
+/// Wohin ein Wechsel-Kürzel führt
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SwitchTarget {
+    /// Zu diesem Rechner (Name im Layout); der Cursor landet in der Mitte
+    Screen(String),
+    /// Zum Nachbarn in dieser Richtung; der Cursor landet an der gegenüberliegenden Kante
+    Direction(Edge),
 }
 
-/// Erkennt eine Tastenkombination im Strom der Tastenereignisse (je Plattform im Hook benutzt).
+/// Richtungen, wie sie in `qross.toml` und der Oberfläche heißen
+const DIRECTIONS: [(Edge, &str, &str); 4] =
+    [(Edge::Left, "left", "links"), (Edge::Right, "right", "rechts"), (Edge::Top, "up", "oben"), (Edge::Bottom, "down", "unten")];
+
+fn direction(edge: Edge) -> (&'static str, &'static str) {
+    DIRECTIONS.iter().find(|(e, ..)| *e == edge).map(|&(_, name, label)| (name, label)).expect("alle Richtungen")
+}
+
+impl SwitchTarget {
+    /// Für Log und Oberfläche, z. B. „nach links“ oder „zu „laptop““
+    pub fn label(&self) -> String {
+        match self {
+            Self::Screen(name) => format!("zu „{name}“"),
+            Self::Direction(edge) => format!("nach {}", direction(*edge).1),
+        }
+    }
+}
+
+impl fmt::Display for SwitchTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Screen(name) => f.write_str(name),
+            Self::Direction(edge) => f.write_str(direction(*edge).0),
+        }
+    }
+}
+
+impl FromStr for SwitchTarget {
+    type Err = String;
+
+    /// „left“, „right“, „up“, „down“ (auch „top“, „bottom“ wie bei den Links) sind Richtungen,
+    /// alles andere ist der Name eines Rechners.
+    fn from_str(text: &str) -> Result<Self, String> {
+        let text = text.trim();
+        let edge = match text.to_ascii_lowercase().as_str() {
+            "top" => Some(Edge::Top),
+            "bottom" => Some(Edge::Bottom),
+            word => DIRECTIONS.iter().find(|(_, name, _)| *name == word).map(|&(edge, ..)| edge),
+        };
+        match edge {
+            Some(edge) => Ok(Self::Direction(edge)),
+            None if text.is_empty() => Err("Ziel fehlt (Rechner oder left, right, up, down)".into()),
+            None => Ok(Self::Screen(text.to_owned())),
+        }
+    }
+}
+
+/// Was die Erfassung mit einem Tastendruck tun soll
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotkeyEvent {
+    /// Kein Kürzel – normal behandeln
+    None,
+    /// Ein Kürzel wurde gedrückt: `event` melden
+    Triggered { event: CaptureEvent, swallow_locally: bool },
+    /// Wiederholung oder Loslassen der Taste eines ausgelösten Kürzels – ebenso behandeln wie das Auslösen
+    Consumed { swallow_locally: bool },
+}
+
+impl HotkeyEvent {
+    /// Soll die Erfassung die Taste verschlucken? `remote`: Der Cursor ist auf einem anderen Rechner.
+    pub fn swallow(&self, remote: bool) -> bool {
+        match self {
+            Self::None => false,
+            Self::Triggered { swallow_locally, .. } | Self::Consumed { swallow_locally } => remote || *swallow_locally,
+        }
+    }
+}
+
+/// Erkennt die Kürzel aus [`KeyOptions`] im Strom der Tastenereignisse (je Plattform im Hook benutzt).
 #[derive(Debug, Default)]
 pub struct HotkeyTracker {
     /// Gedrückte Zusatztasten einzeln, damit links und rechts sauber zusammenspielen
     mod_keys: [bool; 8],
-    /// Die Taste der Kombination ist gerade gedrückt
-    key_down: bool,
-    /// … und ihr Drücken hat ausgelöst
-    fired: bool,
+    /// Gedrückte Tasten, die zu einem Kürzel gehören, und – falls ihr Drücken ausgelöst hat –
+    /// ob sie auch lokal verschluckt werden
+    held: Vec<(KeyCode, Option<bool>)>,
 }
 
 impl HotkeyTracker {
     /// Für `const`-Initialisierung in Hook-Threads
     pub const fn new() -> Self {
-        Self { mod_keys: [false; 8], key_down: false, fired: false }
+        Self { mod_keys: [false; 8], held: Vec::new() }
     }
 
-    pub fn on_key(&mut self, key: KeyCode, down: bool, hotkey: Option<&Hotkey>) -> HotkeyEvent {
+    pub fn on_key(&mut self, key: KeyCode, down: bool, options: &KeyOptions) -> HotkeyEvent {
         let slot = Mods::slot(key);
         if let Some(slot) = slot {
             self.mod_keys[slot] = down;
         }
-        let Some(hotkey) = hotkey.filter(|h| h.key == key) else { return HotkeyEvent::None };
+        let consumed = |fired: Option<bool>| {
+            fired.map_or(HotkeyEvent::None, |swallow_locally| HotkeyEvent::Consumed { swallow_locally })
+        };
         if !down {
-            self.key_down = false;
-            return if std::mem::take(&mut self.fired) { HotkeyEvent::Consumed } else { HotkeyEvent::None };
+            let Some(i) = self.held.iter().position(|(k, _)| *k == key) else { return HotkeyEvent::None };
+            return consumed(self.held.swap_remove(i).1);
         }
-        if self.key_down {
+        if let Some(&(_, fired)) = self.held.iter().find(|(k, _)| *k == key) {
             // Auto-Repeat
-            return if self.fired { HotkeyEvent::Consumed } else { HotkeyEvent::None };
+            return consumed(fired);
         }
-        self.key_down = true;
+        if !options.hotkeys().any(|h| h.key == key) {
+            return HotkeyEvent::None;
+        }
         // Ist die Taste selbst eine Zusatztaste (z. B. „Strg rechts“), zählt nur sie selbst nicht mit.
         let mut others = self.mod_keys;
         if let Some(slot) = slot {
             others[slot] = false;
         }
-        self.fired = Mods::from_keys(others) == hotkey.mods;
-        if self.fired {
-            HotkeyEvent::Triggered
-        } else {
-            HotkeyEvent::None
+        let hit = options.find(key, Mods::from_keys(others));
+        self.held.push((key, hit.as_ref().map(|&(_, swallow_locally)| swallow_locally)));
+        match hit {
+            Some((event, swallow_locally)) => HotkeyEvent::Triggered { event, swallow_locally },
+            None => HotkeyEvent::None,
         }
+    }
+
+    /// Gerade gedrückte Zusatztasten übernehmen – für Erfassungen, die nicht jeden Tastendruck
+    /// sehen (X11 im lokalen Modus).
+    pub fn sync_modifiers(&mut self, mut pressed: impl FnMut(KeyCode) -> bool) {
+        for (slot, down) in self.mod_keys.iter_mut().enumerate() {
+            *down = pressed(KeyCode(0xE0 + slot as u16));
+        }
+    }
+
+    /// Gedrückte Kürzel-Tasten vergessen, wenn die Erfassung ihr Loslassen nicht mehr sieht (X11
+    /// nach dem Wechsel zurück auf den Server). So löst der nächste Druck sicher wieder aus.
+    pub fn forget_keys(&mut self) {
+        self.held.clear();
     }
 }
 
@@ -251,16 +341,56 @@ pub enum MediaKeys {
 }
 
 /// Was die Eingabe-Erfassung des Servers über Tasten wissen muss
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyOptions {
     /// Hält den Cursor auf dem aktuellen Bildschirm fest (`None` = aus)
     pub lock: Option<Hotkey>,
     pub media: MediaKeys,
+    /// Wechsel-Kürzel. Ist ein Kürzel mehrfach belegt, gilt die Fang-Taste, sonst der erste Eintrag.
+    pub switch: Vec<(Hotkey, SwitchTarget)>,
 }
 
 impl Default for KeyOptions {
     fn default() -> Self {
-        Self { lock: Some(Hotkey::SCROLL_LOCK), media: MediaKeys::Active }
+        Self { lock: Some(Hotkey::SCROLL_LOCK), media: MediaKeys::Active, switch: Vec::new() }
+    }
+}
+
+impl KeyOptions {
+    /// Alle Kürzel, die Fang-Taste zuerst
+    pub fn hotkeys(&self) -> impl Iterator<Item = &Hotkey> {
+        self.lock.iter().chain(self.switch.iter().map(|(hotkey, _)| hotkey))
+    }
+
+    /// Kürzel mit dieser Taste und genau diesen Zusatztasten: das zu meldende Ereignis und ob die
+    /// Taste auch lokal verschluckt wird. Wechsel-Kürzel erreichen nie ein Programm, denn ihr
+    /// Loslassen geschieht schon auf dem anderen Rechner.
+    fn find(&self, key: KeyCode, mods: Mods) -> Option<(CaptureEvent, bool)> {
+        let hit = |h: &Hotkey| h.key == key && h.mods == mods && !h.is_emergency_exit();
+        if let Some(lock) = self.lock.as_ref().filter(|h| hit(h)) {
+            return Some((CaptureEvent::ToggleLock, lock.swallow_locally()));
+        }
+        let (_, target) = self.switch.iter().find(|(h, _)| hit(h))?;
+        Some((CaptureEvent::SwitchTo(target.clone()), true))
+    }
+
+    /// Doppelt belegte oder reservierte Kürzel, je eine Meldung
+    pub fn conflicts(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(lock) = self.lock.filter(Hotkey::is_emergency_exit) {
+            out.push(format!("Fang-Taste „{lock}“ ist der Notausgang"));
+        }
+        for (i, (hotkey, target)) in self.switch.iter().enumerate() {
+            let what = format!("Kürzel „{hotkey}“ ({})", target.label());
+            if hotkey.is_emergency_exit() {
+                out.push(format!("{what} ist der Notausgang"));
+            } else if self.lock == Some(*hotkey) {
+                out.push(format!("{what} ist schon die Fang-Taste"));
+            } else if let Some((_, first)) = self.switch[..i].iter().find(|(h, _)| h == hotkey) {
+                out.push(format!("{what} ist schon belegt ({})", first.label()));
+            }
+        }
+        out
     }
 }
 
@@ -284,6 +414,20 @@ pub fn parse_key_map(entries: &HashMap<String, String>) -> Result<KeyMap, String
             Ok((key(from)?, key(to)?))
         })
         .collect()
+}
+
+/// Liest Wechsel-Kürzel wie in `qross.toml` (`"Ctrl+Alt+ArrowLeft" = "left"`), nach Kürzel sortiert.
+pub fn parse_switch_keys(entries: &HashMap<String, String>) -> Result<Vec<(Hotkey, SwitchTarget)>, String> {
+    let mut keys = entries
+        .iter()
+        .map(|(hotkey, target)| {
+            let hotkey = hotkey.parse::<Hotkey>()?;
+            let target = target.parse::<SwitchTarget>().map_err(|e| format!("„{hotkey}“: {e}"))?;
+            Ok((hotkey, target))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    keys.sort_by_key(|(hotkey, _)| hotkey.to_string());
+    Ok(keys)
 }
 
 #[cfg(test)]
@@ -325,36 +469,148 @@ mod tests {
         assert!(!Hotkey::SCROLL_LOCK.swallow_locally() && hotkey.swallow_locally());
     }
 
+    fn lock_only(lock: &str) -> KeyOptions {
+        KeyOptions { lock: Some(lock.parse().unwrap()), ..KeyOptions::default() }
+    }
+
+    const CONSUMED: HotkeyEvent = HotkeyEvent::Consumed { swallow_locally: true };
+
+    fn toggled(swallow_locally: bool) -> HotkeyEvent {
+        HotkeyEvent::Triggered { event: CaptureEvent::ToggleLock, swallow_locally }
+    }
+
     #[test]
     fn hotkey_fires_once_with_exact_modifiers_and_consumes_repeat_and_release() {
-        let hotkey: Hotkey = "Ctrl+Alt+KeyL".parse().unwrap();
+        let options = lock_only("Ctrl+Alt+KeyL");
         let mut t = HotkeyTracker::default();
-        let press = |t: &mut HotkeyTracker, key, down| t.on_key(key, down, Some(&hotkey));
+        let mut press = |key, down| t.on_key(key, down, &options);
 
-        assert_eq!(press(&mut t, L, true), HotkeyEvent::None, "ohne Zusatztasten");
-        assert_eq!(press(&mut t, L, false), HotkeyEvent::None);
+        assert_eq!(press(L, true), HotkeyEvent::None, "ohne Zusatztasten");
+        assert_eq!(press(L, false), HotkeyEvent::None);
 
-        press(&mut t, RCTRL, true);
-        press(&mut t, ALT, true);
-        assert_eq!(press(&mut t, L, true), HotkeyEvent::Triggered, "rechtes Strg zählt wie linkes");
-        assert_eq!(press(&mut t, L, true), HotkeyEvent::Consumed, "Auto-Repeat");
-        assert_eq!(press(&mut t, L, false), HotkeyEvent::Consumed, "Loslassen");
+        press(RCTRL, true);
+        press(ALT, true);
+        assert_eq!(press(L, true), toggled(true), "rechtes Strg zählt wie linkes");
+        assert_eq!(press(L, true), CONSUMED, "Auto-Repeat");
+        assert_eq!(press(L, false), CONSUMED, "Loslassen");
 
         let shift = KeyCode(0xE1);
-        press(&mut t, shift, true);
-        assert_eq!(press(&mut t, L, true), HotkeyEvent::None, "zusätzliches Umschalt: keine Übereinstimmung");
-        assert_eq!(press(&mut t, L, false), HotkeyEvent::None);
+        press(shift, true);
+        assert_eq!(press(L, true), HotkeyEvent::None, "zusätzliches Umschalt: keine Übereinstimmung");
+        assert_eq!(press(L, true), HotkeyEvent::None, "auch nicht bei der Wiederholung");
+        assert_eq!(press(L, false), HotkeyEvent::None);
     }
 
     #[test]
     fn a_modifier_alone_can_be_the_hotkey() {
-        let hotkey: Hotkey = "ControlRight".parse().unwrap();
+        let options = lock_only("ControlRight");
         let mut t = HotkeyTracker::default();
-        assert_eq!(t.on_key(RCTRL, true, Some(&hotkey)), HotkeyEvent::Triggered);
-        assert_eq!(t.on_key(RCTRL, false, Some(&hotkey)), HotkeyEvent::Consumed);
-        t.on_key(CTRL, true, Some(&hotkey));
-        assert_eq!(t.on_key(RCTRL, true, Some(&hotkey)), HotkeyEvent::None, "mit linkem Strg ist es Strg+Strg");
-        assert_eq!(t.on_key(L, true, None), HotkeyEvent::None);
+        assert_eq!(t.on_key(RCTRL, true, &options), toggled(false), "einzelne Taste: lokal durchlassen");
+        assert_eq!(t.on_key(RCTRL, false, &options), HotkeyEvent::Consumed { swallow_locally: false });
+        t.on_key(CTRL, true, &options);
+        assert_eq!(t.on_key(RCTRL, true, &options), HotkeyEvent::None, "mit linkem Strg ist es Strg+Strg");
+        let off = KeyOptions { lock: None, ..KeyOptions::default() };
+        assert_eq!(t.on_key(L, true, &off), HotkeyEvent::None);
+    }
+
+    fn switching() -> KeyOptions {
+        let entries = HashMap::from([
+            ("Ctrl+Alt+ArrowLeft".to_owned(), "left".to_owned()),
+            ("Ctrl+Alt+Digit1".to_owned(), "laptop".to_owned()),
+            ("Ctrl+Shift+ArrowLeft".to_owned(), "Bottom".to_owned()),
+        ]);
+        KeyOptions { lock: Some("Ctrl+Alt+KeyL".parse().unwrap()), switch: parse_switch_keys(&entries).unwrap(), ..KeyOptions::default() }
+    }
+
+    fn switched(target: SwitchTarget) -> HotkeyEvent {
+        HotkeyEvent::Triggered { event: CaptureEvent::SwitchTo(target), swallow_locally: true }
+    }
+
+    #[test]
+    fn several_hotkeys_are_told_apart_by_key_and_modifiers() {
+        const LEFT: KeyCode = KeyCode(0x50);
+        const DIGIT1: KeyCode = KeyCode(0x1E);
+        const SHIFT: KeyCode = KeyCode(0xE1);
+        let options = switching();
+        let mut t = HotkeyTracker::new();
+        let mut press = |key, down| t.on_key(key, down, &options);
+
+        press(CTRL, true);
+        press(ALT, true);
+        assert_eq!(press(LEFT, true), switched(SwitchTarget::Direction(Edge::Left)));
+        assert_eq!(press(LEFT, true), CONSUMED, "Auto-Repeat wechselt nicht noch einmal");
+        assert_eq!(press(DIGIT1, true), switched(SwitchTarget::Screen("laptop".into())), "zweites Kürzel, erstes noch gedrückt");
+        assert_eq!(press(LEFT, false), CONSUMED);
+        assert_eq!(press(DIGIT1, false), CONSUMED);
+        assert_eq!(press(L, true), toggled(true), "die Fang-Taste wirkt weiter");
+        press(L, false);
+        press(ALT, false);
+        press(SHIFT, true);
+        assert_eq!(press(LEFT, true), switched(SwitchTarget::Direction(Edge::Bottom)), "gleiche Taste, andere Zusatztasten");
+        press(LEFT, false);
+        press(SHIFT, false);
+        assert_eq!(press(LEFT, true), HotkeyEvent::None, "nur Strg: Pfeil links geht normal durch");
+        assert!(!press(LEFT, false).swallow(true));
+    }
+
+    #[test]
+    fn the_lock_key_wins_and_the_emergency_exit_stays_free() {
+        let mut options = switching();
+        options.switch.insert(0, (options.lock.unwrap(), SwitchTarget::Screen("tablet".into())));
+        let emergency: Hotkey = "Ctrl+Alt+Shift+Escape".parse().unwrap();
+        options.switch.push((emergency, SwitchTarget::Screen("pc".into())));
+        let mut t = HotkeyTracker::new();
+        for key in [CTRL, ALT] {
+            t.on_key(key, true, &options);
+        }
+        assert_eq!(t.on_key(L, true, &options), toggled(true));
+        t.on_key(KeyCode(0xE1), true, &options);
+        assert_eq!(t.on_key(KeyCode(0x29), true, &options), HotkeyEvent::None, "Notausgang bleibt Notausgang");
+
+        let conflicts = options.conflicts();
+        assert_eq!(conflicts.len(), 2, "{conflicts:?}");
+        assert!(conflicts[0].contains("„Ctrl+Alt+KeyL“ (zu „tablet“) ist schon die Fang-Taste"), "{conflicts:?}");
+        assert!(conflicts[1].contains("Notausgang"), "{conflicts:?}");
+        options.switch.push(("Alt+Ctrl+Digit1".parse().unwrap(), SwitchTarget::Direction(Edge::Right)));
+        assert!(options.conflicts()[2].contains("ist schon belegt (zu „laptop“)"), "{:?}", options.conflicts());
+        assert!(switching().conflicts().is_empty());
+    }
+
+    #[test]
+    fn modifiers_can_be_synced_and_held_keys_forgotten() {
+        const RIGHT: KeyCode = KeyCode(0x4F);
+        let options = KeyOptions { switch: vec![("Ctrl+Alt+ArrowRight".parse().unwrap(), SwitchTarget::Direction(Edge::Right))], ..switching() };
+        let mut t = HotkeyTracker::new();
+        // Die Erfassung hat das Drücken von Strg und Alt nicht gesehen (X11 lokal)
+        t.sync_modifiers(|key| key == RCTRL || key == ALT);
+        assert_eq!(t.on_key(RIGHT, true, &options), switched(SwitchTarget::Direction(Edge::Right)));
+        // Das Loslassen ging an ein anderes Programm: vergessen, sonst gälte der nächste Druck als Wiederholung
+        t.forget_keys();
+        assert_eq!(t.on_key(RIGHT, true, &options), switched(SwitchTarget::Direction(Edge::Right)));
+        t.sync_modifiers(|_| false);
+        t.forget_keys();
+        assert_eq!(t.on_key(RIGHT, true, &options), HotkeyEvent::None);
+    }
+
+    #[test]
+    fn switch_targets_parse_and_print() {
+        let target = |text: &str| text.parse::<SwitchTarget>().unwrap();
+        assert_eq!(target("left"), SwitchTarget::Direction(Edge::Left));
+        assert_eq!(target(" UP "), SwitchTarget::Direction(Edge::Top));
+        assert_eq!(target("top"), SwitchTarget::Direction(Edge::Top), "wie bei den Links");
+        assert_eq!(target("down").to_string(), "down");
+        assert_eq!(target(" laptop "), SwitchTarget::Screen("laptop".into()));
+        assert_eq!(target("Mac Mini").to_string(), "Mac Mini");
+        assert!("  ".parse::<SwitchTarget>().is_err());
+        assert_eq!(target("right").label(), "nach rechts");
+        assert_eq!(target("laptop").label(), "zu „laptop“");
+
+        let bad = HashMap::from([("Ctrl+Alt+Digit1".to_owned(), String::new())]);
+        assert!(parse_switch_keys(&bad).unwrap_err().contains("„Ctrl+Alt+Digit1“"));
+        let bad = HashMap::from([("Ctrl+Nichts".to_owned(), "laptop".to_owned())]);
+        assert!(parse_switch_keys(&bad).unwrap_err().contains("Nichts"));
+        let keys: Vec<String> = switching().switch.iter().map(|(h, t)| format!("{h}={t}")).collect();
+        assert_eq!(keys, ["Ctrl+Alt+ArrowLeft=left", "Ctrl+Alt+Digit1=laptop", "Ctrl+Shift+ArrowLeft=down"], "sortiert");
     }
 
     #[test]

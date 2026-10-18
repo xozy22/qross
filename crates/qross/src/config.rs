@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use qross_core::keys::{parse_key_map, Hotkey, KeyConfig, KeyOptions, MediaKeys};
+use qross_core::keys::{parse_key_map, parse_switch_keys, Hotkey, KeyConfig, KeyOptions, MediaKeys};
 use qross_core::server::SwitchOptions;
 use qross_core::LinkConfig;
 use qross_proto::DEFAULT_PORT;
@@ -31,7 +31,7 @@ pub struct ServerFile {
     pub keys: KeysSection,
 }
 
-/// Abschnitt `[keys]`: Fang-Taste, Medientasten, Umbelegung je Rechner.
+/// Abschnitt `[keys]`: Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung je Rechner.
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct KeysSection {
@@ -43,11 +43,14 @@ pub struct KeysSection {
     /// Name des Rechners → { gedrückte Taste = gesendete Taste }
     #[serde(default)]
     pub remap: HashMap<String, HashMap<String, String>>,
+    /// Kürzel → Rechner oder Richtung („left“, „right“, „up“, „down“)
+    #[serde(default)]
+    pub switch: HashMap<String, String>,
 }
 
 impl Default for KeysSection {
     fn default() -> Self {
-        Self { lock: default_lock(), media: MediaKeys::default(), remap: HashMap::new() }
+        Self { lock: default_lock(), media: MediaKeys::default(), remap: HashMap::new(), switch: HashMap::new() }
     }
 }
 
@@ -69,7 +72,12 @@ impl KeysSection {
                 Ok((name.clone(), map))
             })
             .collect::<Result<_>>()?;
-        Ok(KeyConfig { options: KeyOptions { lock, media: self.media }, remap })
+        let switch = parse_switch_keys(&self.switch).map_err(|e| anyhow::anyhow!("[keys.switch]: {e}"))?;
+        let options = KeyOptions { lock, media: self.media, switch };
+        if let Some(conflict) = options.conflicts().into_iter().next() {
+            anyhow::bail!("[keys]: {conflict}");
+        }
+        Ok(KeyConfig { options, remap })
     }
 }
 
@@ -150,6 +158,7 @@ impl ServerFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qross_core::keys::SwitchTarget;
     use qross_proto::Edge;
 
     #[test]
@@ -166,6 +175,35 @@ mod tests {
         assert_eq!(keys.options.lock, Some(Hotkey::SCROLL_LOCK));
         assert_eq!(keys.options.media, MediaKeys::Active);
         assert_eq!(keys.remap["laptop"].len(), 1, "Beispiel: Alt und Windows-Taste am Mac");
+        let switch: Vec<String> = keys.options.switch.iter().map(|(h, t)| format!("{h} = {t}")).collect();
+        assert_eq!(switch, ["Ctrl+Alt+ArrowLeft = left", "Ctrl+Alt+ArrowRight = right", "Ctrl+Alt+Digit1 = pc", "Ctrl+Alt+Digit2 = laptop"]);
+    }
+
+    #[test]
+    fn switch_keys_are_checked() {
+        let file: ServerFile = toml::from_str("[keys.switch]
+\"Ctrl+Alt+Digit1\" = \"laptop\"
+\"Ctrl+Alt+ArrowUp\" = \"up\"").unwrap();
+        let switch = file.keys.config().unwrap().options.switch;
+        assert_eq!(switch[0], ("Ctrl+Alt+ArrowUp".parse().unwrap(), SwitchTarget::Direction(Edge::Top)));
+        assert_eq!(switch[1].1, SwitchTarget::Screen("laptop".into()));
+
+        let error = |text: &str| toml::from_str::<ServerFile>(text).unwrap().keys.config().unwrap_err().to_string();
+        assert!(error("[keys.switch]
+\"Ctrl+Gibtsnicht\" = \"left\"").contains("[keys.switch]"));
+        assert!(error("[keys.switch]
+\"Ctrl+Alt+KeyL\" = \"\"").contains("Ziel fehlt"));
+        let lock = error("[keys]
+lock = \"Ctrl+Alt+KeyL\"
+[keys.switch]
+\"Alt+Ctrl+KeyL\" = \"laptop\"");
+        assert!(lock.contains("schon die Fang-Taste"), "{lock}");
+        let twice = error("[keys.switch]
+\"Ctrl+Alt+KeyL\" = \"laptop\"
+\"Alt+Ctrl+KeyL\" = \"left\"");
+        assert!(twice.contains("schon belegt"), "{twice}");
+        assert!(error("[keys.switch]
+\"Ctrl+Alt+Shift+Escape\" = \"pc\"").contains("Notausgang"));
     }
 
     #[test]

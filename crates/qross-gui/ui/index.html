@@ -282,6 +282,24 @@
                 <button type="button" id="lockOff" class="btn small ghost">Aus</button>
               </div>
 
+              <div class="switch-keys">
+                <span class="setting-text">
+                  <span class="setting-title">Kürzel zum Wechseln</span>
+                  <span class="hint" id="switchHint"></span>
+                </span>
+                <span class="hint record-hint" id="switchRecordHint" hidden>Drück die Kombination, z. B. Strg+Alt+1. Eine einzelne Zusatztaste wie Strg rechts zählt beim Loslassen. Esc bricht ab.</span>
+                <div class="switch-groups">
+                  <section class="switch-group" aria-labelledby="switchDirTitle">
+                    <h4 id="switchDirTitle">Zum Nachbarn</h4>
+                    <ul class="switch-list" id="switchDirections"></ul>
+                  </section>
+                  <section class="switch-group" aria-labelledby="switchScreenTitle">
+                    <h4 id="switchScreenTitle">Zu einem Rechner</h4>
+                    <ul class="switch-list" id="switchScreens" aria-live="polite"></ul>
+                  </section>
+                </div>
+              </div>
+
               <label class="setting">
                 <span class="setting-text">
                   <span class="setting-title">Medientasten</span>

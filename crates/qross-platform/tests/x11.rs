@@ -4,6 +4,7 @@
 
 use std::time::{Duration, Instant};
 
+use qross_core::keys::{KeyOptions, SwitchTarget};
 use qross_core::{CaptureEvent, Inject};
 use qross_proto::{Edge, KeyCode, MouseButton};
 use x11rb::connection::Connection;
@@ -82,6 +83,21 @@ fn x11_capture_and_injection() {
         "{hit:?}"
     );
 
+    // Lokal: Wechsel-Kürzel über den passiven Griff; das Fenster sieht nur Strg und Alt
+    let laptop = CaptureEvent::SwitchTo(SwitchTarget::Screen("laptop".into()));
+    let switch = vec![("Ctrl+Alt+Digit2".parse().unwrap(), SwitchTarget::Screen("laptop".into()))];
+    capture.set_key_options(KeyOptions { switch, ..KeyOptions::default() });
+    let hotkey = |injector: &mut Box<dyn qross_platform::Injector>| {
+        let (ctrl, alt, digit2) = (KeyCode(0xE0), KeyCode(0xE2), KeyCode(0x1F));
+        for (key, down) in [(ctrl, true), (alt, true), (digit2, true), (digit2, false), (alt, false), (ctrl, false)] {
+            injector.inject(&Inject::Key { key, down });
+        }
+    };
+    hotkey(&mut injector);
+    assert_eq!(wait_event(&mut rx, |e| matches!(e, CaptureEvent::SwitchTo(_))), laptop);
+    let keycodes = collect_keys(&conn, Duration::from_secs(2), 4);
+    assert_eq!(keycodes, vec![(37, true), (64, true), (64, false), (37, false)], "Strg, Alt – die 2 (Keycode 11) nicht");
+
     // Remote: relative Bewegung, Klick und Taste werden abgefangen und gemeldet
     capture.capture_remote();
     std::thread::sleep(Duration::from_millis(100));
@@ -102,6 +118,13 @@ fn x11_capture_and_injection() {
     assert_eq!(key, CaptureEvent::Key { key: KeyCode::A, down: true });
     injector.inject(&Inject::Key { key: KeyCode::A, down: false });
     assert!(collect_keys(&conn, Duration::from_millis(300), 1).is_empty(), "abgefangene Tasten erreichen das Fenster nicht");
+
+    // Remote: Das Kürzel meldet den Wechsel, die 2 selbst geht nicht an den Client
+    hotkey(&mut injector);
+    assert_eq!(wait_event(&mut rx, |e| matches!(e, CaptureEvent::SwitchTo(_))), laptop);
+    std::thread::sleep(Duration::from_millis(200));
+    let rest: Vec<CaptureEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(!rest.iter().any(|e| matches!(e, CaptureEvent::Key { key: KeyCode(0x1F), .. })), "{rest:?}");
 
     // Zurück: Grab endet, Zeiger an der gewünschten Stelle
     capture.release(42, 43);

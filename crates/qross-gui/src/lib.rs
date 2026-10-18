@@ -67,7 +67,7 @@ pub struct ServerSettings {
     pub switch_delay_ms: u64,
     /// Auf Suchanfragen von Clients im LAN antworten
     pub discovery: bool,
-    /// Fang-Taste, Medientasten, Umbelegung je Rechner (wirkt auf dem Server)
+    /// Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung je Rechner (wirkt auf dem Server)
     pub keys: KeySettings,
 }
 
@@ -182,6 +182,13 @@ impl ServerSettings {
         self.screens.iter().any(|s| s.name == name)
     }
 
+    /// Tasten-Einstellungen, wie sie gelten: Wechsel-Kürzel nur zu Rechnern im Layout
+    pub fn effective_keys(&self) -> KeySettings {
+        let mut keys = self.keys.clone();
+        keys.switch.screens.retain(|name, _| self.contains(name));
+        keys
+    }
+
     /// Links aus dem Raster: je Paar direkt benachbarter Bildschirme ein Link nach rechts bzw. unten.
     /// Die Gegenrichtung ergänzt [`Layout::from_links`] selbst.
     pub fn links(&self) -> Vec<LinkConfig> {
@@ -277,7 +284,7 @@ impl ServerSettings {
         out += &format!("discovery = {}\n", self.discovery);
         out += &format!("\n[switching]\ncorner_size = {}\ndelay_ms = {}\n", self.corner_size, self.switch_delay_ms);
         out += &format!("\n[clipboard]\nmax_file_mb = {clipboard_files_mb}\n");
-        out += &self.keys.to_toml();
+        out += &self.effective_keys().to_toml();
         for link in self.links() {
             out += &format!(
                 "\n[[links]]\nfrom = {}\nedge = \"{}\"\nto = {}\n",
@@ -355,6 +362,24 @@ mod tests {
         let mut missing = server(&[("pc", 3, 2)]);
         missing.name = "anders".into();
         assert!(missing.validate().is_err());
+    }
+
+    #[test]
+    fn switch_keys_only_apply_to_screens_in_the_layout() {
+        let mut s = server(&[("pc", 3, 2), ("laptop", 4, 2)]);
+        let switch = &mut s.keys.switch;
+        switch.directions.insert("right".into(), "Ctrl+Alt+ArrowRight".into());
+        switch.screens.insert("laptop".into(), "Ctrl+Alt+Digit2".into());
+        switch.screens.insert("entfernt".into(), "Ctrl+Alt+Digit3".into());
+        let targets: Vec<String> =
+            s.effective_keys().config().unwrap().options.switch.iter().map(|(_, t)| t.to_string()).collect();
+        assert_eq!(targets, ["right", "laptop"], "Rechner, die nicht mehr im Layout stehen, fallen weg");
+
+        let file: toml::Table = toml::from_str(&s.to_toml(0)).unwrap();
+        let entries: std::collections::HashMap<String, String> =
+            file["keys"]["switch"].clone().try_into().expect("[keys.switch] als Tabelle");
+        let parsed = qross_core::keys::parse_switch_keys(&entries).unwrap();
+        assert_eq!(parsed.len(), 2, "die CLI liest dieselben Kürzel: {parsed:?}");
     }
 
     #[test]

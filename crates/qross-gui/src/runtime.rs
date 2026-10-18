@@ -333,7 +333,7 @@ impl Runtime {
     async fn start_server(self: &Arc<Self>, settings: &Settings, generation: u64) -> Result<Running> {
         let s = &settings.server;
         let layout = s.validate().map_err(|e| anyhow!(e))?;
-        let keys = s.keys.config().map_err(|e| anyhow!(e))?;
+        let keys = s.effective_keys().config().map_err(|e| anyhow!(e))?;
         let identity = self.identity()?;
         info!("Fingerprint dieses Servers: {}", identity.fingerprint());
 

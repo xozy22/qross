@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use qross_core::keys::KeyConfig;
+use qross_core::keys::{KeyConfig, SwitchTarget};
 use qross_core::server::{Action, ServerEvent, ServerState, SwitchOptions};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard};
@@ -55,7 +55,7 @@ pub struct Server {
     discovery: bool,
     /// Kopierte Dateien bis zu dieser Gesamtgröße mitgeben (0 = nie)
     clipboard_file_limit: u64,
-    /// Fang-Taste, Medientasten, Umbelegung je Rechner
+    /// Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung je Rechner
     keys: KeyConfig,
     fingerprint: Fingerprint,
 }
@@ -160,8 +160,8 @@ impl Server {
         })
     }
 
-    /// Fang-Taste, Medientasten und Umbelegung je Rechner (Standard: Rollen-Taste,
-    /// Medientasten an den aktiven Rechner, keine Umbelegung).
+    /// Fang-Taste, Wechsel-Kürzel, Medientasten und Umbelegung je Rechner (Standard: Rollen-Taste,
+    /// keine Wechsel-Kürzel, Medientasten an den aktiven Rechner, keine Umbelegung).
     pub fn with_keys(mut self, keys: KeyConfig) -> Self {
         self.keys = keys;
         self
@@ -248,7 +248,14 @@ impl Server {
         state.handle(ServerEvent::LocalMonitors(local_monitors.clone()));
         state.set_switch_options(self.switching);
         state.set_key_maps(self.keys.remap.clone());
-        capture.set_key_options(self.keys.options);
+        for (hotkey, target) in &self.keys.options.switch {
+            if let SwitchTarget::Screen(name) = target {
+                if *name != self.config.name && !self.config.layout.contains(name) {
+                    warn!("Kürzel „{hotkey}“ führt zu „{name}“, der nicht im Layout steht");
+                }
+            }
+        }
+        capture.set_key_options(self.keys.options.clone());
         let _discovery = self.discovery.then(|| {
             let port = self.local_addr().map(|a| a.port()).unwrap_or_default();
             AbortOnDrop(tokio::spawn(discovery::respond(self.config.name.clone(), port, self.fingerprint.to_string())))
@@ -431,7 +438,18 @@ impl Server {
 
     fn on_capture(&self, state: &mut ServerState, event: CaptureEvent) -> Vec<Action> {
         let toggle = event == CaptureEvent::ToggleLock;
+        let switch = match &event {
+            CaptureEvent::SwitchTo(target) => Some(target.label()),
+            _ => None,
+        };
         let actions = state.handle(ServerEvent::Capture(event));
+        if let Some(target) = switch {
+            if actions.is_empty() {
+                info!("Kürzel {target}: kein Wechsel (Ziel nicht verbunden, Cursor festgehalten oder schon dort)");
+            } else {
+                info!("Kürzel {target}: Cursor jetzt auf „{}“", state.active_screen());
+            }
+        }
         if toggle {
             if state.is_locked() {
                 info!("Cursor auf „{}“ festgehalten (Rollen-Taste löst)", state.active_screen());

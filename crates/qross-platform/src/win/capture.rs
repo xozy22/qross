@@ -29,8 +29,8 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MBUTTON, VK_RBUTTON,
-    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_XBUTTON1, VK_XBUTTON2,
+    GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MBUTTON, VK_RBUTTON,
+    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_XBUTTON1, VK_XBUTTON2,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, PostThreadMessageW, SetCursorPos,
@@ -63,7 +63,7 @@ struct HookState {
     local_down: [bool; 256],
     /// Dasselbe für Maustasten (wichtig beim Ziehen von Dateien über die Kante)
     buttons_down: [bool; 5],
-    /// Erkennt die Fang-Taste
+    /// Erkennt Fang-Taste und Wechsel-Kürzel
     hotkey: HotkeyTracker,
 }
 
@@ -85,6 +85,12 @@ impl HookState {
 
     fn panic_modifiers(&self) -> bool {
         self.any(VK_LCONTROL, VK_RCONTROL) && self.any(VK_LMENU, VK_RMENU) && self.any(VK_LSHIFT, VK_RSHIFT)
+    }
+
+    /// Alt oder Windows-Taste gedrückt: Ihr Loslassen öffnet die Menüleiste bzw. das Startmenü,
+    /// wenn dazwischen keine andere Taste ankam.
+    fn menu_modifiers(&self) -> bool {
+        self.any(VK_LMENU, VK_RMENU) || self.any(VK_LWIN, VK_RWIN)
     }
 }
 
@@ -301,22 +307,25 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
     let fake_ctrl = info.scanCode & 0x200 != 0;
     let extended = info.flags & LLKHF_EXTENDED != 0;
     let key = if fake_ctrl { None } else { hid_from_windows(info.scanCode, extended, info.vkCode) };
-    let options = *shared.keys.lock().unwrap_or_else(|e| e.into_inner());
+    let options = shared.keys.lock().unwrap_or_else(|e| e.into_inner());
     STATE.with_borrow_mut(|st| {
         st.pressed[vk] = !up;
         let remote = shared.remote.load(Ordering::Acquire);
-        if let (Some(key), Some(lock)) = (key, options.lock.as_ref()) {
-            // Fang-Taste (Standard: Rollen) hält den Cursor fest bzw. gibt ihn frei
-            match st.hotkey.on_key(key, !up, Some(lock)) {
-                HotkeyEvent::Triggered => {
-                    let _ = shared.events.send(CaptureEvent::ToggleLock);
-                    return remote || lock.swallow_locally();
+        if let Some(key) = key {
+            // Fang-Taste (Standard: Rollen) und Wechsel-Kürzel
+            let hotkey = st.hotkey.on_key(key, !up, &options);
+            if hotkey != HotkeyEvent::None {
+                let swallow = hotkey.swallow(remote);
+                if let HotkeyEvent::Triggered { event, .. } = hotkey {
+                    if swallow && st.menu_modifiers() {
+                        // Das verschluckte Kürzel war sonst die einzige Taste zwischen Drücken und
+                        // Loslassen von Alt bzw. der Windows-Taste.
+                        inject::tap_menu_mask();
+                    }
+                    let _ = shared.events.send(event);
                 }
-                HotkeyEvent::Consumed => return remote || lock.swallow_locally(),
-                HotkeyEvent::None => {}
+                return swallow;
             }
-        } else if let Some(key) = key {
-            st.hotkey.on_key(key, !up, None);
         }
         if !remote {
             st.local_down[vk] = !up;

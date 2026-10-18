@@ -57,6 +57,8 @@ const PLATFORMS = {
 const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
   x: '<path d="M7 7l10 10M17 7L7 17"/>',
+  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>',
   cursor: '<path d="M5 3l14 7.5-6.2 1.7L10 19z" fill="currentColor" stroke="none"/>',
   lock: '<rect x="5" y="11" width="14" height="9" rx="2" fill="currentColor" stroke="none"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
@@ -595,6 +597,7 @@ async function renameScreen(oldName) {
   }
   server.screens.find((s) => s.name === oldName).name = name;
   if (server.name === oldName) server.name = name;
+  renameSwitchKey(oldName, name);
   state.focusName = name;
   await settingsChanged({ immediate: true });
   focusScreen(name);
@@ -611,7 +614,10 @@ function removeScreen(name) {
 function setServerName(name) {
   const server = state.settings.server;
   const own = server.screens.find((s) => s.name === server.name);
-  if (own && !server.screens.some((s) => s !== own && s.name === name)) own.name = name;
+  if (own && !server.screens.some((s) => s !== own && s.name === name)) {
+    renameSwitchKey(own.name, name);
+    own.name = name;
+  }
   server.name = name;
   settingsChanged();
 }
@@ -1351,6 +1357,7 @@ function renderKeys() {
   }
   $("#lockDefault").disabled = keys.lock === DEFAULT_LOCK;
   $("#lockOff").disabled = !keys.lock;
+  renderSwitchKeys();
 
   const media = $("#mediaMode");
   media.value = keys.media;
@@ -1399,6 +1406,163 @@ function renderKeys() {
         )
       : [el("li", { class: "empty", text: hasPc ? `Keine Umbelegung für „${state.remapPc}“.` : "Füge im Layout einen Rechner hinzu, um Tasten umzubelegen." })]),
   );
+}
+
+// Wechsel-Kürzel: je Richtung und je Rechner im Layout eines. Der Server prüft dieselben Regeln;
+// hier werden doppelte Belegungen nur angezeigt.
+
+const DIRECTIONS = [
+  ["left", "Nach links", 180],
+  ["right", "Nach rechts", 0],
+  ["up", "Nach oben", -90],
+  ["down", "Nach unten", 90],
+];
+/** Tasten, die ohne Zusatztaste zum Tippen gebraucht werden */
+const TYPING_KEYS = /^(Key|Digit|Numpad|Arrow|Space$|Enter$|Tab$|Backspace$|Minus$|Equal$|Bracket|Semicolon$|Quote$|Backquote$|Comma$|Period$|Slash$|Backslash$|Intl|Home$|End$|Page|Delete$)/;
+
+function switchKeys() {
+  const keys = state.settings.server.keys;
+  keys.switch ??= {};
+  keys.switch.directions ??= {};
+  keys.switch.screens ??= {};
+  return keys.switch;
+}
+
+/** Vergleichbare Form, z. B. „Alt+Ctrl+KeyL“ und „Ctrl+Alt+KeyL“ gleich */
+function hotkeyId(text) {
+  if (!text) return "";
+  const parts = text.split("+").map((p) => p.trim().toLowerCase());
+  const key = parts.pop();
+  return [...["ctrl", "shift", "alt", "meta"].filter((m) => parts.includes(m)), key].join("+");
+}
+
+function switchTargets() {
+  const server = state.settings.server;
+  const names = server.screens
+    .map((s) => s.name)
+    .sort((a, b) => (a === server.name ? -1 : b === server.name ? 1 : a.localeCompare(b, "de")));
+  return [
+    ...DIRECTIONS.map(([id, label, turn]) => ({ kind: "directions", id, label, turn })),
+    ...names.map((name) => ({ kind: "screens", id: name, label: `Zu „${name}“`, name, isServer: name === server.name })),
+  ];
+}
+
+/** Hinweis je Ziel: gleich wie die Fang-Taste, doppelt belegt oder ohne Zusatztaste */
+function switchProblems(targets) {
+  const keys = state.settings.server.keys;
+  const all = switchKeys();
+  const lock = hotkeyId(keys.lock);
+  const byKey = new Map();
+  for (const t of targets) {
+    const id = hotkeyId(all[t.kind][t.id]);
+    if (id) byKey.set(id, [...(byKey.get(id) || []), t]);
+  }
+  const problems = new Map();
+  for (const t of targets) {
+    const hotkey = all[t.kind][t.id];
+    const id = hotkeyId(hotkey);
+    if (!id) continue;
+    const others = byKey.get(id).filter((o) => o !== t);
+    if (id === lock) problems.set(t, { text: "Ist schon die Fang-Taste. Die Fang-Taste geht vor.", error: true });
+    else if (others.length) problems.set(t, { text: `Auch belegt für: ${others.map((o) => o.label.replace(/^Zu /, "")).join(", ")}`, error: true });
+    else if (!hotkey.includes("+") && TYPING_KEYS.test(hotkey)) problems.set(t, { text: "Ohne Zusatztaste kommt diese Taste in keinem Programm mehr an.", error: false });
+  }
+  return problems;
+}
+
+function renderSwitchKeys() {
+  const all = switchKeys();
+  const targets = switchTargets();
+  const problems = switchProblems(targets);
+  const recordingId = state.recording?.kind === "switch" ? state.recording.target : null;
+  const focused = document.activeElement?.closest?.(".switch-list li")?.dataset.target;
+  $("#switchHint").textContent =
+    "Springt in die Mitte eines Rechners oder zum Nachbarn, dort an die gegenüberliegende Kante. Wirkt auf jedem Rechner und erreicht keine Programme. Hält die Fang-Taste den Cursor fest, wechselt er nicht." +
+    (state.platform === "linux" ? " Belegt die Arbeitsfläche ein Kürzel schon (z. B. Strg+Alt+Pfeil), wirkt es unter X11 nur, solange der Cursor auf einem anderen Rechner ist." : "");
+
+  const row = (t) => {
+    const id = `${t.kind}:${t.id}`;
+    const hotkey = all[t.kind][t.id] || "";
+    const recording = recordingId === id;
+    const problem = problems.get(t);
+    const label = recording ? "Taste drücken …" : hotkey ? hotkeyLabel(hotkey) : "Nicht belegt";
+    const capClass = ["keycap", recording ? "recording" : !hotkey && "off", problem?.error && "conflict"].filter(Boolean).join(" ");
+    const arrow = t.kind === "directions" ? icon("arrow") : icon("screen");
+    if (t.kind === "directions" && t.turn) arrow.style.transform = `rotate(${t.turn}deg)`;
+    return el(
+      "li",
+      { "data-target": id, class: problem?.error ? "conflict" : "" },
+      el(
+        "span",
+        { class: "switch-target" },
+        arrow,
+        el("span", { class: "name", text: t.label, title: t.label }),
+        t.isServer ? el("span", { class: "server-tag", text: "Server" }) : null,
+      ),
+      el(
+        "span",
+        { class: "switch-key" },
+        el("kbd", { class: capClass, text: label }),
+        el("button", {
+          type: "button",
+          class: "btn small ghost record-switch",
+          text: recording ? "Abbrechen" : hotkey ? "Ändern" : "Aufnehmen",
+          "aria-label": `${recording ? "Aufnahme abbrechen" : "Kürzel aufnehmen"}: ${t.label}`,
+          onclick: () => (recording ? stopRecording() : recordSwitch(t)),
+        }),
+        hotkey && !recording
+          ? el(
+              "button",
+              {
+                type: "button",
+                class: "icon-btn small remove-key",
+                title: "Kürzel entfernen",
+                "aria-label": `Kürzel ${t.label} entfernen`,
+                onclick: () => {
+                  delete all[t.kind][t.id];
+                  keysChanged();
+                },
+              },
+              icon("x"),
+            )
+          : null,
+      ),
+      problem ? el("p", { class: `switch-problem${problem.error ? "" : " warn"}`, text: problem.text }) : null,
+    );
+  };
+  $("#switchDirections").replaceChildren(...targets.filter((t) => t.kind === "directions").map(row));
+  const screens = targets.filter((t) => t.kind === "screens");
+  $("#switchScreens").replaceChildren(
+    ...(screens.length ? screens.map(row) : [el("li", { class: "empty", text: "Noch kein Rechner im Layout." })]),
+  );
+  const keep = recordingId || focused;
+  if (keep) $(`.switch-list li[data-target="${CSS.escape(keep)}"] .record-switch`)?.focus();
+}
+
+function recordSwitch(target) {
+  startRecording({
+    kind: "switch",
+    target: `${target.kind}:${target.id}`,
+    start() {
+      $("#switchRecordHint").hidden = false;
+      renderSwitchKeys();
+    },
+    end() {
+      $("#switchRecordHint").hidden = true;
+      renderSwitchKeys();
+    },
+    done(value) {
+      switchKeys()[target.kind][target.id] = value;
+      keysChanged();
+    },
+  });
+}
+
+/** Das Kürzel eines umbenannten Rechners wandert mit. */
+function renameSwitchKey(oldName, name) {
+  const screens = switchKeys().screens;
+  if (oldName in screens) screens[name] = screens[oldName];
+  delete screens[oldName];
 }
 
 function keysChanged() {
@@ -1456,7 +1620,8 @@ function startRecording(recording) {
     e.preventDefault();
     e.stopImmediatePropagation();
     // Eine Zusatztaste zählt allein, wenn sie ohne andere Taste losgelassen wird.
-    if (recording.kind === "lock" && MODIFIER_CODES.has(e.code) && recording.pressed.size === 1 && recording.pressed.has(e.code)) {
+    const hotkey = recording.kind === "lock" || recording.kind === "switch";
+    if (hotkey && MODIFIER_CODES.has(e.code) && recording.pressed.size === 1 && recording.pressed.has(e.code)) {
       return finishRecording(e.code);
     }
     recording.pressed.delete(e.code);

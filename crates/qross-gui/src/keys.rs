@@ -1,10 +1,12 @@
-//! Tastatur-Einstellungen der Oberfläche: Fang-Taste, Medientasten, Umbelegung je Rechner.
+//! Tastatur-Einstellungen der Oberfläche: Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung je
+//! Rechner.
 //! Sie wirken auf dem Server (dort läuft die Erfassung) und werden zu `qross_core::keys::KeyConfig`.
 //! Tasten heißen wie `KeyboardEvent.code` („ScrollLock“, „AltLeft“), wie in `qross.toml`.
 
 use std::collections::{BTreeMap, HashMap};
 
-use qross_core::keys::{key_from_name, Hotkey, KeyConfig, KeyMap, KeyOptions, MediaKeys};
+use qross_core::keys::{key_from_name, Hotkey, KeyConfig, KeyMap, KeyOptions, MediaKeys, SwitchTarget};
+use qross_proto::Edge;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -15,6 +17,42 @@ pub struct KeySettings {
     pub media: MediaKeys,
     /// Rechner → Regeln in der eingegebenen Reihenfolge
     pub remap: BTreeMap<String, Vec<KeyRule>>,
+    pub switch: SwitchKeys,
+}
+
+/// Wechsel-Kürzel: je Richtung und je Rechner höchstens eines, wie „Ctrl+Alt+ArrowLeft“
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct SwitchKeys {
+    /// „left“, „right“, „up“, „down“ → Kürzel
+    pub directions: BTreeMap<String, String>,
+    /// Rechner → Kürzel
+    pub screens: BTreeMap<String, String>,
+}
+
+/// Richtungen in der Reihenfolge der Oberfläche
+const DIRECTIONS: [(&str, Edge); 4] = [("left", Edge::Left), ("right", Edge::Right), ("up", Edge::Top), ("down", Edge::Bottom)];
+
+impl SwitchKeys {
+    /// Alle belegten Kürzel: erst die Richtungen, dann die Rechner. Bei doppelter Belegung gilt der
+    /// erste Eintrag (die Fang-Taste geht ohnehin vor); die Oberfläche zeigt solche Konflikte an.
+    fn entries(&self) -> Result<Vec<(Hotkey, SwitchTarget)>, String> {
+        if let Some(unknown) = self.directions.keys().find(|d| !DIRECTIONS.iter().any(|(name, _)| name == d)) {
+            return Err(format!("Wechsel-Kürzel: unbekannte Richtung „{unknown}“"));
+        }
+        let directions = DIRECTIONS
+            .iter()
+            .filter_map(|(name, edge)| Some((self.directions.get(*name)?, SwitchTarget::Direction(*edge))));
+        let screens = self.screens.iter().map(|(name, hotkey)| (hotkey, SwitchTarget::Screen(name.clone())));
+        directions
+            .chain(screens)
+            .filter(|(hotkey, _)| !hotkey.trim().is_empty())
+            .map(|(hotkey, target)| {
+                let hotkey = hotkey.parse::<Hotkey>().map_err(|e| format!("Kürzel {}: {e}", target.label()))?;
+                Ok((hotkey, target))
+            })
+            .collect()
+    }
 }
 
 /// Gedrückte Taste `from` kommt beim Rechner als `to` an.
@@ -26,13 +64,19 @@ pub struct KeyRule {
 
 impl Default for KeySettings {
     fn default() -> Self {
-        Self { lock: Hotkey::SCROLL_LOCK.to_string(), media: MediaKeys::Active, remap: BTreeMap::new() }
+        Self {
+            lock: Hotkey::SCROLL_LOCK.to_string(),
+            media: MediaKeys::Active,
+            remap: BTreeMap::new(),
+            switch: SwitchKeys::default(),
+        }
     }
 }
 
 impl KeySettings {
     /// Prüft alles und baut die Konfiguration für den Server. Unbekannte Namen und doppelt
-    /// belegte Tasten ergeben eine Meldung, keinen Abbruch.
+    /// umbelegte Tasten ergeben eine Meldung, keinen Abbruch. Doppelt belegte Kürzel nicht: Die
+    /// Oberfläche zeigt sie an, und bis sie behoben sind, gilt die Fang-Taste bzw. der erste Eintrag.
     pub fn config(&self) -> Result<KeyConfig, String> {
         let lock = match self.lock.trim() {
             "" => None,
@@ -54,7 +98,8 @@ impl KeySettings {
                 remap.insert(machine.clone(), map);
             }
         }
-        Ok(KeyConfig { options: KeyOptions { lock, media: self.media }, remap })
+        let switch = self.switch.entries()?;
+        Ok(KeyConfig { options: KeyOptions { lock, media: self.media, switch }, remap })
     }
 
     /// Abschnitt `[keys]` für `qross.toml` (gleiches Format wie `qross.example.toml`)
@@ -69,6 +114,18 @@ impl KeySettings {
             for rule in rules {
                 out += &format!("{} = {}\n", crate::quote(&rule.from), crate::quote(&rule.to));
             }
+        }
+        // Nur, was gilt: `qross server` lehnt doppelt belegte Kürzel ab.
+        let mut used: Vec<Hotkey> = self.lock.trim().parse().into_iter().collect();
+        let mut lines = String::new();
+        for (hotkey, target) in self.switch.entries().unwrap_or_default() {
+            if !hotkey.is_emergency_exit() && !used.contains(&hotkey) {
+                used.push(hotkey);
+                lines += &format!("{} = {}\n", crate::quote(&hotkey.to_string()), crate::quote(&target.to_string()));
+            }
+        }
+        if !lines.is_empty() {
+            out += &format!("\n[keys.switch]\n{lines}");
         }
         out
     }
@@ -90,7 +147,7 @@ mod tests {
 
     #[test]
     fn settings_become_a_key_config() {
-        let mut keys = KeySettings { lock: "Ctrl+Alt+KeyL".into(), media: MediaKeys::Local, remap: BTreeMap::new() };
+        let mut keys = KeySettings { lock: "Ctrl+Alt+KeyL".into(), media: MediaKeys::Local, ..KeySettings::default() };
         keys.remap.insert("laptop".into(), vec![rule("AltLeft", "MetaLeft"), rule("MetaLeft", "AltLeft")]);
         keys.remap.insert("leer".into(), vec![]);
         let config = keys.config().unwrap();
@@ -102,6 +159,57 @@ mod tests {
 
         keys.lock = "   ".into();
         assert_eq!(keys.config().unwrap().options.lock, None, "leer = aus");
+    }
+
+    fn switch_keys(directions: &[(&str, &str)], screens: &[(&str, &str)]) -> SwitchKeys {
+        let map = |pairs: &[(&str, &str)]| pairs.iter().map(|&(k, v)| (k.to_owned(), v.to_owned())).collect();
+        SwitchKeys { directions: map(directions), screens: map(screens) }
+    }
+
+    #[test]
+    fn switch_keys_become_options_and_toml() {
+        let keys = KeySettings {
+            lock: "Ctrl+Alt+KeyL".into(),
+            switch: switch_keys(
+                &[("up", "Ctrl+Alt+ArrowUp"), ("left", "Ctrl+Alt+ArrowLeft"), ("down", "")],
+                &[("laptop", "Ctrl+Alt+Digit2"), ("pc", "Ctrl+Alt+ArrowLeft"), ("tablet", "Alt+Ctrl+KeyL")],
+            ),
+            ..KeySettings::default()
+        };
+        let options = keys.config().unwrap().options;
+        let targets: Vec<String> = options.switch.iter().map(|(h, t)| format!("{h} {t}")).collect();
+        assert_eq!(
+            targets,
+            [
+                "Ctrl+Alt+ArrowLeft left",
+                "Ctrl+Alt+ArrowUp up",
+                "Ctrl+Alt+Digit2 laptop",
+                "Ctrl+Alt+ArrowLeft pc",
+                "Ctrl+Alt+KeyL tablet"
+            ],
+            "Richtungen in fester Reihenfolge vor den Rechnern, leere fallen weg"
+        );
+        assert_eq!(options.conflicts().len(), 2, "doppelt belegt und Fang-Taste – kein Abbruch");
+
+        let toml = keys.to_toml();
+        let switch = &toml[toml.find("[keys.switch]").expect("Abschnitt fehlt")..];
+        assert_eq!(
+            switch,
+            "[keys.switch]\n\"Ctrl+Alt+ArrowLeft\" = \"left\"\n\"Ctrl+Alt+ArrowUp\" = \"up\"\n\"Ctrl+Alt+Digit2\" = \"laptop\"\n",
+            "nur, was gilt"
+        );
+        assert!(!KeySettings::default().to_toml().contains("[keys.switch]"));
+    }
+
+    #[test]
+    fn invalid_switch_keys_give_a_message() {
+        let bad = KeySettings { switch: switch_keys(&[("left", "Ctrl+Nichts")], &[]), ..KeySettings::default() };
+        assert!(bad.config().unwrap_err().contains("nach links"));
+        let bad = KeySettings { switch: switch_keys(&[], &[("laptop", "Ctrl+")]), ..KeySettings::default() };
+        assert!(bad.config().unwrap_err().contains("zu „laptop“"));
+        let bad = KeySettings { switch: switch_keys(&[("links", "Ctrl+KeyA")], &[]), ..KeySettings::default() };
+        assert!(bad.config().unwrap_err().contains("Richtung „links“"));
+        assert!(!bad.to_toml().contains("[keys.switch]"), "Vorschau bleibt lesbar");
     }
 
     #[test]
