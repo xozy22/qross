@@ -3,6 +3,8 @@
 //! Der Layout-Editor ordnet Bildschirme in einem Raster an. Liegen zwei Bildschirme direkt
 //! nebeneinander oder übereinander, entsteht daraus ein Link wie in `qross.example.toml`.
 
+pub mod changelog;
+
 use std::collections::HashSet;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};

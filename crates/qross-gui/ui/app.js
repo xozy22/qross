@@ -25,6 +25,9 @@ const state = {
   focusName: null,
   /** Betriebssystem dieses Rechners */
   platform: "windows",
+  /** Version dieser App und die Neuigkeiten aus CHANGELOG.md (einmal geladen) */
+  version: "",
+  releases: null,
   /** Ergebnis der LAN-Suche (null = noch nicht gesucht) */
   found: null,
   searching: false,
@@ -69,10 +72,26 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
-function toast(message, kind = "") {
-  const node = el("div", { class: `toast ${kind}`, text: message });
+/** Kurzer Hinweis unten; mit `action` ({ label, run }) bekommt er einen Knopf und bleibt länger stehen. */
+function toast(message, kind = "", action = null) {
+  const node = el(
+    "div",
+    { class: `toast ${kind}` },
+    el("span", { text: message }),
+    action
+      ? el("button", {
+          type: "button",
+          class: "toast-action",
+          text: action.label,
+          onclick: () => {
+            node.remove();
+            action.run();
+          },
+        })
+      : null,
+  );
   $("#toasts").append(node);
-  setTimeout(() => node.remove(), kind === "error" ? 7000 : 3500);
+  setTimeout(() => node.remove(), action ? 12000 : kind === "error" ? 7000 : 3500);
 }
 
 function fingerprintNode(fp, big = false) {
@@ -872,6 +891,169 @@ function setLogOpen(open) {
   if (open) $("#log").scrollTop = $("#log").scrollHeight;
 }
 
+// ------------------------------------------------------------------ Neuigkeiten
+
+const NEWS_SEEN = "qross.newsSeen"; // zuletzt angesehene Version
+const NEWS_HINTED = "qross.newsHinted"; // Version, zu der der Update-Hinweis schon erschienen ist
+
+/** Rubrik aus dem Changelog → Farbe des Tags (unbekannte Rubriken bleiben neutral). */
+const SECTION_TONES = {
+  neu: "neu",
+  added: "neu",
+  verbessert: "verbessert",
+  geändert: "verbessert",
+  changed: "verbessert",
+  behoben: "behoben",
+  fixed: "behoben",
+  wichtig: "wichtig",
+  sicherheit: "wichtig",
+  security: "wichtig",
+  entfernt: "wichtig",
+  removed: "wichtig",
+};
+
+let newsReturnFocus = null;
+
+function compareVersions(a, b) {
+  const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+/** „2026-10-18“ → „18. Oktober 2026“; anderes bleibt wie es ist. */
+function formatDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+  if (!m) return iso || "";
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString("de-DE", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+}
+
+/** Inline-Auszeichnung des Changelogs (**fett**, `code`) als DOM-Knoten – nie per innerHTML. */
+function inlineNodes(text) {
+  const nodes = [];
+  for (const part of text.split(/(`[^`]+`)/)) {
+    if (part.length > 2 && part.startsWith("`") && part.endsWith("`")) {
+      nodes.push(el("code", { text: part.slice(1, -1) }));
+      continue;
+    }
+    for (const piece of part.split(/(\*\*[^*]+\*\*)/)) {
+      if (piece.length > 4 && piece.startsWith("**") && piece.endsWith("**")) nodes.push(el("strong", { text: piece.slice(2, -2) }));
+      else if (piece) nodes.push(document.createTextNode(piece));
+    }
+  }
+  return nodes;
+}
+
+function releaseNode(release) {
+  const current = release.version === state.version;
+  return el(
+    "li",
+    { class: `release${current ? " current" : ""}` },
+    el("span", { class: "node", "aria-hidden": "true" }),
+    el(
+      "div",
+      { class: "release-head" },
+      el("h3", { text: release.version }),
+      current ? el("span", { class: "installed", text: "installiert" }) : null,
+      release.date ? el("time", { datetime: release.date, text: formatDate(release.date) }) : null,
+    ),
+    (release.intro || "").split(/\n{2,}/).filter(Boolean).map((p) => el("p", { class: "intro" }, inlineNodes(p))),
+    release.sections.map((section) =>
+      el(
+        "section",
+        { class: "group" },
+        section.kind
+          ? el("span", { class: `tag ${SECTION_TONES[section.kind.toLowerCase()] || "other"}`, text: section.kind })
+          : null,
+        el("ul", {}, section.items.map((item) => el("li", {}, inlineNodes(item)))),
+      ),
+    ),
+  );
+}
+
+async function openNews() {
+  const dialog = $("#news");
+  if (dialog.open) return;
+  if (!state.releases) {
+    try {
+      state.releases = await invoke("changelog");
+    } catch {
+      state.releases = [];
+    }
+  }
+  const list = $("#newsList");
+  list.replaceChildren(
+    ...(state.releases.length
+      ? state.releases.map(releaseNode)
+      : [el("li", { class: "news-empty", text: "Für diese Version sind keine Neuigkeiten hinterlegt." })]),
+  );
+  newsReturnFocus = document.activeElement;
+  dialog.showModal();
+  list.scrollTop = 0;
+  $("#newsClose").focus();
+  markNewsSeen();
+}
+
+function markNewsSeen() {
+  store(NEWS_SEEN, state.version);
+  store(NEWS_HINTED, state.version);
+  renderNewsChip(false);
+}
+
+function renderNewsChip(unseen) {
+  const chip = $("#newsChip");
+  $("#versionText").textContent = `v${state.version}`;
+  chip.classList.toggle("has-news", unseen);
+  chip.title = unseen ? `Neu in Version ${state.version}: Neuigkeiten ansehen` : "Neuigkeiten anzeigen";
+  chip.setAttribute("aria-label", unseen ? `Version ${state.version}, neu – Neuigkeiten ansehen` : `Version ${state.version} – Neuigkeiten anzeigen`);
+}
+
+/** Nach einem Update: Punkt am Chip und einmal ein Hinweis. Beim allerersten Start nur die Version merken. */
+function checkForNews() {
+  const seen = store(NEWS_SEEN);
+  if (!seen) {
+    store(NEWS_SEEN, state.version);
+    store(NEWS_HINTED, state.version);
+    renderNewsChip(false);
+    return;
+  }
+  const unseen = compareVersions(state.version, seen) > 0;
+  renderNewsChip(unseen);
+  if (unseen && store(NEWS_HINTED) !== state.version) {
+    store(NEWS_HINTED, state.version);
+    toast(`Qross wurde auf ${state.version} aktualisiert.`, "", { label: "Neuigkeiten ansehen", run: openNews });
+  }
+}
+
+function setupNews() {
+  const dialog = $("#news");
+  $("#newsChip").addEventListener("click", openNews);
+  $("#newsClose").addEventListener("click", () => dialog.close());
+  // Klick auf den abgedunkelten Hintergrund schließt (der Inhalt füllt den Dialog vollständig aus).
+  dialog.addEventListener("click", (e) => {
+    if (e.target === dialog) dialog.close();
+  });
+  // Esc schließt auch dann, wenn der native Abbruch des Dialogs nicht greift.
+  dialog.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      dialog.close();
+    }
+  });
+  dialog.addEventListener("close", () => {
+    newsReturnFocus?.focus?.();
+    newsReturnFocus = null;
+  });
+  checkForNews();
+}
+
 // ------------------------------------------------------------------ Gesamt
 
 function render() {
@@ -891,6 +1073,7 @@ async function init() {
     localIp: snap.local_ip,
     grid: snap.grid,
     platform: snap.platform,
+    version: snap.version,
   });
   for (const node of $$("[data-own-fingerprint]")) fillFingerprint(node, snap.fingerprint);
   for (const node of $$("[data-data-dir]")) node.textContent = snap.data_dir;
@@ -908,6 +1091,8 @@ async function init() {
   await listen("start-from-tray", () => {
     if (!running()) startFlow();
   });
+  await listen("show-news", () => openNews());
+  setupNews();
 
   for (const b of $$(".segmented button")) {
     b.addEventListener("click", async () => {

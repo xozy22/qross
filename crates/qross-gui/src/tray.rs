@@ -96,9 +96,10 @@ fn platform_host_present() -> bool {
 
 fn create(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Qross öffnen", true, None::<&str>)?;
+    let news = MenuItem::with_id(app, "news", "Neuigkeiten", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "Starten", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Beenden", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &toggle, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &news, &toggle, &PredefinedMenuItem::separator(app)?, &quit])?;
     let _ = TOGGLE.set(toggle);
 
     TrayIconBuilder::with_id(TRAY_ID)
@@ -108,6 +109,10 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => crate::show_main(app),
+            "news" => {
+                crate::show_main(app);
+                let _ = app.emit("show-news", ());
+            }
             "toggle" => {
                 let app = app.clone();
                 let rt = app.state::<Arc<Runtime>>().inner().clone();

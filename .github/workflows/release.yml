@@ -20,8 +20,37 @@ env:
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  # Läuft zuerst, damit ein fehlender Changelog-Eintrag auffällt, bevor 20 Minuten gebaut wird.
+  # Beim manuellen Start kommt der Changelog vom gewählten Branch, so lassen sich alte Releases neu beschreiben.
+  notes:
+    name: Release-Notizen aus dem Changelog
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version prüfen
+        if: github.event_name == 'push'
+        run: |
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [ "v${cargo_version}" != "${TAG}" ]; then
+            echo "::error::Tag ${TAG} passt nicht zur Version ${cargo_version} in Cargo.toml"
+            exit 1
+          fi
+
+      - name: Abschnitt aus CHANGELOG.md
+        run: |
+          bash tools/release-notes.sh "${TAG#v}" > release-notes.md
+          cat release-notes.md
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.name }}
+    needs: notes
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -109,13 +138,18 @@ jobs:
 
   publish:
     name: GitHub-Release veröffentlichen
-    needs: build
+    needs: [notes, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
         with:
+          pattern: qross-*
           path: release
           merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-notes
 
       - name: Prüfsummen
         run: |
@@ -127,19 +161,5 @@ jobs:
         with:
           tag_name: ${{ env.TAG }}
           name: Qross ${{ env.TAG }}
-          generate_release_notes: true
-          body: |
-            ## Downloads
-
-            | System | App | Kommandozeile |
-            |---|---|---|
-            | Windows x64 | `.msi` oder `-setup.exe` | `…-x86_64-pc-windows-msvc.zip` |
-            | macOS Apple Silicon | `.dmg` | `…-aarch64-apple-darwin.tar.gz` |
-            | Linux x64 | `.AppImage` oder `.deb` | `…-x86_64-unknown-linux-gnu.tar.gz` |
-
-            Die Programme sind nicht signiert. Unter Windows zeigt SmartScreen beim ersten Start eine Warnung
-            („Weitere Informationen → Trotzdem ausführen“). Unter macOS beim ersten Start per Rechtsklick → Öffnen
-            starten und danach unter Datenschutz & Sicherheit „Bedienungshilfen“ und „Eingabeüberwachung“ erlauben.
-
-            Prüfsummen: `SHA256SUMS.txt`
+          body_path: release-notes.md
           files: release/*

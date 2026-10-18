@@ -26,6 +26,9 @@ die Bildschirmkante, ohne dass Maus und Tastatur ins Stocken geraten.
     <td align="center"><img src="docs/assets/screenshots/client.png" alt="Client mit gefundenen Servern im Netzwerk"><br><sub>Client: Server im Netzwerk finden und mit einem Klick verbinden</sub></td>
     <td align="center"><img src="docs/assets/screenshots/freigabe.png" alt="Freigabe-Dialog mit Fingerprint"><br><sub>Neuer Rechner: Freigabe erst nach Fingerprint-Vergleich</sub></td>
   </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="docs/assets/screenshots/neuigkeiten.png" width="620" alt="Neuigkeiten mit allen Versionen und ihren Änderungen"><br><sub>Neuigkeiten: Klick auf die Version in der Kopfzeile zeigt, was sich geändert hat</sub></td>
+  </tr>
 </table>
 
 <sub>Die Screenshots zeigen Demo-Daten.</sub>
@@ -89,6 +92,8 @@ Fertige Pakete gibt es unter [Releases](https://github.com/xozy22/qross/releases
 
 Die Programme sind nicht signiert. Unter Windows meldet sich beim ersten Start SmartScreen
 („Weitere Informationen → Trotzdem ausführen“), unter macOS per Rechtsklick → Öffnen starten.
+
+Was sich in jeder Version geändert hat, steht im [Changelog](CHANGELOG.md) und in der App unter „Neuigkeiten“.
 
 ## Einrichten
 

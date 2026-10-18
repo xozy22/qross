@@ -9,6 +9,7 @@ mod tray;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use qross_gui::changelog::{self, Release};
 use qross_gui::{Role, Settings, EXPORT_FILE, GRID_COLS, GRID_ROWS};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WindowEvent};
@@ -54,6 +55,8 @@ struct Snapshot {
     grid: (i32, i32),
     /// Betriebssystem dieses Rechners (`windows`, `macos`, `linux`)
     platform: &'static str,
+    /// Version dieser App (für „Neuigkeiten“)
+    version: &'static str,
     logs: Vec<LogLine>,
 }
 
@@ -76,6 +79,7 @@ fn get_state(rt: Rt<'_>, logs: State<'_, Arc<LogBuffer>>) -> Result<Snapshot, St
         data_dir: rt.data_dir.display().to_string(),
         grid: (GRID_COLS, GRID_ROWS),
         platform: runtime::platform_name(qross_proto::Platform::current()),
+        version: env!("CARGO_PKG_VERSION"),
         logs: logs.snapshot(),
     })
 }
@@ -141,6 +145,12 @@ async fn probe_server(rt: Rt<'_>, address: String) -> Result<ServerProbe, String
     rt.probe_server(address.trim()).await.map_err(|e| format!("{e:#}"))
 }
 
+/// Neuigkeiten aus dem eingebetteten CHANGELOG.md, neueste Version zuerst.
+#[tauri::command]
+fn changelog() -> &'static [Release] {
+    changelog::releases()
+}
+
 /// Sucht Qross-Server im LAN (ca. 1,2 s).
 #[tauri::command]
 async fn discover_servers(rt: Rt<'_>) -> Result<Vec<FoundServer>, String> {
@@ -202,6 +212,7 @@ fn main() {
             dismiss_client,
             probe_server,
             discover_servers,
+            changelog,
             trust_server,
         ])
         .setup(move |app| {

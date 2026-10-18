@@ -10,7 +10,11 @@
   <header class="topbar">
     <div class="brand">
       <img src="icon.png" alt="" width="36" height="36">
-      <span>Qross</span>
+      <span class="brand-name">Qross</span>
+      <button type="button" id="newsChip" class="version-chip" title="Neuigkeiten anzeigen" aria-haspopup="dialog" aria-controls="news">
+        <span id="versionText">v–</span>
+        <span class="new-dot" aria-hidden="true"></span>
+      </button>
     </div>
     <div class="segmented" role="radiogroup" aria-label="Rolle dieses Rechners">
       <button type="button" role="radio" data-role="server">Server</button>
@@ -186,6 +190,21 @@
       <div id="dialogBody" class="dialog-body"></div>
       <div class="dialog-actions" id="dialogActions"></div>
     </form>
+  </dialog>
+
+  <dialog id="news" class="news" aria-labelledby="newsTitle">
+    <div class="news-inner">
+      <div class="news-head">
+        <div>
+          <h2 id="newsTitle">Neuigkeiten</h2>
+          <p class="hint">Was sich in jeder Version von Qross geändert hat.</p>
+        </div>
+        <button type="button" id="newsClose" class="icon-btn" aria-label="Neuigkeiten schließen">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>
+        </button>
+      </div>
+      <ol id="newsList" class="timeline" tabindex="-1"></ol>
+    </div>
   </dialog>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
