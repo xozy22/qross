@@ -260,18 +260,19 @@
         </button>
       </div>
       <div class="settings-body">
-        <nav class="settings-nav" aria-label="Bereiche der Einstellungen">
-          <button type="button" data-section="set-general">Allgemein</button>
-          <button type="button" data-section="set-profiles">Profile</button>
-          <button type="button" data-section="set-keys">Tastatur</button>
-          <button type="button" data-section="set-game">Spielemodus</button>
-          <button type="button" data-section="set-updates">Updates</button>
-          <button type="button" data-section="set-clipboard">Zwischenablage</button>
-          <button type="button" data-section="set-about">Info</button>
+        <nav class="settings-nav" role="tablist" aria-orientation="vertical" aria-label="Bereiche der Einstellungen">
+          <button type="button" role="tab" id="tab-general" data-section="set-general" aria-controls="set-general" aria-selected="true">Allgemein</button>
+          <button type="button" role="tab" id="tab-profiles" data-section="set-profiles" aria-controls="set-profiles" aria-selected="false" tabindex="-1">Profile</button>
+          <button type="button" role="tab" id="tab-keys" data-section="set-keys" aria-controls="set-keys" aria-selected="false" tabindex="-1">Tastatur</button>
+          <button type="button" role="tab" id="tab-game" data-section="set-game" aria-controls="set-game" aria-selected="false" tabindex="-1">Spielemodus</button>
+          <button type="button" role="tab" id="tab-updates" data-section="set-updates" aria-controls="set-updates" aria-selected="false" tabindex="-1">Updates</button>
+          <button type="button" role="tab" id="tab-clipboard" data-section="set-clipboard" aria-controls="set-clipboard" aria-selected="false" tabindex="-1">Zwischenablage</button>
+          <button type="button" role="tab" id="tab-about" data-section="set-about" aria-controls="set-about" aria-selected="false" tabindex="-1">Info</button>
         </nav>
         <div class="settings-content" id="settingsContent">
-          <!-- Neue Bereiche: <section class="settings-section"> anhängen und in der Navigation eintragen -->
-          <section class="settings-section" id="set-general" aria-labelledby="setGeneralTitle">
+          <!-- Neue Bereiche: <section class="settings-section" role="tabpanel" hidden> anhängen und in der Navigation
+               als role="tab" mit data-section und aria-controls eintragen. Es ist immer nur ein Bereich zu sehen. -->
+          <section class="settings-section" id="set-general" role="tabpanel" aria-labelledby="setGeneralTitle">
             <h3 id="setGeneralTitle">Allgemein</h3>
             <label class="setting">
               <span class="setting-text">
@@ -289,7 +290,7 @@
             </label>
           </section>
 
-          <section class="settings-section" id="set-profiles" aria-labelledby="setProfilesTitle">
+          <section class="settings-section" id="set-profiles" role="tabpanel" aria-labelledby="setProfilesTitle" hidden>
             <h3 id="setProfilesTitle">Profile</h3>
             <p class="hint profiles-intro">Je Ort ein Profil, z. B. „Büro“ und „Zuhause“. Ein Profil umfasst alles aus dem Hauptfenster: Rolle, Anordnung der Bildschirme, Name und Port, Wechsel zwischen Bildschirmen und als Client die Server-Adresse. Bearbeitet wird immer das aktive Profil. Was hier in den Einstellungen steht, gilt für alle Profile.</p>
             <label class="setting">
@@ -317,7 +318,7 @@
             <p class="hint" id="netHint" hidden>macOS gibt den WLAN-Namen ab Version 14 nur Programmen mit Ortungsdiensten heraus. Qross fragt nicht danach und erkennt das Netzwerk am Router; angezeigt wird deshalb das Subnetz.</p>
           </section>
 
-          <section class="settings-section" id="set-keys" aria-labelledby="setKeysTitle">
+          <section class="settings-section" id="set-keys" role="tabpanel" aria-labelledby="setKeysTitle" hidden>
             <h3 id="setKeysTitle">Tastatur</h3>
             <p class="keys-note" id="keysClientNote" hidden>Wirkt auf dem Server, denn dort werden Maus und Tastatur erfasst. Dieser Rechner ist gerade als Client eingestellt.</p>
             <fieldset class="keys-block" id="keysBlock">
@@ -404,7 +405,7 @@
             </fieldset>
           </section>
 
-          <section class="settings-section" id="set-game" aria-labelledby="setGameTitle">
+          <section class="settings-section" id="set-game" role="tabpanel" aria-labelledby="setGameTitle" hidden>
             <h3 id="setGameTitle">Spielemodus</h3>
             <label class="setting">
               <span class="setting-text">
@@ -416,7 +417,7 @@
             <p class="hint game-more">Spiele auf einem Client bekommen dabei relative Mausbewegungen statt Positionen, so wie von einer echten Maus. Das brauchen Spiele, die den Zeiger einfangen, etwa für die Kamera. Als Client meldet dieser Rechner dem Server nur bei eingeschaltetem Spielemodus, dass hier etwas im Vollbild läuft. Clients und Server ab Qross 0.6.</p>
           </section>
 
-          <section class="settings-section" id="set-updates" aria-labelledby="setUpdatesTitle">
+          <section class="settings-section" id="set-updates" role="tabpanel" aria-labelledby="setUpdatesTitle" hidden>
             <h3 id="setUpdatesTitle">Updates</h3>
             <label class="setting">
               <span class="setting-text">
@@ -434,7 +435,7 @@
             </div>
           </section>
 
-          <section class="settings-section" id="set-clipboard" aria-labelledby="setClipboardTitle">
+          <section class="settings-section" id="set-clipboard" role="tabpanel" aria-labelledby="setClipboardTitle" hidden>
             <h3 id="setClipboardTitle">Zwischenablage</h3>
             <label class="setting">
               <span class="setting-text">
@@ -452,7 +453,7 @@
             </label>
           </section>
 
-          <section class="settings-section" id="set-about" aria-labelledby="setAboutTitle">
+          <section class="settings-section" id="set-about" role="tabpanel" aria-labelledby="setAboutTitle" hidden>
             <h3 id="setAboutTitle">Info</h3>
             <dl class="about">
               <dt>Version</dt>

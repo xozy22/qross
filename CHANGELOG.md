@@ -8,6 +8,17 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [Unreleased]
+
+### Verbessert
+
+- **Einstellungen mit Bereichen:** Allgemein, Profile, Tastatur, Spielemodus, Updates, Zwischenablage und Info
+  sind jetzt je eine eigene Seite statt einer langen Liste zum Scrollen. Bei schmalem Fenster stehen die Bereiche
+  als Zeile oben; Pfeiltasten wechseln zwischen ihnen, und beim nächsten Öffnen kommt der zuletzt gewählte.
+- **Rückfrage beim Wechsel der Rolle:** Läuft der Server und du wechselst zum Client – über den Schalter, ein
+  Profil oder das Tray-Menü –, fragt Qross erst nach, denn der Server schaltet sich dabei aus und verbundene
+  Rechner verlieren Maus und Tastatur. Ebenso, wenn ein verbundener Client zum Server werden soll.
+
 ## [0.7.0] - 2026-10-18
 
 ### Neu

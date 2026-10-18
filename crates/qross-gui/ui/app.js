@@ -18,6 +18,8 @@ const state = {
   /** Bereits per Dialog angezeigte Freigabe-Anfragen (Name + Fingerprint) */
   prompted: new Set(),
   dialogOpen: false,
+  /** Zuletzt gezeigter Bereich der Einstellungen */
+  settingsSection: "set-general",
   /** Während des Ziehens wird das Raster nicht neu aufgebaut. */
   dragging: false,
   renderPending: false,
@@ -213,6 +215,45 @@ async function askName(title, initial = "", text = "Verwende genau den Namen, mi
   });
   const name = input.value.trim();
   return result === "ok" && name ? name : null;
+}
+
+/** „a“, „a“ und „b“, „a“, „b“ und „c“ */
+function joinNames(names) {
+  const quoted = names.map((n) => `„${n}“`);
+  return quoted.length > 1 ? `${quoted.slice(0, -1).join(", ")} und ${quoted.at(-1)}` : (quoted[0] ?? "");
+}
+
+/**
+ * Fragt nach, bevor ein Wechsel der Rolle (Knopf oder Profil) den laufenden Server ausschaltet
+ * oder die Verbindung des Clients trennt. Liefert true, wenn es weitergehen soll.
+ */
+async function confirmRoleChange(role) {
+  const s = state.status;
+  if (!role || !running() || s.role === role) return true;
+  if (s.role === "client" && s.phase !== "connected") return true;
+  const toClient = s.role === "server";
+  const names = toClient ? s.clients.map((c) => c.name) : [];
+  const lose = names.length
+    ? ` ${joinNames(names)} ${names.length === 1 ? "verliert" : "verlieren"} dann Maus und Tastatur dieses Rechners.`
+    : "";
+  const server = s.server_name ? `„${s.server_name}“` : "dem Server";
+  const result = await showDialog({
+    title: toClient ? "Server ausschalten?" : "Verbindung trennen?",
+    body: toClient
+      ? [
+          el("p", { text: `Achtung: Der Server schaltet sich aus, wenn dieser Rechner zum Client wird.${lose}` }),
+          el("p", { text: "Willst du wirklich zum Client wechseln?" }),
+        ]
+      : [
+          el("p", { text: `Achtung: Die Verbindung zu ${server} wird getrennt, wenn dieser Rechner zum Server wird.` }),
+          el("p", { text: "Willst du wirklich zum Server wechseln?" }),
+        ],
+    actions: [
+      { label: "Abbrechen", value: "cancel", kind: "ghost" },
+      { label: toClient ? "Server ausschalten" : "Verbindung trennen", value: "ok", kind: "danger" },
+    ],
+  });
+  return result === "ok";
 }
 
 // ------------------------------------------------------------------ Einstellungen
@@ -1529,35 +1570,44 @@ async function openSettings(section) {
     await loadKeyNames();
     await refreshPrefs();
     renderSettings();
+    // Ohne Ziel wieder dort, wo man zuletzt war (bis zum Neustart)
+    showSection(section || state.settingsSection);
     openSheet(dialog, $("#settingsClose"));
-    $("#settingsContent").scrollTop = 0;
-    markSection("set-general");
     renderProfiles();
     watchNetworks(true);
+  } else if (section) {
+    showSection(section);
   }
-  if (section) showSection(section);
 }
 
+/** Zeigt einen Bereich der Einstellungen als eigene Seite; die anderen sind ausgeblendet. */
 function showSection(id) {
-  $(`#${id}`).scrollIntoView({ block: "start" });
-  markSection(id);
-}
-
-function markSection(id) {
-  for (const b of $$(".settings-nav button")) b.setAttribute("aria-current", String(b.dataset.section === id));
-}
-
-/** Beim Scrollen den Bereich markieren, dessen Überschrift gerade oben steht. */
-function trackSection() {
-  const content = $("#settingsContent");
-  const top = content.getBoundingClientRect().top;
-  let current = null;
-  for (const section of $$(".settings-section")) {
-    if (section.getBoundingClientRect().top - top < 60) current = section.id;
+  if (!id || !$(`#${id}.settings-section`)) id = "set-general";
+  state.settingsSection = id;
+  for (const section of $$(".settings-section")) section.hidden = section.id !== id;
+  for (const tab of $$(".settings-nav button")) {
+    const active = tab.dataset.section === id;
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+    // Schmales Fenster: Die Leiste liegt als Zeile oben und lässt sich schieben; den gewählten Bereich zeigen
+    const nav = tab.parentElement;
+    if (active && nav.scrollWidth > nav.clientWidth) {
+      nav.scrollLeft = Math.max(0, Math.min(nav.scrollLeft, tab.offsetLeft - 12), tab.offsetLeft + tab.offsetWidth + 36 - nav.clientWidth);
+    }
   }
-  // Ganz unten angekommen: den letzten Bereich markieren, auch wenn er kurz ist
-  if (content.scrollTop + content.clientHeight >= content.scrollHeight - 4) current = $$(".settings-section").at(-1).id;
-  markSection(current || "set-general");
+  $("#settingsContent").scrollTop = 0;
+}
+
+/** Pfeiltasten, Pos1 und Ende wechseln zwischen den Bereichen (wie bei Registerkarten üblich). */
+function onSettingsNavKey(e) {
+  const tabs = $$(".settings-nav button");
+  const i = tabs.indexOf(document.activeElement);
+  const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
+  const next = step ? (i + step + tabs.length) % tabs.length : { Home: 0, End: tabs.length - 1 }[e.key];
+  if (i < 0 || next === undefined) return;
+  e.preventDefault();
+  tabs[next].focus();
+  showSection(tabs[next].dataset.section);
 }
 
 function renderSettings() {
@@ -2126,7 +2176,7 @@ function setupSettings() {
   $("#settingsBtn").addEventListener("click", () => openSettings());
   setupSheet($("#settings"), $("#settingsClose"));
   for (const b of $$(".settings-nav button")) b.addEventListener("click", () => showSection(b.dataset.section));
-  $("#settingsContent").addEventListener("scroll", trackSection, { passive: true });
+  $(".settings-nav").addEventListener("keydown", onSettingsNavKey);
 
   $("#prefAutostart").addEventListener("change", async (e) => {
     try {
@@ -2214,6 +2264,13 @@ function renderProfilePick() {
   $("#profilePick").title = active
     ? `Profil „${active.name}“: ${profileSummary(active)}${auto ? ". Wird nach Netzwerk gewählt." : ""}`
     : "Profil";
+}
+
+/** Wechselt das Profil nach Rückfrage, falls es die Rolle wechselt, während Qross läuft. */
+async function pickProfile(id) {
+  if (!id || id === state.profiles.active) return;
+  const role = state.profiles.list.find((p) => p.id === id)?.place.role;
+  if (await confirmRoleChange(role)) await activateProfile(id);
 }
 
 /** Wechselt das Profil; als Client fragt danach womöglich der Fingerprint-Dialog. */
@@ -2430,7 +2487,7 @@ function setupProfiles() {
     const id = e.target.value;
     e.target.value = state.profiles.active;
     if (id === "manage") openSettings("set-profiles");
-    else if (id && id !== state.profiles.active) activateProfile(id);
+    else pickProfile(id);
   });
   $("#profilesAuto").addEventListener("change", (e) => editProfiles({ action: "set_automatic", enabled: e.target.checked }));
   $("#profileFallback").addEventListener("change", (e) => editProfiles({ action: "set_fallback", id: e.target.value }));
@@ -2917,6 +2974,8 @@ async function init() {
   await listen("start-from-tray", () => {
     if (!running()) startFlow();
   });
+  // Profil aus dem Tray, das die Rolle wechseln würde: erst hier nachfragen
+  await listen("confirm-profile", (e) => pickProfile(e.payload));
   await listen("show-news", () => openNews());
   await listen("show-settings", (e) => openSettings(e.payload || undefined));
   await listen("update-status", (e) => {
@@ -2939,6 +2998,7 @@ async function init() {
   for (const b of $$(".segmented button")) {
     b.addEventListener("click", async () => {
       if (state.settings.role === b.dataset.role) return;
+      if (!(await confirmRoleChange(b.dataset.role))) return;
       state.settings.role = b.dataset.role;
       render();
       if (b.dataset.role === "client" && !running()) searchServers();

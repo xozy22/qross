@@ -160,6 +160,14 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
                 let id = id[PROFILE_PREFIX.len()..].to_owned();
                 let app = app.clone();
                 let rt = app.state::<Arc<Runtime>>().inner().clone();
+                if changes_running_role(&rt, &id) {
+                    // Server schaltet sich aus bzw. Client trennt: erst im Fenster nachfragen. Das
+                    // Häkchen bleibt bis dahin beim aktiven Profil.
+                    update_profiles(&app, &rt.profiles());
+                    crate::show_main(&app);
+                    let _ = app.emit("confirm-profile", id);
+                    return;
+                }
                 tauri::async_runtime::spawn(async move {
                     if !matches!(rt.activate_profile(&id).await, Ok(None)) {
                         // Fehler oder unbekannter Server: im Fenster zeigen
@@ -177,6 +185,20 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// Würde das Profil die Rolle wechseln, während der Server läuft oder der Client verbunden ist?
+fn changes_running_role(rt: &Runtime, id: &str) -> bool {
+    let status = rt.status();
+    let running = match status.role {
+        Some(Role::Server) => true,
+        Some(Role::Client) => status.phase == Phase::Connected,
+        None => false,
+    };
+    let profiles = rt.profiles();
+    running
+        && id != profiles.active
+        && profiles.list.iter().find(|p| p.id == id).is_some_and(|p| Some(p.place.role) != status.role)
 }
 
 /// Profile als Häkchen-Einträge, dazu die Automatik und der Weg in die Einstellungen
