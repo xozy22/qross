@@ -21,7 +21,7 @@ Implementierung: `crates/qross-proto`.
 
 | Kanal | Richtung | Zuverlässig | Inhalt |
 |---|---|---|---|
-| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing` |
+| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing`, `CursorFinder` |
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel`, im Zeichenmodus `Text`, `Shortcut` |
 | Datagramm | Server → Client | **nein** | `MouseMove`, im Spielemodus `MouseDelta` |
@@ -55,7 +55,7 @@ große Schwachpunkt von Synergy.
    Ab Version 6 meldet er mit `TypesText` direkt nach dem `Welcome`, dass er Zeichen eingeben kann (siehe
    Zeichen statt Tastenposition).
    Ab Version 7 schickt der Server gleich nach dem `Welcome` die Rechte des Clients (`Sharing`, siehe Rechte
-   je Rechner).
+   je Rechner), ab Version 9 danach den Cursor-Finder (`CursorFinder`, sofern eingeschaltet).
 3. Der Server öffnet den Input-Stream.
 4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`. Danach folgen
    `MouseMove`-Datagramme (im Spielemodus `MouseDelta`) mit dieser `epoch` und steigender `seq`.
@@ -302,6 +302,36 @@ und nur, wenn er Zeichen eingeben kann (nicht unter Wayland/libei). Server bis Q
 nie. `Text` und `Shortcut` schickt der Server nur an Clients, die `TypesText` gesendet haben; ein älterer Client
 könnte sie nicht lesen, und sein ganzer Input-Stream bräche ab. Alle anderen bekommen weiter Tastenpositionen,
 auch wenn sie auf „Zeichen“ stehen; die Oberfläche zeigt das beim Rechner an.
+
+## Cursor-Finder
+
+Seit Qross 0.8, Standard aus. Beim Wechsel blitzt auf dem Rechner, auf dem der Cursor ankommt, etwa eine
+Sekunde lang ein Ring um den Cursor auf und darunter sein Name: auf einem Client bei `Enter`, auf dem Server,
+wenn der Cursor zurückkommt (`ReleaseCapture`). Verlässt der Cursor einen Rechner (`Leave` bzw. das Abfangen
+beginnt), verschwindet die Anzeige dort sofort. Wechselt er von Client zu Client, zeigt der Server nichts.
+
+Eingestellt wird am Server (`[finder] ring`, `name`; Einstellungen → Allgemein), denn dort sitzt, wer gerade
+wechselt, und die Einstellung soll für alle Rechner gleich sein. Der Server schickt auf dem Control-Stream
+`CursorFinder { ring, name }`: nach `Sharing`, sofern etwas eingeschaltet ist, und nach jeder Änderung, ohne die
+Verbindung zu trennen. Ohne diese Meldung zeigt ein Client nichts. Was er zeigt, bestimmt er selbst: den eigenen
+Namen im Layout, um den Cursor dort, wo er gerade steht.
+
+Gezeichnet wird auf allen Systemen gleich (`qross_platform::finder`, Systemschrift über `ab_glyph`); jedes System
+stellt nur ein durchsichtiges Fenster, das Klicks durchlässt, keinen Fokus nimmt und über allen Fenstern liegt:
+
+| System | Fenster | Skalierung |
+|---|---|---|
+| Windows | `WS_EX_LAYERED` mit `UpdateLayeredWindow`, `WS_EX_TRANSPARENT`, `NOACTIVATE`, `TOOLWINDOW`, `TOPMOST`; nur angelegt, solange es zu sehen ist | `GetDpiForMonitor` des Monitors unter dem Cursor |
+| macOS | randloses `NSWindow`, `ignoresMouseEvents`, Ebene des Bildschirmschoners, in allen Spaces; Bild als `CGImage` im Layer; nur mit AppKit-Ereignisschleife (die App) | Retina über den Anzeigemodus |
+| Linux (X11) | Override-Redirect-Fenster mit 32-Bit-Visual, leerer Eingabebereich (Shape); nur mit Compositor | `Xft.dpi` |
+| Wayland | – (globale Überlagerungen sind nicht vorgesehen) | |
+
+Läuft auf dem Zielrechner ein Programm im Vollbild oder hat eins den Zeiger eingefangen (wie beim
+Spielemodus), zeigt er nichts.
+
+**Kompatibilität:** Ein neuer Server meldet im `Welcome` die Version 9. Clients bis Qross 0.6 lesen den
+Control-Stream nach dem `Welcome` nicht mehr; Clients aus 0.7 überspringen `CursorFinder`, denn sie können die
+Nachricht nicht lesen. Beide zeigen nichts und bleiben verbunden. Ältere Server schicken nichts.
 
 ## Regeln für Robustheit
 

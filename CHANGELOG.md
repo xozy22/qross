@@ -10,6 +10,17 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 
 ## [Unreleased]
 
+### Neu
+
+- **Cursor-Finder:** Beim Wechsel blitzt auf dem Rechner, auf dem der Cursor ankommt, etwa eine Sekunde lang ein
+  Ring um den Cursor auf, der sich um ihn zusammenzieht, und darunter der Name des Rechners. Ring und Name lassen
+  sich einzeln einschalten (Einstellungen → Allgemein bzw. `[finder]` in `qross.toml`); Standard ist aus.
+  Eingestellt wird am Server, er gibt es ohne neue Verbindung an alle Clients weiter, und auch zurück auf dem
+  Server erscheint es. Die Anzeige folgt dem Cursor, richtet sich nach Monitor und Skalierung, lässt Klicks
+  hindurch, nimmt keinen Fokus und bleibt aus, wenn dort ein Programm im Vollbild läuft. „Ausprobieren“ zeigt
+  sie sofort. Clients ab Qross 0.8; ältere zeigen nichts. Unter Wayland lässt sich nichts über andere Fenster
+  legen, dort gibt es ihn nicht; unter macOS nur in der App, nicht mit `qross` auf der Kommandozeile.
+
 ### Verbessert
 
 - **Einstellungen mit Bereichen:** Allgemein, Profile, Tastatur, Spielemodus, Updates, Zwischenablage und Info

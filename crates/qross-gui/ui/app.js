@@ -1622,6 +1622,7 @@ function renderSettings() {
   $("#autostartHint").textContent =
     prefs.autostart_note ?? `Qross startet bei der Anmeldung unsichtbar im Tray. Eintrag unter ${prefs.autostart_place}.`;
   $("#prefResume").checked = state.settings.resume_role;
+  renderCursorFinder();
   $("#prefAutoUpdate").checked = state.settings.auto_update;
   $("#prefGameMode").checked = state.settings.game_mode;
   $("#prefKeepSecrets").checked = !state.settings.clipboard_share_concealed;
@@ -1629,6 +1630,42 @@ function renderSettings() {
   $("#aboutDataDir").textContent = prefs.data_dir;
   renderClipLimit();
   renderUpdateStatus();
+}
+
+/** Was der Cursor-Finder zeigt, in Worten */
+function finderText(f) {
+  if (f.ring && f.name) return "Ring und Name";
+  if (f.ring) return "nur den Ring";
+  if (f.name) return "nur den Namen";
+  return "nichts";
+}
+
+/** Cursor-Finder: Als Server eingestellt und an die Clients weitergegeben; als Client gilt, was der Server will. */
+function renderCursorFinder() {
+  const isClient = state.settings.role === "client";
+  const status = state.status;
+  const fromServer = isClient && status?.role === "client" && status.phase === "connected" ? status.cursor_finder ?? null : null;
+  const shown = isClient ? fromServer ?? { ring: false, name: false } : state.settings.cursor_finder;
+  $("#prefFinderRing").checked = shown.ring;
+  $("#prefFinderName").checked = shown.name;
+  for (const id of ["#prefFinderRing", "#prefFinderName"]) {
+    $(id).disabled = isClient;
+    $(id).closest(".setting").classList.toggle("disabled", isClient);
+  }
+  const note = $("#finderClientNote");
+  note.hidden = !isClient;
+  if (isClient) {
+    const connected = status?.role === "client" && status.phase === "connected";
+    note.textContent = !connected
+      ? "Stellt der Server ein, für alle Rechner. Dieser Rechner ist gerade als Client eingestellt."
+      : fromServer
+        ? `Stellt der Server ein: „${status.server_name}“ zeigt hier ${finderText(fromServer)}.`
+        : `Stellt der Server ein: „${status.server_name}“ zeigt hier nichts (aus oder Qross vor 0.8).`;
+  }
+  $("#finderHint").textContent =
+    state.desktop === "wayland"
+      ? "Unter Wayland lässt sich nichts über andere Fenster legen; dieser Rechner zeigt selbst nichts, Clients schon."
+      : "Gilt für alle Rechner: Der Server gibt es an Clients ab Qross 0.8 weiter. Über Programmen im Vollbild erscheint nichts.";
 }
 
 /** „heute um 14:02“, „gestern um 9:15“, sonst „am 3. Oktober um 14:02“ */
@@ -2194,6 +2231,23 @@ function setupSettings() {
   $("#prefAutoUpdate").addEventListener("change", (e) => {
     state.settings.auto_update = e.target.checked;
     saveSoon.flush();
+  });
+  for (const [id, key] of [["#prefFinderRing", "ring"], ["#prefFinderName", "name"]]) {
+    $(id).addEventListener("change", (e) => {
+      state.settings.cursor_finder = { ...state.settings.cursor_finder, [key]: e.target.checked };
+      updatePreview();
+      saveSoon.flush();
+    });
+  }
+  $("#finderTry").addEventListener("click", async () => {
+    // Ist alles aus, zeigt „Ausprobieren“ trotzdem beides, damit man sieht, wie es aussähe.
+    const ring = $("#prefFinderRing").checked, name = $("#prefFinderName").checked;
+    const style = ring || name ? { ring, name } : { ring: true, name: true };
+    try {
+      if (!(await invoke("try_cursor_finder", style))) toast("Unter Wayland lässt sich der Cursor-Finder nicht zeigen.");
+    } catch (e) {
+      toast(String(e), "error");
+    }
   });
   $("#prefGameMode").addEventListener("change", (e) => {
     state.settings.game_mode = e.target.checked;
@@ -2912,8 +2966,11 @@ function render() {
   renderServer();
   renderClients();
   renderClient();
-  // Verbundene Rechner melden, ob sie Zeichen eingeben können
-  if ($("#settings").open && state.settings) renderKeyModes();
+  // Verbundene Rechner melden, ob sie Zeichen eingeben können; als Client meldet der Server den Cursor-Finder
+  if ($("#settings").open && state.settings) {
+    renderKeyModes();
+    renderCursorFinder();
+  }
 }
 
 async function init() {

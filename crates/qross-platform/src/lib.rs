@@ -5,6 +5,7 @@
 pub mod clipformat;
 pub mod concealed;
 pub mod dryrun;
+pub mod finder;
 pub mod keymap_linux;
 pub mod keymap_mac;
 pub mod keymap_windows;
@@ -47,6 +48,8 @@ use qross_core::keys::KeyOptions;
 use qross_core::{CaptureEvent, Inject};
 use qross_proto::{ClipboardData, GameState, Rect};
 use tokio::sync::mpsc::UnboundedSender;
+
+pub use finder::FinderOverlay;
 
 /// Steuerung der Eingabe-Erfassung auf dem Server.
 pub trait Capture: Send + Sync {
@@ -279,6 +282,14 @@ pub fn monitors() -> Vec<Rect> {
 ///   ohne selbst nach dem Zeiger zu greifen
 pub fn game_state() -> GameState {
     imp::game_state()
+}
+
+/// Cursor-Finder dieses Rechners (siehe [`finder`]); legt noch kein Fenster an. `None`, wo sich nichts
+/// über andere Programme legen lässt: unter Wayland und auf nicht unterstützten Systemen. Unter macOS
+/// zeigt er nur etwas, wenn der Hauptthread die AppKit-Ereignisschleife betreibt (die Oberfläche),
+/// nicht in der Kommandozeile.
+pub fn finder_overlay() -> Option<Arc<dyn FinderOverlay>> {
+    imp::finder_overlay()
 }
 
 /// Startet die Erfassung. Ereignisse landen in `events`.

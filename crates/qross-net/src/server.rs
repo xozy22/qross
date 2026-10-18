@@ -7,14 +7,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use qross_core::finder::{self as cursor_finder, Cue};
 use qross_core::keys::{KeyConfig, KeyMode};
 use qross_core::server::{Action, Hold, ServerEvent, ServerState, SwitchOptions};
 use qross_core::sharing::{describe as describe_sharing, SharingRules};
 use qross_core::{CaptureEvent, Layout};
-use qross_platform::{Capture, Clipboard};
+use qross_platform::{Capture, Clipboard, FinderOverlay};
 use qross_proto::{
-    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
-    FileEntry, GameState, Input, Platform, Rect, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
+    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
+    DragMessage, FileEntry, GameState, Input, Platform, Rect, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION,
+    SERVER_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -49,6 +51,9 @@ pub struct ServerPlatform {
     pub monitors: Box<dyn Fn() -> Vec<Rect> + Send + Sync>,
     /// Spielemodus: was im Vordergrund läuft (üblich: `qross_platform::game_state`)
     pub game: Detector,
+    /// Cursor-Finder dieses Rechners, wenn der Cursor zurückkommt (üblich:
+    /// `qross_platform::finder_overlay`); `None`: hier nichts zeigen, Clients bekommen ihn trotzdem
+    pub finder: Option<Arc<dyn FinderOverlay>>,
 }
 
 pub struct Server {
@@ -72,6 +77,8 @@ pub struct Server {
     transfers: Transfers,
     /// Rechte je Rechner, auch während des Laufs änderbar
     sharing: SharingHandle,
+    /// Cursor-Finder für alle Rechner, auch während des Laufs änderbar
+    cursor_finder: CursorFinderHandle,
 }
 
 /// Ändert die Rechte je Rechner eines laufenden Servers (siehe [`Server::sharing`]). Sie gelten
@@ -91,6 +98,29 @@ impl SharingHandle {
 
     pub fn get(&self) -> SharingRules {
         self.0.borrow().clone()
+    }
+}
+
+/// Ändert den Cursor-Finder eines laufenden Servers (siehe [`Server::cursor_finder`]). Er gilt sofort
+/// für alle Rechner: für den Server selbst und für verbundene Clients ab Qross 0.8, die ihn ohne
+/// neue Verbindung erfahren.
+#[derive(Clone)]
+pub struct CursorFinderHandle(Arc<watch::Sender<CursorFinder>>);
+
+impl CursorFinderHandle {
+    pub fn set(&self, finder: CursorFinder) {
+        self.0.send_if_modified(|current| {
+            let changed = *current != finder;
+            if changed {
+                info!("Cursor-Finder: {}", cursor_finder::describe(finder));
+            }
+            *current = finder;
+            changed
+        });
+    }
+
+    pub fn get(&self) -> CursorFinder {
+        *self.0.borrow()
     }
 }
 
@@ -172,10 +202,12 @@ enum NetEvent {
     Closed { name: String, id: usize },
 }
 
-/// Angenommen: Name des Servers fürs `Welcome` und die Rechte des Clients, die sich mit den Regeln ändern
+/// Angenommen: Name des Servers fürs `Welcome`, die Rechte des Clients, die sich mit den Regeln ändern,
+/// und der Cursor-Finder
 struct Admitted {
     server_name: String,
     sharing: watch::Receiver<Sharing>,
+    cursor_finder: watch::Receiver<CursorFinder>,
 }
 
 /// Zwischenordner für ankommende Dateien
@@ -224,7 +256,21 @@ impl Server {
             fingerprint: identity.fingerprint(),
             transfers: Transfers::new(),
             sharing: SharingHandle(Arc::new(watch::channel(SharingRules::default()).0)),
+            cursor_finder: CursorFinderHandle(Arc::new(watch::channel(CursorFinder::OFF).0)),
         })
+    }
+
+    /// Cursor-Finder (Standard: aus): Beim Wechsel blitzt auf dem Rechner, auf dem der Cursor
+    /// ankommt, ein Ring um den Cursor bzw. sein Name auf. Clients ab Qross 0.8 bekommen das mitgeteilt;
+    /// ändern im Betrieb über [`Server::cursor_finder`].
+    pub fn with_cursor_finder(self, finder: CursorFinder) -> Self {
+        self.cursor_finder.0.send_replace(finder);
+        self
+    }
+
+    /// Griff, um den Cursor-Finder im Betrieb zu ändern
+    pub fn cursor_finder(&self) -> CursorFinderHandle {
+        self.cursor_finder.clone()
     }
 
     /// Rechte je Rechner (Standard: alles in beide Richtungen). Ändern im Betrieb über [`Server::sharing`].
@@ -340,7 +386,7 @@ impl Server {
         let (net_tx, mut net_rx) = mpsc::unbounded_channel();
         tokio::spawn(accept_loop(self.endpoint.clone(), net_tx, stagings));
 
-        let ServerPlatform { capture, mut events, clipboard, screen, monitors, game } = platform;
+        let ServerPlatform { capture, mut events, clipboard, screen, monitors, game, finder } = platform;
         // Ohne Spielemodus wird gar nicht erst nachgesehen; der Sender hält den Kanal dann offen.
         let (_no_game, mut local_game) = tokio::sync::watch::channel(GameState::default());
         if self.game_mode {
@@ -390,6 +436,10 @@ impl Server {
         let mut screen_poll = tokio::time::interval(Duration::from_secs(2));
         // Zuletzt gemeldetes Festhalten und der Bildschirm dazu
         let mut hold = (Hold::Free, self.config.name.clone());
+        let finder_style = self.cursor_finder.0.subscribe();
+        if finder_style.borrow().is_on() {
+            info!("Cursor-Finder: {}", cursor_finder::describe(*finder_style.borrow()));
+        }
         info!("Server „{}“ lauscht auf {}", self.config.name, self.local_addr()?);
         if !local_monitors.is_empty() {
             info!("eigene Monitore: {}", describe_monitors(&local_monitors));
@@ -448,7 +498,11 @@ impl Server {
                                 };
                                 clients.insert(name.clone(), handle);
                                 clip_synced.lock().unwrap().remove(&name);
-                                let _ = reply.send(Ok(Admitted { server_name: self.config.name.clone(), sharing: sharing_rx }));
+                                let _ = reply.send(Ok(Admitted {
+                                    server_name: self.config.name.clone(),
+                                    sharing: sharing_rx,
+                                    cursor_finder: self.cursor_finder.0.subscribe(),
+                                }));
                                 info!("Client „{name}“ verbunden ({}×{})", screen.width, screen.height);
                                 if sharing != Sharing::ALL {
                                     info!("Rechte für „{name}“: {}", describe_sharing(sharing));
@@ -599,6 +653,13 @@ impl Server {
             for action in actions {
                 self.notify_action(&action);
                 self.explain_key_mode(&action, &clients);
+                if let Some(overlay) = &finder {
+                    match cursor_finder::on_server(&action, *finder_style.borrow()) {
+                        Some(Cue::Show(style)) => overlay.show(style, &self.config.name),
+                        Some(Cue::Hide) => overlay.hide(),
+                        None => {}
+                    }
+                }
                 let files = FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers };
                 apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops);
             }
@@ -930,13 +991,13 @@ async fn handle_connection(
         reply_rx.await.map_err(|_| anyhow!("Server wurde beendet"))?
     };
     let sharing = match verdict {
-        Ok(Admitted { server_name, sharing }) => {
+        Ok(Admitted { server_name, sharing, cursor_finder }) => {
             debug!("„{name}“ läuft unter {platform:?}");
             // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore,
             // ob sie Zeichen eingeben können und, sobald dort etwas im Vollbild läuft, den Spielemodus.
             let welcome = Control::Welcome { version: SERVER_VERSION, server_name, platform: Platform::current() };
             write_frame(&mut send, &welcome).await?;
-            tokio::spawn(send_sharing(send, sharing.clone(), name.clone()));
+            tokio::spawn(send_control(send, sharing.clone(), cursor_finder, name.clone()));
             sharing
         }
         Err(reason) => {
@@ -974,17 +1035,37 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Schickt dem Client seine Rechte: gleich nach dem `Welcome` und nach jeder Änderung. Clients bis
-/// Qross 0.6 lesen den Control-Stream danach nicht mehr; bei ihnen bleibt das ungelesen liegen.
-async fn send_sharing(mut control: SendStream, mut sharing: watch::Receiver<Sharing>, name: String) {
+/// Schickt dem Client nach dem `Welcome` seine Rechte und den Cursor-Finder (diesen nur, wenn er
+/// eingeschaltet ist), danach jede Änderung. Clients bis Qross 0.6 lesen den Control-Stream nach dem
+/// `Welcome` nicht mehr, bei ihnen bleibt das ungelesen liegen; Clients aus 0.7 überspringen den
+/// Cursor-Finder.
+async fn send_control(
+    mut control: SendStream,
+    mut sharing: watch::Receiver<Sharing>,
+    mut finder: watch::Receiver<CursorFinder>,
+    name: String,
+) {
+    let mut messages = vec![Control::Sharing(*sharing.borrow_and_update())];
+    let style = *finder.borrow_and_update();
+    if style.is_on() {
+        messages.push(Control::CursorFinder(style));
+    }
     loop {
-        let current = *sharing.borrow_and_update();
-        if let Err(e) = write_frame(&mut control, &Control::Sharing(current)).await {
-            return debug!("Rechte an „{name}“ nicht gesendet: {e}");
+        for message in messages.drain(..) {
+            if let Err(e) = write_frame(&mut control, &message).await {
+                return debug!("Control-Nachricht an „{name}“ nicht gesendet: {e}");
+            }
         }
-        // Endet, sobald der Client getrennt ist
-        if sharing.changed().await.is_err() {
-            return;
+        // Endet, sobald der Client getrennt ist (bzw. der Server beendet)
+        tokio::select! {
+            changed = sharing.changed() => match changed {
+                Ok(()) => messages.push(Control::Sharing(*sharing.borrow_and_update())),
+                Err(_) => return,
+            },
+            changed = finder.changed() => match changed {
+                Ok(()) => messages.push(Control::CursorFinder(*finder.borrow_and_update())),
+                Err(_) => return,
+            },
         }
     }
 }

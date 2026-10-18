@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use qross_core::server::SwitchOptions;
 use qross_core::sharing::{Share, Sharing, SharingRules};
 use qross_core::{Layout, LinkConfig};
-use qross_proto::{Edge, DEFAULT_PORT};
+use qross_proto::{CursorFinder, Edge, DEFAULT_PORT};
 use serde::{Deserialize, Serialize};
 
 use crate::keys::KeySettings;
@@ -62,6 +62,9 @@ pub struct Settings {
     /// Spielemodus: Als Server bei Vollbild auf dem Rechner mit dem Cursor festhalten, als Client
     /// dem Server melden, dass hier etwas im Vollbild läuft.
     pub game_mode: bool,
+    /// Cursor-Finder beim Wechsel (Standard: aus). Wirkt als Server, der ihn an die Clients weitergibt;
+    /// als Client gilt, was der Server eingestellt hat.
+    pub cursor_finder: CursorFinder,
     /// Profil, zu dem Rolle, Server- und Client-Werte gehören (siehe [`profiles`]); leer bei
     /// Einstellungen aus einer Version ohne Profile
     pub profile: String,
@@ -145,6 +148,7 @@ impl Settings {
             resume_role: true,
             auto_update: true,
             game_mode: true,
+            cursor_finder: CursorFinder::OFF,
             profile: String::new(),
         }
     }
@@ -156,8 +160,10 @@ impl Settings {
 
     /// Inhalt einer `qross.toml` für `qross server --config`.
     pub fn server_toml(&self) -> String {
+        let finder = self.cursor_finder;
         self.server.to_toml(self.clipboard_files_mb, self.clipboard_share_concealed)
             + &format!("\n[game]\nenabled = {}\n", self.game_mode)
+            + &format!("\n[finder]\nring = {}\nname = {}\n", finder.ring, finder.name)
     }
 
     /// Lädt `gui.json` aus `dir`; `None`, wenn es die Datei noch nicht gibt.
@@ -529,6 +535,24 @@ mod tests {
     }
 
     #[test]
+    fn exported_toml_carries_the_cursor_finder() {
+        let mut settings = Settings::for_host("pc");
+        let finder = |s: &Settings| {
+            let file: toml::Table = toml::from_str(&s.server_toml()).unwrap();
+            let section = file["finder"].as_table().unwrap();
+            (section["ring"].as_bool().unwrap(), section["name"].as_bool().unwrap())
+        };
+        assert_eq!(finder(&settings), (false, false), "Standard: aus");
+        settings.cursor_finder = CursorFinder { ring: true, name: false };
+        assert_eq!(finder(&settings), (true, false));
+        // So steht es in gui.json und so liest es app.js
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["cursor_finder"], serde_json::json!({ "ring": true, "name": false }));
+        let from_ui: Settings = serde_json::from_str(r#"{"cursor_finder":{"ring":false,"name":true}}"#).unwrap();
+        assert_eq!(from_ui.cursor_finder, CursorFinder { ring: false, name: true });
+    }
+
+    #[test]
     fn every_client_in_the_layout_gets_its_own_rights() {
         // Eine gui.json aus 0.6 kennt keine Rechte: Alles bleibt erlaubt, nichts landet in der Datei.
         let dir = std::env::temp_dir().join(format!("qross-gui-rechte-{}", std::process::id()));
@@ -617,8 +641,9 @@ mod tests {
         assert_eq!(old.clipboard_files_mb, 1000);
         // … und vertrauliche Inhalte bleiben auf dem Rechner
         assert!(!old.clipboard_share_concealed);
-        // … und Fortsetzen, automatische Updates und der Spielemodus sind an
+        // … und Fortsetzen, automatische Updates und der Spielemodus sind an, der Cursor-Finder aus
         assert!(old.resume_role && old.auto_update && old.game_mode);
+        assert_eq!(old.cursor_finder, CursorFinder::OFF);
         // … und die Tasten-Standards des Servers (Rollen, Medientasten an den aktiven Rechner)
         assert_eq!(old.server.keys, crate::keys::KeySettings::default());
         assert_eq!(old.server.keys.config().unwrap(), qross_core::keys::KeyConfig::default());

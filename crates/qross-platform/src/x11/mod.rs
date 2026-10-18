@@ -2,6 +2,7 @@
 //! läuft über die Desktop-Portale im Modul `wayland`.
 
 mod capture;
+mod finder;
 mod inject;
 mod keymap;
 
@@ -18,7 +19,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::NONE;
 
 use crate::arboard_clipboard::ArboardClipboard;
-use crate::{Capture, Clipboard, Injector};
+use crate::{Capture, Clipboard, FinderOverlay, Injector};
 
 pub(crate) fn connect() -> Result<(RustConnection, Window)> {
     let (conn, screen) = x11rb::connect(None)
@@ -98,4 +99,8 @@ pub fn injector() -> Result<Box<dyn Injector>> {
 
 pub fn clipboard() -> Box<dyn Clipboard> {
     Box::new(ArboardClipboard::default())
+}
+
+pub fn finder_overlay() -> Arc<dyn FinderOverlay> {
+    Arc::new(crate::finder::Overlay::new(finder::surface))
 }

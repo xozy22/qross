@@ -9,13 +9,14 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use qross_core::client::{ClientState, Transition};
+use qross_core::finder::{self as cursor_finder, Cue};
 use qross_core::sharing::describe as describe_sharing;
 use qross_core::Inject;
-use qross_platform::{Clipboard, Injector};
+use qross_platform::{Clipboard, FinderOverlay, Injector};
 use qross_proto::{
-    decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
-    FileEntry, FrameError, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, Sharing, StreamKind,
-    DEFAULT_PORT, GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SHARING_SINCE, TEXT_SINCE,
+    decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
+    DragMessage, FileEntry, FrameError, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, Sharing,
+    StreamKind, DEFAULT_PORT, GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SHARING_SINCE, TEXT_SINCE,
 };
 use quinn::{Connection, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -63,6 +64,9 @@ pub struct ClientPlatform {
     /// Spielemodus: was im Vordergrund läuft (üblich: `qross_platform::game_state`; ohne
     /// Spielemodus `GameState::default`, dann meldet der Client nie etwas)
     pub game: Detector,
+    /// Cursor-Finder dieses Rechners, wenn der Cursor ankommt (üblich: `qross_platform::finder_overlay`).
+    /// Was er zeigt, stellt der Server ein; `None`: hier nie etwas zeigen.
+    pub finder: Option<Arc<dyn FinderOverlay>>,
 }
 
 /// Abfrage der eigenen Bildschirmfläche und des Vordergrunds (aus `ClientPlatform`)
@@ -72,6 +76,8 @@ struct ScreenQuery {
     game: watch::Receiver<GameState>,
     /// Das Einspeisen kann Zeichen eingeben (Zeichenmodus)
     types_text: bool,
+    /// Cursor-Finder dieses Rechners
+    finder: Option<Arc<dyn FinderOverlay>>,
 }
 
 /// Fehler, bei denen eine Wiederverbindung sinnlos ist.
@@ -99,6 +105,8 @@ enum FromServer {
     DragQuery { probe: u32 },
     /// Was der Server mit diesem Rechner teilt (seit Qross 0.7)
     Sharing(Sharing),
+    /// Was der Cursor-Finder hier zeigt (seit Qross 0.8)
+    CursorFinder(CursorFinder),
 }
 
 /// Zwischenablage dieses Clients: Zugriff, ankommende kopierte Dateien, Meldungen dazu.
@@ -147,6 +155,9 @@ pub enum ClientNotice {
     /// Ein Passwortmanager hat den Inhalt der Zwischenablage als vertraulich markiert; er bleibt
     /// hier (einmal je Inhalt, siehe [`ClientConfig::share_concealed`]).
     ClipboardConcealed,
+    /// Was der Server für den Cursor-Finder eingestellt hat: nach dem Verbinden, sofern er etwas
+    /// zeigt, und bei jeder Änderung. Server bis Qross 0.7 melden das nie; dort bleibt er aus.
+    CursorFinder(CursorFinder),
 }
 
 type Notices<'a> = Option<&'a mpsc::UnboundedSender<ClientNotice>>;
@@ -213,9 +224,9 @@ async fn run_inner(
     notices: Notices<'_>,
     transfers: Transfers,
 ) -> Result<()> {
-    let ClientPlatform { mut injector, clipboard, screen, monitors, game } = platform;
+    let ClientPlatform { mut injector, clipboard, screen, monitors, game, finder } = platform;
     let types_text = injector.types_text();
-    let screen = ScreenQuery { bounds: screen, monitors, game: game::watch(game), types_text };
+    let screen = ScreenQuery { bounds: screen, monitors, game: game::watch(game), types_text, finder };
     let _progress = {
         let notices = notices.cloned();
         transfers.spawn_reporter(move |progress| {
@@ -386,6 +397,8 @@ async fn session(
     let mut screen_poll = tokio::time::interval(Duration::from_secs(2));
     // Was der Server mit diesem Rechner teilt; ältere Server melden nichts und erlauben alles.
     let mut sharing = Sharing::ALL;
+    // Was der Cursor-Finder hier zeigt; ältere Server melden nichts, dann bleibt er aus.
+    let mut finder_style = CursorFinder::OFF;
 
     let outcome: Result<()> = async {
         loop {
@@ -424,6 +437,13 @@ async fn session(
                             let _ = inject.send(ToInjector::DropFolder { x, y, reply });
                             let target = folder.await.ok().flatten().unwrap_or_else(files::fallback_drop_folder);
                             receiver.on_drop(transfer, target);
+                        }
+                        if let (Some(overlay), Some(transition)) = (&screen.finder, transition) {
+                            match cursor_finder::on_client(transition, finder_style) {
+                                Some(Cue::Show(style)) => overlay.show(style, &config.name),
+                                Some(Cue::Hide) => overlay.hide(),
+                                None => {}
+                            }
                         }
                         match transition {
                             Some(Transition::Entered) => {
@@ -506,6 +526,13 @@ async fn session(
                         sharing = now;
                         notify(notices, ClientNotice::Sharing(now));
                     }
+                    FromServer::CursorFinder(now) => {
+                        if now != finder_style {
+                            info!("Cursor-Finder vom Server: {}", cursor_finder::describe(now));
+                        }
+                        finder_style = now;
+                        notify(notices, ClientNotice::CursorFinder(now));
+                    }
                 },
                 _ = screen_poll.tick() => {
                     let now = (screen.bounds)();
@@ -538,6 +565,9 @@ async fn session(
 
     // Nichts gedrückt lassen, wenn die Verbindung mitten in einer Eingabe abreißt.
     inject_all(inject, state.release_all());
+    if let Some(overlay) = &screen.finder {
+        overlay.hide();
+    }
     receiver.cancel_undropped();
     // Was noch ankam, wird nie vollständig.
     clip.transfers.abort_receiving(None, "Verbindung getrennt");
@@ -617,12 +647,16 @@ async fn resolve(server: &str) -> Result<SocketAddr> {
         .with_context(|| format!("„{server}“ hat keine Adresse"))
 }
 
-/// Was der Server nach dem `Welcome` auf dem Control-Stream schickt (seit Qross 0.7: die Rechte).
+/// Was der Server nach dem `Welcome` auf dem Control-Stream schickt (seit Qross 0.7: die Rechte,
+/// seit 0.8 den Cursor-Finder).
 async fn receive_control(mut control: RecvStream, tx: mpsc::UnboundedSender<FromServer>) {
     loop {
         match read_frame::<_, Control>(&mut control).await {
             Ok(Some(Control::Sharing(sharing))) => {
                 let _ = tx.send(FromServer::Sharing(sharing));
+            }
+            Ok(Some(Control::CursorFinder(finder))) => {
+                let _ = tx.send(FromServer::CursorFinder(finder));
             }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht vom Server"),
             // Von einer neueren Version: überspringen, der Frame ist gelesen

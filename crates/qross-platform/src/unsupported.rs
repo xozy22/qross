@@ -5,7 +5,7 @@ use qross_core::CaptureEvent;
 use qross_proto::{GameState, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{dryrun, Capture, Clipboard, Injector};
+use crate::{dryrun, Capture, Clipboard, FinderOverlay, Injector};
 
 pub fn init_process() {}
 
@@ -31,4 +31,9 @@ pub fn injector() -> anyhow::Result<Box<dyn Injector>> {
 
 pub fn clipboard() -> Box<dyn Clipboard> {
     Box::new(dryrun::MemoryClipboard::default())
+}
+
+/// Ohne Fenster kein Cursor-Finder
+pub fn finder_overlay() -> Option<Arc<dyn FinderOverlay>> {
+    None
 }

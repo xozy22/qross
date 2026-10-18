@@ -306,8 +306,9 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
 
     let status = rt.status();
     let server_changed = settings.server.needs_restart(&old.server);
-    // Rechte je Rechner übernimmt ein laufender Server ohne Neustart.
+    // Rechte je Rechner und den Cursor-Finder übernimmt ein laufender Server ohne Neustart.
     let sharing_changed = settings.server.effective_sharing() != old.server.effective_sharing();
+    let finder_changed = settings.cursor_finder != old.cursor_finder;
     // Kopierte Dateien, vertrauliche Inhalte und Spielemodus gelten für beide Rollen
     let limit_changed = settings.clipboard_files_mb != old.clipboard_files_mb
         || settings.clipboard_share_concealed != old.clipboard_share_concealed
@@ -318,7 +319,10 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
             info!("Einstellungen geändert – Server startet neu");
             rt.start().await.map_err(|e| format!("{e:#}"))?;
         }
-        Some(Role::Server) if sharing_changed => rt.set_sharing(settings.server.effective_sharing()).await,
+        Some(Role::Server) if sharing_changed || finder_changed => {
+            rt.set_sharing(settings.server.effective_sharing()).await;
+            rt.set_cursor_finder(settings.cursor_finder).await;
+        }
         Some(Role::Client) if limit_changed => {
             info!("Einstellungen geändert – Client verbindet neu");
             rt.start().await.map_err(|e| format!("{e:#}"))?;
@@ -326,6 +330,12 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
         _ => {}
     }
     Ok(())
+}
+
+/// „Ausprobieren“: den Cursor-Finder auf diesem Rechner gleich zeigen. `false` unter Wayland.
+#[tauri::command]
+fn try_cursor_finder(rt: Rt<'_>, ring: bool, name: bool) -> bool {
+    rt.try_cursor_finder(qross_proto::CursorFinder { ring, name })
 }
 
 /// Wechselt das Profil; ein laufender Server oder Client startet mit dessen Werten neu. Liefert
@@ -604,6 +614,7 @@ fn main() {
             open_permission_settings,
             portal_state,
             forget_portal_permissions,
+            try_cursor_finder,
         ])
         .setup(move |app| {
             logs.attach(app.handle().clone());

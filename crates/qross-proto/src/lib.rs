@@ -31,7 +31,8 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// - 6: `Control::TypesText`, `Input::Text` und `Input::Shortcut`: Zeichen statt Tastenposition
 ///   (seit Qross 0.7)
 /// - 7: `Control::Sharing`, Rechte je Rechner (seit Qross 0.7)
-pub const SERVER_VERSION: u16 = 7;
+/// - 9: `Control::CursorFinder`, Cursor-Finder (seit Qross 0.8)
+pub const SERVER_VERSION: u16 = 9;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
 /// die Verbindung bei unbekannten Control-Nachrichten.
 pub const MONITORS_SINCE: u16 = 4;
@@ -44,6 +45,9 @@ pub const TEXT_SINCE: u16 = 6;
 /// Ab dieser `Welcome`-Version schickt der Server `Control::Sharing`: nach dem `Welcome` und bei
 /// jeder Änderung der Rechte.
 pub const SHARING_SINCE: u16 = 7;
+/// Ab dieser `Welcome`-Version schickt der Server `Control::CursorFinder`: nach dem `Welcome`, sofern
+/// eingeschaltet, und bei jeder Änderung.
+pub const CURSOR_FINDER_SINCE: u16 = 9;
 /// Höchstzahl Monitore, die der Server aus `Control::Monitors` übernimmt
 pub const MAX_MONITORS: usize = 16;
 /// ALPN-Kennung im TLS-Handshake
@@ -119,6 +123,31 @@ pub enum Control {
     /// und versucht Verbotenes gar nicht erst; durchgesetzt wird es ohnehin auf dem Server, auch
     /// gegenüber älteren Clients, die die Nachricht nie lesen.
     Sharing(Sharing),
+    /// Server → Client (seit Qross 0.8, ab `CURSOR_FINDER_SINCE`): Was der Client zeigt, wenn der Cursor
+    /// bei ihm ankommt. Folgt auf das `Welcome`, sofern etwas eingeschaltet ist, und kommt nach jeder
+    /// Änderung erneut. Ohne diese Meldung zeigt er nichts; ältere Clients lesen sie nie.
+    CursorFinder(CursorFinder),
+}
+
+/// Cursor-Finder: Beim Wechsel blitzt auf dem Rechner, auf dem der Cursor ankommt, kurz ein Ring um
+/// den Cursor auf und dazu der Name des Rechners. Eingestellt wird er am Server, der ihn an die
+/// Clients weitergibt. Standard: aus.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CursorFinder {
+    /// Ring um den Cursor
+    pub ring: bool,
+    /// Name des Rechners
+    pub name: bool,
+}
+
+impl CursorFinder {
+    /// Nichts zeigen (Standard)
+    pub const OFF: Self = Self { ring: false, name: false };
+
+    /// Zeigt er überhaupt etwas?
+    pub const fn is_on(self) -> bool {
+        self.ring || self.name
+    }
 }
 
 /// Rechte je Rechner: In welche Richtung eine Art von Inhalten zwischen Server und Client wandern
@@ -565,5 +594,40 @@ mod tests {
         }
         let emoji = Input::Text { key: KeyCode(0x08), text: "é😀".into() };
         assert_eq!(postcard::from_bytes::<Input>(&postcard::to_stdvec(&emoji).unwrap()).unwrap(), emoji);
+    }
+
+    /// So sah `Control` in Qross 0.7 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ControlV07 {
+        Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+        Welcome { version: u16, server_name: String, platform: Platform },
+        Reject { reason: String },
+        ScreenChanged(ScreenInfo),
+        Monitors(Vec<Rect>),
+        Game(GameState),
+        TypesText,
+        Sharing(Sharing),
+    }
+
+    #[test]
+    fn cursor_finder_is_skipped_by_older_clients() {
+        // Ein Client aus 0.7 liest Welcome und Rechte wie bisher; den Cursor-Finder kann er nicht
+        // lesen und überspringt ihn (Clients bis 0.6 lesen nach dem Welcome ohnehin nichts mehr).
+        const { assert!(SHARING_SINCE < CURSOR_FINDER_SINCE && CURSOR_FINDER_SINCE <= SERVER_VERSION) };
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::MacOs };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV07>(&bytes).unwrap(), ControlV07::Welcome { version: SERVER_VERSION, .. }));
+        let bytes = postcard::to_stdvec(&Control::Sharing(Sharing::ALL)).unwrap();
+        assert_eq!(postcard::from_bytes::<ControlV07>(&bytes).unwrap(), ControlV07::Sharing(Sharing::ALL));
+
+        for finder in [CursorFinder { ring: true, name: false }, CursorFinder { ring: false, name: true }, CursorFinder::OFF] {
+            let bytes = postcard::to_stdvec(&Control::CursorFinder(finder)).unwrap();
+            assert!(postcard::from_bytes::<ControlV07>(&bytes).is_err(), "ein Client aus 0.7 kann ihn nicht lesen");
+            assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), Control::CursorFinder(finder));
+            assert!(bytes.len() <= 3, "{} Bytes", bytes.len());
+        }
+        assert_eq!(CursorFinder::default(), CursorFinder::OFF, "Standard: aus");
+        assert!(!CursorFinder::OFF.is_on());
+        assert!(CursorFinder { ring: false, name: true }.is_on());
     }
 }

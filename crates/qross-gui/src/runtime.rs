@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -17,11 +17,11 @@ use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::clipfiles::FilesNotice;
 use qross_net::progress::{Progress, Transfers};
 use qross_net::quality::Quality;
-use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle, StopHandle};
+use qross_net::server::{CursorFinderHandle, Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle, StopHandle};
 use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{LogInjector, MemoryClipboard};
-use qross_platform::Capture;
-use qross_proto::{GameState, Platform, Rect, Sharing, DEFAULT_PORT};
+use qross_platform::{Capture, FinderOverlay};
+use qross_proto::{CursorFinder, GameState, Platform, Rect, Sharing, DEFAULT_PORT};
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
 use tauri::{AppHandle, Emitter};
@@ -102,6 +102,9 @@ pub struct Status {
     /// Client: was der Server mit diesem Rechner teilt (`None`: noch nicht gemeldet, etwa von
     /// einem Server bis Qross 0.6, der alles erlaubt)
     pub sharing: Option<Sharing>,
+    /// Client: was der Server für den Cursor-Finder eingestellt hat (`None`: nichts gemeldet, dann
+    /// ist er aus, etwa bei einem Server bis Qross 0.7)
+    pub cursor_finder: Option<CursorFinder>,
 }
 
 impl Status {
@@ -158,8 +161,8 @@ pub fn platform_name(platform: Platform) -> &'static str {
 }
 
 enum Running {
-    /// `sharing`: Rechte je Rechner, im Betrieb änderbar
-    Server { task: JoinHandle<()>, stop: StopHandle, name: String, sharing: SharingHandle },
+    /// `sharing`, `cursor_finder`: Rechte je Rechner und Cursor-Finder, im Betrieb änderbar
+    Server { task: JoinHandle<()>, stop: StopHandle, name: String, sharing: SharingHandle, cursor_finder: CursorFinderHandle },
     Client { task: JoinHandle<()> },
 }
 
@@ -189,6 +192,8 @@ pub struct Runtime {
     transfers: Mutex<Option<Transfers>>,
     /// Was über einen Programmlauf hinaus gilt (laufende Rolle, letzte Update-Prüfung …)
     app_state: Mutex<AppState>,
+    /// Cursor-Finder dieses Rechners, für Server und Client derselbe (beim ersten Gebrauch angelegt)
+    finder: OnceLock<Option<Arc<dyn FinderOverlay>>>,
 }
 
 fn now_ms() -> u64 {
@@ -209,6 +214,7 @@ impl Runtime {
             receiving_since: Mutex::new(HashMap::new()),
             transfers: Mutex::new(None),
             app_state: Mutex::new(AppState::load(&data_dir)),
+            finder: OnceLock::new(),
             data_dir,
         }
     }
@@ -232,6 +238,24 @@ impl Runtime {
 
     pub fn status(&self) -> Status {
         self.status.lock().unwrap().clone()
+    }
+
+    /// Cursor-Finder dieses Rechners; `None` unter Wayland
+    fn finder_overlay(&self) -> Option<Arc<dyn FinderOverlay>> {
+        self.finder.get_or_init(qross_platform::finder_overlay).clone()
+    }
+
+    /// „Ausprobieren“ in den Einstellungen: den Cursor-Finder hier gleich zeigen, mit dem Namen,
+    /// unter dem dieser Rechner im Layout steht. `false`, wo es ihn nicht gibt (Wayland).
+    pub fn try_cursor_finder(&self, style: CursorFinder) -> bool {
+        let Some(overlay) = self.finder_overlay() else { return false };
+        let settings = self.settings.lock().unwrap().clone();
+        let name = match settings.role {
+            Role::Server => settings.server.name.trim().to_owned(),
+            Role::Client => settings.client.name.trim().to_owned(),
+        };
+        overlay.show(style, if name.is_empty() { crate::hostname() } else { name }.as_str());
+        true
     }
 
     pub fn identity(&self) -> Result<Identity> {
@@ -472,8 +496,9 @@ impl Runtime {
             .with_share_concealed(settings.clipboard_share_concealed)
             .with_keys(keys)
             .with_game_mode(settings.game_mode)
-            .with_sharing(s.effective_sharing());
-        let (stop, sharing) = (server.stop_handle(), server.sharing());
+            .with_sharing(s.effective_sharing())
+            .with_cursor_finder(settings.cursor_finder);
+        let (stop, sharing, cursor_finder) = (server.stop_handle(), server.sharing(), server.cursor_finder());
         *self.transfers.lock().unwrap() = Some(server.transfers());
         let platform = ServerPlatform {
             capture,
@@ -482,6 +507,7 @@ impl Runtime {
             screen: Box::new(qross_platform::screen_bounds),
             monitors: Box::new(qross_platform::monitors),
             game: Box::new(qross_platform::game_state),
+            finder: self.finder_overlay(),
         };
 
         let rt = self.clone();
@@ -498,13 +524,20 @@ impl Runtime {
             let result = server.run(platform).await;
             rt.finished(generation, result);
         });
-        Ok(Running::Server { task, stop, name: s.name.clone(), sharing })
+        Ok(Running::Server { task, stop, name: s.name.clone(), sharing, cursor_finder })
     }
 
     /// Rechte je Rechner im laufenden Server ändern. Sie gelten sofort, ohne die Clients zu trennen.
     pub async fn set_sharing(&self, rules: SharingRules) {
         if let Some(Running::Server { sharing, .. }) = self.running.lock().await.as_ref() {
             sharing.set(rules);
+        }
+    }
+
+    /// Cursor-Finder im laufenden Server ändern; er gilt sofort, auch für verbundene Clients.
+    pub async fn set_cursor_finder(&self, finder: CursorFinder) {
+        if let Some(Running::Server { cursor_finder, .. }) = self.running.lock().await.as_ref() {
+            cursor_finder.set(finder);
         }
     }
 
@@ -707,6 +740,7 @@ impl Runtime {
                 screen: Box::new(|| Rect::new(0, 0, 1920, 1080)),
                 monitors: Box::new(Vec::new),
                 game: Box::new(GameState::default),
+                finder: None,
             }
         } else {
             ClientPlatform {
@@ -715,6 +749,7 @@ impl Runtime {
                 screen: Box::new(qross_platform::screen_bounds),
                 monitors: Box::new(qross_platform::monitors),
                 game: if settings.game_mode { Box::new(qross_platform::game_state) } else { Box::new(GameState::default) },
+                finder: self.finder_overlay(),
             }
         };
 
@@ -748,8 +783,9 @@ impl Runtime {
                 s.phase = Phase::Connected;
                 s.message = format!("Verbunden mit „{server_name}“ ({addr})");
                 s.server_name = Some(server_name);
-                // Die Rechte meldet ein Server ab Qross 0.7 gleich danach.
+                // Die Rechte meldet ein Server ab Qross 0.7 gleich danach, den Cursor-Finder ab 0.8.
                 s.sharing = None;
+                s.cursor_finder = None;
             }),
             ClientNotice::Disconnected { reason } => self.update(|s| {
                 s.phase = Phase::Connecting;
@@ -757,6 +793,7 @@ impl Runtime {
                 s.server_name = None;
                 s.cursor_here = false;
                 s.sharing = None;
+                s.cursor_finder = None;
             }),
             ClientNotice::CursorEntered => self.update(|s| s.cursor_here = true),
             ClientNotice::CursorLeft => self.update(|s| s.cursor_here = false),
@@ -765,6 +802,7 @@ impl Runtime {
             ClientNotice::Transfer(progress) => self.on_transfer(progress),
             ClientNotice::Sharing(sharing) => self.update(|s| s.sharing = Some(sharing)),
             ClientNotice::ClipboardConcealed => self.on_concealed(),
+            ClientNotice::CursorFinder(finder) => self.update(|s| s.cursor_finder = Some(finder)),
         }
     }
 

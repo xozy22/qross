@@ -163,6 +163,10 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     if file.game.enabled {
         info!("Spielemodus: Bei Vollbildprogrammen bleibt der Cursor auf dem Rechner, auf dem sie laufen");
     }
+    let finder = qross_platform::finder_overlay();
+    if file.finder.style().is_on() && finder.is_none() {
+        info!("Cursor-Finder: hier nicht möglich (Wayland), Clients zeigen ihn trotzdem");
+    }
     let sharing = file.sharing.rules();
     if sharing.default != qross_core::sharing::Sharing::ALL {
         info!("Rechte für Rechner ohne eigenen Eintrag: {}", qross_core::sharing::describe(sharing.default));
@@ -175,7 +179,8 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
         .with_share_concealed(file.clipboard.share_concealed)
         .with_keys(file.keys.config()?)
         .with_game_mode(file.game.enabled)
-        .with_sharing(sharing);
+        .with_sharing(sharing)
+        .with_cursor_finder(file.finder.style());
     let platform = ServerPlatform {
         capture,
         events: events_rx,
@@ -183,6 +188,7 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
         screen: Box::new(qross_platform::screen_bounds),
         monitors: Box::new(qross_platform::monitors),
         game: Box::new(qross_platform::game_state),
+        finder,
     };
     tokio::select! {
         result = server.run(platform) => result,
@@ -209,6 +215,7 @@ async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool, game_m
             screen: Box::new(|| Rect::new(0, 0, 1920, 1080)),
             monitors: Box::new(Vec::new),
             game: Box::new(GameState::default),
+            finder: None,
         }
     } else {
         ClientPlatform {
@@ -217,6 +224,7 @@ async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool, game_m
             screen: Box::new(qross_platform::screen_bounds),
             monitors: Box::new(qross_platform::monitors),
             game: if game_mode { Box::new(qross_platform::game_state) } else { Box::new(GameState::default) },
+            finder: qross_platform::finder_overlay(),
         }
     };
     tokio::select! {

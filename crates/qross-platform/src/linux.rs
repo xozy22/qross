@@ -17,7 +17,7 @@ use qross_proto::Rect;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::wayland_logic::{hull, linux_session, LinuxSession};
-use crate::{wayland, x11, Capture, Clipboard, Injector};
+use crate::{wayland, x11, Capture, Clipboard, FinderOverlay, Injector};
 
 pub fn session() -> LinuxSession {
     static SESSION: OnceLock<LinuxSession> = OnceLock::new();
@@ -94,4 +94,13 @@ pub fn injector() -> Result<Box<dyn Injector>> {
 
 pub fn clipboard() -> Box<dyn Clipboard> {
     x11::clipboard()
+}
+
+/// Cursor-Finder nur unter X11: Wayland lässt keine Fenster über anderen Programmen zu, und unter
+/// XWayland kennt Qross die Cursorposition nur über X11-Fenstern.
+pub fn finder_overlay() -> Option<Arc<dyn FinderOverlay>> {
+    match session() {
+        LinuxSession::X11 => Some(x11::finder_overlay()),
+        LinuxSession::Wayland => None,
+    }
 }

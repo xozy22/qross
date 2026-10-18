@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use qross_core::keys::KeyOptions;
 use qross_core::Inject;
-use qross_proto::ClipboardData;
+use qross_proto::{ClipboardData, CursorFinder};
 
-use crate::{Capture, Clipboard, Injector};
+use crate::{Capture, Clipboard, FinderOverlay, Injector};
 
 /// Protokolliert eingespeiste Ereignisse, statt sie auszuführen.
 pub struct LogInjector;
@@ -185,5 +185,37 @@ impl Capture for RecordingCapture {
 
     fn set_key_options(&self, options: KeyOptions) {
         *self.2.lock().unwrap() = Some(options);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinderCall {
+    Show { style: CursorFinder, name: String },
+    Hide,
+}
+
+/// Merkt sich, was der Cursor-Finder zeigen sollte (für Tests)
+#[derive(Clone, Default)]
+pub struct RecordingFinder(pub Arc<Mutex<Vec<FinderCall>>>);
+
+impl RecordingFinder {
+    /// Alle bisherigen Aufrufe
+    pub fn calls(&self) -> Vec<FinderCall> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// Nur die Aufrufe zum Zeigen
+    pub fn shown(&self) -> Vec<FinderCall> {
+        self.calls().into_iter().filter(|c| matches!(c, FinderCall::Show { .. })).collect()
+    }
+}
+
+impl FinderOverlay for RecordingFinder {
+    fn show(&self, style: CursorFinder, name: &str) {
+        self.0.lock().unwrap().push(FinderCall::Show { style, name: name.to_owned() });
+    }
+
+    fn hide(&self) {
+        self.0.lock().unwrap().push(FinderCall::Hide);
     }
 }

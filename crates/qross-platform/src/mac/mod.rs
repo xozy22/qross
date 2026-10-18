@@ -7,6 +7,7 @@
 
 mod capture;
 mod drag;
+mod finder;
 mod game;
 mod inject;
 mod layout;
@@ -24,7 +25,7 @@ use qross_proto::Rect;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::arboard_clipboard::ArboardClipboard;
-use crate::{Capture, Clipboard, Injector, Permission};
+use crate::{Capture, Clipboard, FinderOverlay, Injector, Permission};
 
 pub use game::game_state;
 pub(crate) use pasteboard::concealed;
@@ -76,4 +77,8 @@ pub fn injector() -> Result<Box<dyn Injector>> {
 
 pub fn clipboard() -> Box<dyn Clipboard> {
     Box::new(ArboardClipboard::default())
+}
+
+pub fn finder_overlay() -> Option<Arc<dyn FinderOverlay>> {
+    Some(Arc::new(crate::finder::Overlay::new(finder::surface)))
 }

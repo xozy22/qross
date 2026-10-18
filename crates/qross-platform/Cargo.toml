@@ -9,6 +9,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# Cursor-Finder: Rechnernamen mit einer Systemschrift zeichnen (reines Rust, auf allen Systemen gleich)
+ab_glyph = "0.2"
 anyhow.workspace = true
 qross-core.workspace = true
 qross-proto.workspace = true
@@ -17,7 +19,8 @@ tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.14", features = ["randr", "xkb", "xtest"] }
+# shape: Fenster des Cursor-Finders ohne Eingabebereich, Klicks gehen hindurch
+x11rb = { version = "0.14", features = ["randr", "shape", "xkb", "xtest"] }
 # wayland-data-control: Zwischenablage ohne Fenster unter KDE, Sway, Hyprland; sonst über XWayland
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 # Markierungen der Passwortmanager unter Wayland lesen (dieselbe Version, die arboard mitbringt)
@@ -38,9 +41,11 @@ x11rb = { version = "0.14", features = ["xtest"] }
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 core-foundation = "0.10"
 core-graphics = { version = "0.25", features = ["highsierra"] }
-# Medientasten (NX_SYSDEFINED) lassen sich nur über NSEvent erzeugen
+# Zeiger auf ein CGImage für den Layer des Cursor-Finders (dieselbe Version, die core-graphics nutzt)
+foreign-types = "0.5"
+# Medientasten (NX_SYSDEFINED) lassen sich nur über NSEvent erzeugen; Fenster des Cursor-Finders
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "NSPasteboard", "NSPasteboardItem", "objc2-core-graphics"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSColor", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSView", "NSWindow", "objc2-core-graphics"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventTypes"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSString", "NSURL", "objc2-core-foundation"] }
 

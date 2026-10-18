@@ -288,6 +288,29 @@
               </span>
               <span class="switch"><input type="checkbox" role="switch" id="prefResume"><span class="track"><span class="thumb"></span></span></span>
             </label>
+
+            <div class="cursor-finder" role="group" aria-labelledby="finderPrefTitle">
+              <h4 id="finderPrefTitle">Cursor-Finder beim Wechsel</h4>
+              <p class="keys-note" id="finderClientNote" hidden></p>
+              <label class="setting">
+                <span class="setting-text">
+                  <span class="setting-title">Ring um den Cursor</span>
+                  <span class="hint">Blitzt etwa eine Sekunde lang auf dem Rechner auf, auf dem der Cursor ankommt, und zieht sich um ihn zusammen.</span>
+                </span>
+                <span class="switch"><input type="checkbox" role="switch" id="prefFinderRing"><span class="track"><span class="thumb"></span></span></span>
+              </label>
+              <label class="setting">
+                <span class="setting-text">
+                  <span class="setting-title">Name des Rechners</span>
+                  <span class="hint">Steht dazu unter dem Cursor, am unteren Rand darüber.</span>
+                </span>
+                <span class="switch"><input type="checkbox" role="switch" id="prefFinderName"><span class="track"><span class="thumb"></span></span></span>
+              </label>
+              <div class="cursor-finder-try">
+                <button type="button" id="finderTry" class="btn small ghost">Ausprobieren</button>
+                <span class="hint" id="finderHint"></span>
+              </div>
+            </div>
           </section>
 
           <section class="settings-section" id="set-profiles" role="tabpanel" aria-labelledby="setProfilesTitle" hidden>

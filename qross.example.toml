@@ -76,6 +76,14 @@ AltLeft = "MetaLeft"
 # einfangen. Clients melden das ab Qross 0.6. false = aus
 enabled = true
 
+# Cursor-Finder (optional, Standard: aus): Beim Wechsel blitzt auf dem Rechner, auf dem der Cursor
+# ankommt, etwa eine Sekunde lang ein Ring um den Cursor auf und dazu sein Name. Gilt für alle
+# Rechner; der Server gibt es an Clients ab Qross 0.8 weiter. Nicht unter Wayland und nicht über
+# Programmen im Vollbild.
+[finder]
+ring = false
+name = false
+
 # Rechte je Rechner (optional): was zwischen diesem Server und einem Client wandern darf.
 # "both" = in beide Richtungen (Standard), "to-client" = nur zum Client, "from-client" = nur vom
 # Client, "off" = gar nicht. Was ein Client abgeben darf, landet auf dem Server und von dort bei

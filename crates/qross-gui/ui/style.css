@@ -1028,6 +1028,12 @@ dialog.settings { width: min(780px, calc(100vw - 32px)); height: min(640px, calc
 .setting.disabled .setting-title { color: var(--muted); }
 .switch input:disabled + .track { opacity: .45; }
 
+/* Cursor-Finder im Bereich „Allgemein“ */
+.cursor-finder { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.cursor-finder h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.cursor-finder-try { display: flex; align-items: center; gap: 12px; padding: 6px 0 0; }
+.cursor-finder-try .hint { margin: 0; }
+
 .update-box { margin-top: 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--ink-0); display: grid; gap: 10px; }
 .update-status { margin: 0; color: #c9cdea; font-size: 13px; }
 .update-status[data-tone="new"] { color: var(--teal); }
