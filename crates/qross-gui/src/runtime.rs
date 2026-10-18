@@ -9,8 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use qross_core::CaptureEvent;
 use qross_gui::lifecycle::AppState;
+use qross_gui::profiles::{self, Place, ProfileEdit, Profiles};
 use qross_gui::transfers::{self, LONG_TRANSFER};
-use qross_gui::{clipboard_files, Role, Settings};
+use qross_gui::{clipboard_files, Role, Settings, EXPORT_FILE};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::clipfiles::FilesNotice;
 use qross_net::progress::{Progress, Transfers};
@@ -166,6 +167,8 @@ pub struct Runtime {
     app: AppHandle,
     pub data_dir: PathBuf,
     pub settings: Mutex<Settings>,
+    /// Alle Profile je Ort. Wer beides sperrt, sperrt zuerst `settings`.
+    pub profiles: Mutex<Profiles>,
     status: Mutex<Status>,
     running: tokio::sync::Mutex<Option<Running>>,
     capture: Mutex<Option<CaptureHub>>,
@@ -186,10 +189,11 @@ fn now_ms() -> u64 {
 }
 
 impl Runtime {
-    pub fn new(app: AppHandle, data_dir: PathBuf, settings: Settings) -> Self {
+    pub fn new(app: AppHandle, data_dir: PathBuf, settings: Settings, profiles: Profiles) -> Self {
         Self {
             app,
             settings: Mutex::new(settings),
+            profiles: Mutex::new(profiles),
             status: Mutex::new(Status::default()),
             running: tokio::sync::Mutex::new(None),
             capture: Mutex::new(None),
@@ -200,6 +204,10 @@ impl Runtime {
             app_state: Mutex::new(AppState::load(&data_dir)),
             data_dir,
         }
+    }
+
+    pub fn app_handle(&self) -> &AppHandle {
+        &self.app
     }
 
     pub fn app_state(&self) -> AppState {
@@ -309,6 +317,92 @@ impl Runtime {
             }
             Running::Client { task } => task.abort(),
         }
+    }
+
+    // ---------------------------------------------------------------- Profile
+
+    /// Speichert Einstellungen aus dem Fenster samt aktivem Profil und `qross.toml`. Werte je Ort,
+    /// die das Fenster noch für ein inzwischen gewechseltes Profil bearbeitet hat, fallen weg (siehe
+    /// [`profiles::rebase`]). Liefert die bisherigen und die neuen Einstellungen; `None`, wenn sich
+    /// nichts ändert.
+    pub fn store_settings(&self, incoming: Settings) -> Result<Option<(Settings, Settings)>> {
+        let mut settings = self.settings.lock().unwrap();
+        let incoming = profiles::rebase(incoming, &settings);
+        if incoming == *settings {
+            return Ok(None);
+        }
+        incoming.save(&self.data_dir)?;
+        self.export(&incoming);
+        let old = std::mem::replace(&mut *settings, incoming);
+        let mut profiles = self.profiles.lock().unwrap();
+        if profiles.sync(&settings) {
+            if let Err(e) = profiles.save(&self.data_dir) {
+                warn!("Profil nicht gespeichert: {e:#}");
+            }
+        }
+        Ok(Some((old, settings.clone())))
+    }
+
+    /// `qross.toml` für `qross server --config`, sofern das Layout gültig ist
+    fn export(&self, settings: &Settings) {
+        if settings.server.validate().is_ok() {
+            if let Err(e) = std::fs::write(self.data_dir.join(EXPORT_FILE), settings.server_toml()) {
+                warn!("{EXPORT_FILE} nicht geschrieben: {e}");
+            }
+        }
+    }
+
+    pub fn profiles(&self) -> Profiles {
+        self.profiles.lock().unwrap().clone()
+    }
+
+    /// Meldet geänderte Profile an Fenster und Tray.
+    fn profiles_changed(&self) {
+        let profiles = self.profiles();
+        crate::tray::update_profiles(&self.app, &profiles);
+        let _ = self.app.emit("profiles", profiles);
+    }
+
+    /// Änderung aus den Einstellungen (anlegen, umbenennen, Netzwerke …), sofort gespeichert.
+    /// `Ok(Some(text))`: Hinweis für das Fenster.
+    pub fn edit_profiles(&self, edit: ProfileEdit) -> Result<Option<String>, String> {
+        let note = {
+            let settings = self.settings.lock().unwrap();
+            let mut profiles = self.profiles.lock().unwrap();
+            let mut changed = profiles.clone();
+            let note = changed.edit(edit, &settings)?;
+            changed.save(&self.data_dir).map_err(|e| format!("{e:#}"))?;
+            *profiles = changed;
+            note
+        };
+        self.profiles_changed();
+        Ok(note)
+    }
+
+    /// Aktiviert ein Profil. Lief Server oder Client und ändert sich etwas je Ort, startet er mit
+    /// den Werten des Profils neu; als Client kann dafür erst der Server zu bestätigen sein.
+    pub async fn activate_profile(self: &Arc<Self>, id: &str) -> Result<Option<ServerProbe>> {
+        let (old, new, name) = {
+            let mut settings = self.settings.lock().unwrap();
+            let mut profiles = self.profiles.lock().unwrap();
+            let (mut next_settings, mut next_profiles) = (settings.clone(), profiles.clone());
+            next_profiles.activate(id, &mut next_settings).map_err(|e| anyhow!(e))?;
+            // Erst gui.json: Sie nennt das Profil, zu dem ihre Werte gehören (siehe Profiles::attach).
+            next_settings.save(&self.data_dir)?;
+            next_profiles.save(&self.data_dir)?;
+            self.export(&next_settings);
+            let name = next_profiles.active_profile().map(|p| p.name.clone()).unwrap_or_default();
+            *profiles = next_profiles;
+            (std::mem::replace(&mut *settings, next_settings.clone()), next_settings, name)
+        };
+        info!("Profil „{name}“ aktiv");
+        self.profiles_changed();
+        let _ = self.app.emit("settings", &new);
+        if self.status().running() && Place::capture(&old) != Place::capture(&new) {
+            info!("{} startet mit dem Profil neu", if new.role == Role::Server { "Server" } else { "Client" });
+            return self.start().await;
+        }
+        Ok(None)
     }
 
     // ---------------------------------------------------------------- Server

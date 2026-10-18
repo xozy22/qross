@@ -42,12 +42,18 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventTypes"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSString", "NSURL", "objc2-core-foundation"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# Netzwerk für Profile je Ort: eigene Adresse und Präfix je Karte
+if-addrs.workspace = true
+
 [target.'cfg(windows)'.dependencies]
-windows-sys.workspace = true
+# IpHelper: Netzwerkkarten, Gateway und dessen MAC für Profile je Ort
+windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
 # COM (Drag & Drop, Shell) – mit windows-sys nicht umsetzbar
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Networking_NetworkListManager",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_LibraryLoader",

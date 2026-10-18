@@ -19,6 +19,11 @@
         <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
       </button>
     </div>
+    <!-- Profil je Ort; alles im Hauptfenster gehört zum aktiven Profil (siehe renderProfilePick) -->
+    <label class="profile-pick" id="profilePick">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.4"/></svg>
+      <select id="profileSelect" aria-label="Profil"></select>
+    </label>
     <div class="segmented" role="radiogroup" aria-label="Rolle dieses Rechners">
       <button type="button" role="radio" data-role="server">Server</button>
       <button type="button" role="radio" data-role="client">Client</button>
@@ -240,7 +245,7 @@
       <div class="sheet-head">
         <div>
           <h2 id="settingsTitle">Einstellungen</h2>
-          <p class="hint">Gelten für diesen Rechner.</p>
+          <p class="hint">Gelten für diesen Rechner, in allen Profilen.</p>
         </div>
         <button type="button" id="settingsClose" class="icon-btn" aria-label="Einstellungen schließen">
           <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>
@@ -249,6 +254,7 @@
       <div class="settings-body">
         <nav class="settings-nav" aria-label="Bereiche der Einstellungen">
           <button type="button" data-section="set-general">Allgemein</button>
+          <button type="button" data-section="set-profiles">Profile</button>
           <button type="button" data-section="set-keys">Tastatur</button>
           <button type="button" data-section="set-game">Spielemodus</button>
           <button type="button" data-section="set-updates">Updates</button>
@@ -273,6 +279,34 @@
               </span>
               <span class="switch"><input type="checkbox" role="switch" id="prefResume"><span class="track"><span class="thumb"></span></span></span>
             </label>
+          </section>
+
+          <section class="settings-section" id="set-profiles" aria-labelledby="setProfilesTitle">
+            <h3 id="setProfilesTitle">Profile</h3>
+            <p class="hint profiles-intro">Je Ort ein Profil, z. B. „Büro“ und „Zuhause“. Ein Profil umfasst alles aus dem Hauptfenster: Rolle, Anordnung der Bildschirme, Name und Port, Wechsel zwischen Bildschirmen und als Client die Server-Adresse. Bearbeitet wird immer das aktive Profil. Was hier in den Einstellungen steht, gilt für alle Profile.</p>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">Profil automatisch nach Netzwerk wählen</span>
+                <span class="hint">Qross erkennt das Netzwerk am Router, also an Adresse und MAC-Adresse des Gateways, ohne zusätzliche Rechte. Gewechselt wird beim Start und sobald sich das Netzwerk ändert. Läuft Qross, startet der Server bzw. Client mit dem neuen Profil neu.</span>
+              </span>
+              <span class="switch"><input type="checkbox" role="switch" id="profilesAuto"><span class="track"><span class="thumb"></span></span></span>
+            </label>
+            <div class="net-now" id="netNow" role="status" aria-live="polite"></div>
+            <ul class="profile-list" id="profileList" aria-label="Profile"></ul>
+            <div class="profile-add">
+              <button type="button" id="profileNew" class="btn small">
+                <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                Neues Profil
+              </button>
+            </div>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">In anderen Netzwerken</span>
+                <span class="hint">Gilt, wenn kein Profil zum Netzwerk passt, etwa unterwegs. Ohne Netzwerk bleibt das Profil, wie es ist.</span>
+              </span>
+              <select id="profileFallback" aria-label="Profil in anderen Netzwerken"></select>
+            </label>
+            <p class="hint" id="netHint" hidden>macOS gibt den WLAN-Namen ab Version 14 nur Programmen mit Ortungsdiensten heraus. Qross fragt nicht danach und erkennt das Netzwerk am Router; angezeigt wird deshalb das Subnetz.</p>
           </section>
 
           <section class="settings-section" id="set-keys" aria-labelledby="setKeysTitle">

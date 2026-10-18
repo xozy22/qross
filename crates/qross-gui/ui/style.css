@@ -115,6 +115,40 @@ code { font-family: var(--mono); font-size: 12.5px; }
   box-shadow: inset 0 0 0 1px var(--line-2);
 }
 
+/* Profil-Auswahl: gleiche Höhe wie der Rollen-Umschalter, Pfeil der Auswahlliste bleibt nativ */
+.profile-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 41px;
+  padding: 0 4px 0 11px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--ink-1);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.profile-pick:hover, .profile-pick:focus-within { border-color: var(--line-2); color: var(--text); }
+.profile-pick .ico { width: 16px; height: 16px; }
+.profile-pick select {
+  min-width: 0;
+  max-width: 190px;
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.profile-pick select:focus-visible { outline: 0; }
+.profile-pick:has(select:focus-visible) { outline: 2px solid var(--indigo); outline-offset: 2px; }
+.profile-pick option { background: var(--ink-2); color: var(--text); }
+
 .status {
   display: flex;
   align-items: center;
@@ -932,7 +966,9 @@ dialog.settings { width: min(780px, calc(100vw - 32px)); height: min(640px, calc
 }
 .settings-nav button:hover { color: var(--text); background: var(--ink-2); }
 .settings-nav button[aria-current="true"] { color: var(--text); background: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line-2); }
-.settings-content { overflow-y: auto; padding: 18px 26px 10px; min-height: 0; scroll-padding-top: 12px; }
+/* relative: Absolut gesetzte Elemente (z. B. .sr-only) bleiben im Scrollbereich; sonst ragen sie aus dem
+   Dialog, und scrollIntoView schiebt den Kopf des Dialogs aus dem Bild. */
+.settings-content { position: relative; overflow-y: auto; padding: 18px 26px 10px; min-height: 0; scroll-padding-top: 12px; }
 .settings-section { padding: 2px 0 22px; }
 .settings-section + .settings-section { border-top: 1px solid var(--line); padding-top: 20px; }
 .settings-section h3 { margin: 0 0 8px; font: 600 15px/1.3 var(--font-display); color: var(--text); }
@@ -1037,6 +1073,56 @@ dialog.settings { width: min(780px, calc(100vw - 32px)); height: min(640px, calc
 .switch-key .remove-key { margin-left: -2px; }
 .switch-problem { grid-column: 1 / -1; margin: 0; color: var(--coral); font-size: 12.5px; }
 .switch-problem.warn { color: var(--amber); }
+
+/* Profile je Ort */
+.profiles-intro { margin: 0 0 4px; max-width: 70ch; }
+.net-now {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 4px 0 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--ink-0);
+  font-size: 13px;
+}
+.net-now > .ico { width: 17px; height: 17px; margin-top: 1px; color: var(--teal); }
+.net-now > .hint { margin: 0; }
+.net-text { display: grid; gap: 2px; min-width: 0; color: #c9cdea; }
+.net-text .hint { margin: 0; overflow-wrap: anywhere; }
+.net-title strong { color: var(--text); font-weight: 600; }
+.profile-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.profile-card {
+  display: grid;
+  gap: 10px;
+  padding: 11px 12px 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--ink-0);
+}
+.profile-card.active { border-color: rgba(63, 227, 198, .45); box-shadow: inset 3px 0 0 var(--teal); }
+.profile-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 12px; }
+.profile-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.profile-name { font-size: 14px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.profile-badge { padding: 1px 7px; border-radius: 6px; background: var(--teal-soft); color: var(--teal); font-size: 11px; font-weight: 600; }
+.profile-badge.other { background: var(--ink-3); color: var(--muted); font-weight: 500; }
+.profile-actions { display: flex; align-items: center; gap: 2px; grid-row: span 2; }
+.profile-actions .btn { margin-right: 6px; }
+.profile-actions .icon-btn:disabled { opacity: .35; cursor: default; background: transparent; color: var(--muted); }
+.profile-summary { color: var(--muted); font-size: 12.5px; }
+.profile-nets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.profile-nets > .hint { margin: 0 6px 0 0; }
+.net-chip { gap: 6px; padding: 3px 4px 3px 9px; font: 12.5px/1.3 var(--font); color: #d4d8f5; max-width: 100%; }
+.net-chip .net-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.net-chip > .ico { width: 14px; height: 14px; color: var(--muted); }
+.net-chip.here { border-color: rgba(63, 227, 198, .55); }
+.net-chip.here > .ico { color: var(--teal); }
+.net-chip button .ico { width: 13px; height: 13px; }
+.profile-nets .btn .ico { width: 14px; height: 14px; }
+.profile-auto { font-size: 13px; color: #c9cdea; gap: 10px; width: fit-content; }
+.profile-add { margin: 10px 0 2px; }
+.profile-add .ico { width: 15px; height: 15px; }
 
 .about { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 18px; margin: 4px 0 16px; font-size: 13px; align-items: center; }
 .about dt { color: var(--muted); }
@@ -1174,12 +1260,16 @@ dialog.settings { width: min(780px, calc(100vw - 32px)); height: min(640px, calc
   .topbar {
     display: grid;
     grid-template-columns: auto 1fr auto;
-    grid-template-areas: "brand seg toggle" "status status status";
+    grid-template-areas: "brand seg toggle" "profile status status";
     gap: 10px 12px;
     padding: 10px 14px;
   }
   .brand { grid-area: brand; }
   .brand .brand-name { display: none; }
+  .profile-pick { grid-area: profile; justify-self: start; height: 34px; }
+  .profile-pick select { max-width: 130px; font-size: 13px; }
+  .profile-head { grid-template-columns: minmax(0, 1fr); }
+  .profile-actions { grid-row: auto; order: 1; }
   .permissions { margin: 10px 14px 0; padding: 12px; }
   .perm-ico { display: none; }
   .perm-item { flex-direction: column; align-items: stretch; }
@@ -1196,7 +1286,7 @@ dialog.settings { width: min(780px, calc(100vw - 32px)); height: min(640px, calc
   .release { padding-left: 28px; }
   .segmented { grid-area: seg; justify-self: start; }
   .segmented button { padding: 6px 14px; }
-  .status { grid-area: status; margin-left: 0; font-size: 13px; }
+  .status { grid-area: status; margin-left: 0; font-size: 13px; min-width: 0; }
   #toggle { grid-area: toggle; min-width: 0; padding: 9px 14px; }
   .desk-area { padding: 18px 14px; }
   .desk { padding: 6px; border-radius: 14px; }
