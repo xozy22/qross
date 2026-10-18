@@ -59,20 +59,20 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 
 ## Funktionen und Stand
 
-| | Windows | Linux (X11) | macOS |
-|---|---|---|---|
-| Server: Eingaben erfassen, Kanten pro Monitor | ✔ | ✔ | ✔¹ |
-| Client: Eingaben einspeisen | ✔ | ✔ | ✔¹ |
-| Zwischenablage in beide Richtungen: Text, HTML, Bilder (z. B. Screenshots) | ✔ | ✔ | ✔¹ |
-| Dateien kopieren und einfügen, in beide Richtungen | ✔ Explorer | ✔ Dateimanager mit `text/uri-list` (Nautilus, Dolphin) | ✔ Finder¹ |
-| Cursor auf dem Server ausblenden | ✔ | ✔ | soweit macOS es zulässt¹ |
-| Drag & Drop **vom Server** ziehen | ✔ | – | – |
-| Drag & Drop **vom Client** zum Server ziehen | ✔ Explorer | – | ✔ Finder¹ |
-| Gezogene Dateien **ablegen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
-| Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | ✔¹ ² |
-| Mehrere Monitore je Rechner: Skizze im Layout, Cursor nur auf Monitorflächen | ✔ | ✔ | ✔¹ |
-| Verbindungsqualität: Latenz, Jitter, Verlust, Durchsatz | ✔ | ✔ | ✔¹ |
-| Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔² |
+| | Windows | Linux (X11) | Linux (Wayland)³ | macOS |
+|---|---|---|---|---|
+| Server: Eingaben erfassen, Kanten pro Monitor | ✔ | ✔ | ✔ GNOME ≥ 45, KDE ≥ 6.1, Hyprland ≥ 0.56 | ✔¹ |
+| Client: Eingaben einspeisen | ✔ | ✔ | ✔ GNOME ≥ 45, KDE ≥ 6.1, sonst über XWayland | ✔¹ |
+| Zwischenablage in beide Richtungen: Text, HTML, Bilder (z. B. Screenshots) | ✔ | ✔ | ✔ KDE, wlroots direkt; GNOME über XWayland | ✔¹ |
+| Dateien kopieren und einfügen, in beide Richtungen | ✔ Explorer | ✔ Dateimanager mit `text/uri-list` (Nautilus, Dolphin) | wie Zwischenablage | ✔ Finder¹ |
+| Cursor auf dem Server ausblenden | ✔ | ✔ | Sache des Compositors | soweit macOS es zulässt¹ |
+| Drag & Drop **vom Server** ziehen | ✔ | – | – | – |
+| Drag & Drop **vom Client** zum Server ziehen | ✔ Explorer | – | – | ✔ Finder¹ |
+| Gezogene Dateien **ablegen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | Client: in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
+| Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | Fang-Taste nur, solange der Cursor auf einem Client ist | ✔¹ ² |
+| Mehrere Monitore je Rechner: Skizze im Layout, Cursor nur auf Monitorflächen | ✔ | ✔ | ✔ in logischen Pixeln | ✔¹ |
+| Verbindungsqualität: Latenz, Jitter, Verlust, Durchsatz | ✔ | ✔ | ✔ | ✔¹ |
+| Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
 
 ¹ macOS wird in der CI auf Apple Silicon gebaut und getestet, auch mit der echten Zwischenablage. Erfassung und
 Einspeisung sind auf einem echten Mac noch nicht geprüft. Qross braucht dort die Rechte „Bedienungshilfen“ und
@@ -80,6 +80,12 @@ Einspeisung sind auf einem echten Mac noch nicht geprüft. Qross braucht dort di
 ² „Medientasten immer auf dem Server“ wirkt mit einem Windows-Server. Unter macOS bleiben Medientasten des
 Servers ohnehin dort, unter X11 gehen sie immer an den aktiven Rechner.
 ² Die Oberfläche basiert auf Tauri; gebaut und geprüft wurde sie unter Windows.
+³ Wayland läuft über die Desktop-Portale RemoteDesktop und InputCapture und libei. Das System fragt
+einmal nach der Freigabe; wo der Desktop es kann, merkt sich Qross sie (GNOME fragt beim Erfassen bis
+Version 50 bei jedem Start). Geprüft sind die Logik, das Einspeisen über libei gegen eine eigene
+Gegenstelle und gegen mutter ohne Bildschirm. Auf einem echten GNOME- oder KDE-Desktop ist Wayland
+noch nicht getestet, ebenso wenig der Freigabe-Dialog. Sway und andere wlroots-Desktops: Server nur in
+einer X11-Sitzung. Details, Grenzen und Testanleitung: [Wayland](docs/wayland.md).
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
@@ -89,6 +95,9 @@ Servers ohnehin dort, unter X11 gehen sie immer an den aktiven Rechner.
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
   die der Explorer anschließend selbst einfügt.
 - Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
+- Wayland: Einspeisen über libei gegen eine EIS-Gegenstelle im Test und gegen mutter ohne Bildschirm
+  (eigener CI-Job, noch experimentell). Portal, Freigabe-Dialog und Erfassen sind nur übersetzt, nicht
+  auf einem echten Desktop geprüft.
 - Windows: Bau- und Smoke-Tests sowie die Explorer-Ordnererkennung. Hooks und Einspeisung wurden noch nicht
   mit zwei echten Rechnern getestet.
 
@@ -212,13 +221,13 @@ Hinweise:
 |---|---|
 | `qross-proto` | Wire-Protokoll: Nachrichten, Framing ([Beschreibung](docs/protokoll.md)) |
 | `qross-core` | Plattformunabhängige Logik: Layout, Zustandsmaschinen von Server und Client, Drag & Drop |
-| `qross-platform` | Betriebssystem: Windows (Hooks, SendInput, OLE/Shell), Linux (X11/XTest), macOS (CGEventTap) |
+| `qross-platform` | Betriebssystem: Windows (Hooks, SendInput, OLE/Shell), Linux (X11/XTest, Wayland über Desktop-Portale und libei), macOS (CGEventTap) |
 | `qross-net` | QUIC/TLS, Fingerprint-Vertrauen, LAN-Suche, Dateiübertragung, Laufzeit von Server und Client |
 | `qross` | Kommandozeilenprogramm |
 | `qross-gui` | Grafische Oberfläche (Tauri) |
 | `bench/netbench` | Benchmark TCP+TLS vs. QUIC (eigener Cargo-Workspace) |
 
-Hintergrund: [Benchmark](docs/benchmark-ergebnisse.md) · [Protokoll](docs/protokoll.md)
+Hintergrund: [Benchmark](docs/benchmark-ergebnisse.md) · [Protokoll](docs/protokoll.md) · [Wayland](docs/wayland.md)
 
 ## Bauen und testen
 

@@ -1,5 +1,5 @@
-//! Linux mit X11. Wayland erlaubt kein globales Abfangen/Einspeisen ohne Portale
-//! (libei/InputCapture) – das ist ein eigener, späterer Schritt.
+//! Linux mit X11 (auch XWayland als Rückfall für das Einspeisen, siehe `linux.rs`). Wayland selbst
+//! läuft über die Desktop-Portale im Modul `wayland`.
 
 mod capture;
 mod inject;
@@ -20,7 +20,7 @@ use crate::{Capture, Clipboard, Injector};
 
 pub(crate) fn connect() -> Result<(RustConnection, Window)> {
     let (conn, screen) = x11rb::connect(None)
-        .context("keine Verbindung zum X-Server – ist DISPLAY gesetzt? (Wayland wird noch nicht unterstützt)")?;
+        .context("keine Verbindung zum X-Server – ist DISPLAY gesetzt?")?;
     let root = conn.setup().roots[screen].root;
     Ok((conn, root))
 }

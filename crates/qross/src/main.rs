@@ -91,6 +91,8 @@ async fn main() -> Result<()> {
         Some(dir) => dir,
         None => dirs::config_dir().context("kein Konfigurationsverzeichnis gefunden")?.join("Qross"),
     };
+    // Dort merkt sich Qross unter Wayland die Freigaben der Desktop-Portale
+    qross_platform::set_data_dir(&data_dir);
 
     match cli.command {
         Command::Server { config } => run_server(&data_dir, &config).await,

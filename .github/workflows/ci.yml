@@ -56,3 +56,40 @@ jobs:
       - name: Tests (mit virtuellem X-Server)
         if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x800x24" cargo test --workspace --locked
+
+  # Einspeisen über libei in einen echten Compositor. Das Desktop-Portal lässt sich hier nicht
+  # testen: Den Freigabe-Dialog von GNOME kann niemand bestätigen, und KWin 5.27 aus Ubuntu 24.04
+  # kann noch kein libei. Deshalb öffnet der Test die Sitzung direkt bei mutter
+  # (org.gnome.Mutter.RemoteDesktop). Noch nicht eingefahren: Ein Fehlschlag hält die CI nicht auf.
+  wayland:
+    name: Wayland (mutter ohne Bildschirm, experimentell)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: mutter installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mutter dbus-daemon libgl1-mesa-dri
+
+      - name: Test bauen
+        run: cargo test -p qross-platform --test wayland_mutter --locked --no-run
+
+      - name: In mutter einspeisen
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          dbus-run-session -- bash -c '
+            mutter --headless --wayland --no-x11 --virtual-monitor 1280x800 > mutter.log 2>&1 &
+            cargo test -p qross-platform --test wayland_mutter --locked -- --ignored --nocapture
+            status=$?
+            kill %1 2>/dev/null
+            echo "--- mutter.log"
+            cat mutter.log
+            exit $status
+          '

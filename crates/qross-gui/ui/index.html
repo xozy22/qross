@@ -45,6 +45,16 @@
     </div>
   </section>
 
+  <!-- Wayland: Desktop-Portal fehlt, Freigabe abgelehnt oder gleich fällig -->
+  <section id="portalHint" class="permissions" role="alert" aria-labelledby="portalTitle" hidden>
+    <svg class="ico perm-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9.5 17h-19z"/><path d="M12 10v4.5M12 17.5v.01"/></svg>
+    <div class="perm-body">
+      <h2 id="portalTitle"></h2>
+      <p class="hint" id="portalText"></p>
+      <div class="about-actions portal-actions" id="portalActions"></div>
+    </div>
+  </section>
+
   <main>
     <!-- Server -->
     <section id="serverView" class="view server-view">
@@ -358,6 +368,8 @@
               <dd id="aboutVersion"></dd>
               <dt>Datenordner</dt>
               <dd><code id="aboutDataDir"></code><button type="button" id="openDataDir" class="btn small ghost">Öffnen</button></dd>
+              <dt data-wayland hidden>Wayland-Freigaben</dt>
+              <dd data-wayland hidden><span id="portalRemembered"></span><button type="button" id="portalForget" class="btn small ghost" title="Beim nächsten Start fragt das System wieder">Vergessen</button></dd>
             </dl>
             <div class="about-actions">
               <button type="button" id="aboutNews" class="btn small ghost">Neuigkeiten</button>
