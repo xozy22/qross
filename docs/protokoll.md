@@ -161,16 +161,26 @@ Streams und bleiben verbunden. Text, HTML und Bilder funktionieren mit ihnen wei
 
 ## Drag & Drop von Dateien
 
-1. Mit gedrückter Maustaste an einer Kante prüft der Server, ob gerade Dateien gezogen werden. Unter Windows
-   erscheint dafür kurz ein unsichtbares OLE-Drop-Ziel unter dem Cursor und liest die Dateiliste des laufenden
-   Drags (`CF_HDROP`). Ohne Dateien, etwa beim Verschieben eines Fensters, wird nicht gewechselt.
+1. Mit gedrückter Maustaste an einer Kante prüft der Server, ob gerade Dateien gezogen werden. Ohne Dateien,
+   etwa beim Verschieben eines Fensters, wird nicht gewechselt.
+   - Windows: Kurz erscheint ein unsichtbares OLE-Drop-Ziel unter dem Cursor und liest die Dateiliste des
+     laufenden Drags (`CF_HDROP`).
+   - macOS: Hat sich die Drag-Zwischenablage (`NSPasteboardNameDrag`, `changeCount`) seit dem Drücken der linken
+     Maustaste geändert, läuft ein neuer Drag; seine Datei-URLs sind die Dateien.
+   - X11: Wer zieht, wird Besitzer von `XdndSelection`. Hat es seit dem Drücken einen Besitzwechsel gegeben
+     (XFixes), fragt der Server die Auswahl als `text/uri-list` ab.
+   - Wayland: nicht möglich; kein Programm sieht fremde Drag-&-Drop-Vorgänge.
+
+   Jeder Drag zählt nur einmal: Kommt der Cursor mit gedrückter Taste zurück, gehen dieselben Dateien nicht ein
+   zweites Mal hinüber.
 2. Mit Dateien bricht der Server den lokalen Drag ab (Esc), wechselt zum Client und sendet
    `DragStart { transfer, entries }`. Danach überträgt er jede Datei auf einem eigenen Stream. Ordner
    werden rekursiv mitgenommen.
 3. Der Client drückt dabei **keine** Maustaste. Er schreibt die Dateien in ein Staging-Verzeichnis
    (`*.part`, umbenannt erst nach erfolgreicher SHA-256-Prüfung).
 4. Lässt der Nutzer die Taste los, kommt `Drop { transfer, x, y }`. Der Client bestimmt den Ordner unter dem Cursor:
-   ein Explorer-Fenster (bei Windows-11-Tabs der sichtbare Tab), den Desktop oder sonst `Downloads\Qross`.
+   ein Explorer-Fenster (bei Windows-11-Tabs der sichtbare Tab) bzw. ein Finder-Fenster, den Schreibtisch (unter
+   X11 am Fenstertyp `_NET_WM_WINDOW_TYPE_DESKTOP`) oder sonst `Downloads/Qross`.
    Sobald alles angekommen ist, verschiebt er die Dateien dorthin. Vorhandene Namen werden nicht
    überschrieben, sondern durchnummeriert, z. B. „Bericht (2).pdf“.
 5. Verlässt der Cursor den Client ohne Drop, verwirft der Client die Übertragung und bricht die Streams ab.
@@ -182,13 +192,13 @@ Zeichen und reservierte Namen werden ersetzt.
 
 1. Der Server weiß, welche Maustasten auf dem Client gedrückt sind. Erreicht der Cursor dort mit gedrückter
    Taste die Kante zum Server, wechselt er nicht sofort, sondern fragt mit `DragMessage::Query { probe }` nach.
-2. Der Client prüft, ob gerade Dateien gezogen werden. Unter Windows geschieht das mit demselben unsichtbaren
-   OLE-Drop-Ziel wie am Server, unter macOS über die Drag-Zwischenablage des Systems.
+2. Der Client prüft, ob gerade Dateien gezogen werden, genauso wie der Server (Windows: OLE-Drop-Ziel, macOS:
+   Drag-Zwischenablage, X11: `XdndSelection`).
 3. Zieht er Dateien, bricht er seinen Drag mit Esc ab, antwortet mit `Offer { probe, transfer, entries }` und
    schickt die Dateien auf Streams vom Typ 3. Sonst kommt `Offer` mit leerer Liste. Der Server wechselt dann
    nicht, solange die Taste gedrückt ist; so bleibt ein an den Rand geschobenes Fenster auf dem Client.
 4. Mit Dateien wechselt der Cursor zum Server. Lässt der Nutzer die Taste dort los, legt der Server die Dateien
-   im Ordner unter dem Cursor ab (Windows: Explorer oder Desktop), sonst in `Downloads/Qross`.
+   im Ordner unter dem Cursor ab (Explorer- bzw. Finder-Fenster oder Schreibtisch), sonst in `Downloads/Qross`.
 5. Geht der Cursor vorher zurück zu einem Client, wird die Übertragung verworfen.
 
 Ein älterer Client antwortet nie auf die Nachfrage. Mit gedrückter Taste bleibt der Cursor dann auf ihm.
@@ -354,7 +364,7 @@ Die Stufe richtet sich nach dem schlechtesten der drei Werte (Grenzen jeweils au
 
 ## Noch offen
 
-- Drag & Drop mit Linux als Quelle (XDND) und vom Mac-Server aus
+- Drag & Drop unter Wayland (es fehlt ein Portal dafür); Ablegen im Ordner eines Dateimanagers unter X11
 - Spielemodus: eingefangenen Zeiger unter macOS und Linux erkennen; Rohdaten der Maus am Server
   (Raw Input) statt Cursor-Deltas, damit Zeigerbeschleunigung des Servers nicht mitwandert
 - Zwischenablage: RTF; virtuelle Dateien (z. B. Outlook-Anhänge) und Dateien erst beim Einfügen übertragen

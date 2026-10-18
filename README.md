@@ -67,9 +67,9 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Dateien kopieren und einfügen, in beide Richtungen | ✔ Explorer | ✔ Dateimanager mit `text/uri-list` (Nautilus, Dolphin) | wie Zwischenablage | ✔ Finder¹ |
 | Passwörter nicht teilen: was Passwortmanager als vertraulich markieren, bleibt auf dem Rechner | ✔ Formate für Verlauf, Cloud und Zwischenablage-Programme | ✔ `x-kde-passwordManagerHint` (KeePassXC) | wie Zwischenablage | ✔ `ConcealedType`, `TransientType`¹ |
 | Cursor auf dem Server ausblenden | ✔ | ✔ | Sache des Compositors | soweit macOS es zulässt¹ |
-| Drag & Drop **vom Server** ziehen | ✔ | – | – | – |
-| Drag & Drop **vom Client** zum Server ziehen | ✔ Explorer | – | – | ✔ Finder¹ |
-| Gezogene Dateien **ablegen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | Client: in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
+| Drag & Drop **vom Server** ziehen⁶ | ✔ | ✔ Dateimanager (XDND) | – | ✔ Finder¹ |
+| Drag & Drop **vom Client** zum Server ziehen⁶ | ✔ Explorer | ✔ Dateimanager (XDND) | – | ✔ Finder¹ |
+| Gezogene Dateien **ablegen**⁶ | ✔ Explorer-Fenster oder Desktop unter dem Cursor | ✔ Schreibtisch unter dem Cursor, sonst `~/Downloads/Qross` | Client: in `~/Downloads/Qross` | ✔ Finder-Fenster oder Schreibtisch unter dem Cursor¹ |
 | Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | Fang-Taste nur, solange der Cursor auf einem Client ist | ✔¹ ² |
 | Zeichen statt Tastenposition je Rechner: anderes Tastaturlayout, tote Tasten, AltGr | ✔ | ✔ | – (bleibt Tastenposition) | ✔¹ |
 | Mehrere Monitore je Rechner: Skizze im Layout, Cursor nur auf Monitorflächen | ✔ | ✔ | ✔ in logischen Pixeln | ✔¹ |
@@ -102,20 +102,33 @@ geprüft.
 wird. Die CI schreibt, prüft und entfernt auf allen drei Systemen einen echten Eintrag, unter Windows auch
 lokal geprüft; den Start bei der Anmeldung selbst prüft kein Test. Ohne Oberfläche: `qross` als
 systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autostart.md).
+⁶ Abgelegt wird im Ordner unter dem Cursor: der Ordner, den ein Explorer- bzw. Finder-Fenster zeigt, oder der
+Schreibtisch; sonst in `Downloads/Qross`. Direkt in ein Programm, etwa als Anhang in eine E-Mail, legt Qross auf
+keinem System ab. Den Ordner eines Finder-Fensters liest Qross über die Bedienungshilfen aus Titel, Pfadleiste
+und den sichtbaren Einträgen; in einer Suche, in „Zuletzt benutzt“ oder AirDrop gibt es keinen, dann gilt
+`Downloads/Qross`. Unter X11 erkennt Qross nur den Schreibtisch (Fenstertyp `_NET_WM_WINDOW_TYPE_DESKTOP`, etwa
+von xfdesktop, Plasma, Nemo oder Caja): Dateimanager verraten nicht verlässlich, welchen Ordner ein Fenster
+zeigt. Unter Wayland sieht kein Programm fremde Drag-&-Drop-Vorgänge oder das Fenster unter dem Cursor, und kein
+Desktop-Portal bietet das an; InputCapture meldet an der Kante nicht einmal, ob eine Taste gedrückt ist.
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
   (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, kopierte
   Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, Fortschritt und Abbrechen von Sender und
-  Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5,
-  Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Rechte je Rechner für jede
-  Art und Richtung samt sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene
-  vertrauliche Inhalte, Ablehnung unbekannter Clients, LAN-Suche).
+  Empfänger, Rückkehr mit gedrückter Taste ohne Ablegen, mehrere Monitore je Client, Messwerte der
+  Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5, Wechsel per Tastenkürzel, Zeichen statt
+  Tastenposition samt Gegenstellen aus 0.6, Rechte je Rechner für jede Art und Richtung samt sofortiger Änderung
+  und einem älteren Client, der es trotzdem versucht, zurückgehaltene vertrauliche Inhalte, Ablehnung
+  unbekannter Clients, LAN-Suche).
 - Windows-Tastaturlayouts: echter Test mit dem deutschen und dem US-Layout (AltGr, tote Tasten, Kürzel), soweit
   sie auf dem Rechner eingerichtet sind.
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
   die der Explorer anschließend selbst einfügt, und mit den Formaten, mit denen Passwortmanager markieren.
-- Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
+- Linux: echte Tests gegen einen X-Server (Xvfb in Docker und in der CI), darunter Drag & Drop mit einer
+  nachgebauten ziehenden Anwendung (XDND, Zeiger- und Tastatur-Grab, Abbruch mit Esc) und der Schreibtisch unter
+  dem Cursor. Mit echten Dateimanagern ist das Ziehen noch nicht geprüft.
+- macOS: Drag-Erkennung gegen die echte Drag-Zwischenablage in der CI. Den Ordner eines Finder-Fensters prüft die
+  CI nur, wenn sie das Recht „Bedienungshilfen“ hat; echtes Ziehen im Finder ist noch nicht geprüft.
 - Wayland: Einspeisen über libei gegen eine EIS-Gegenstelle im Test und gegen mutter ohne Bildschirm
   (eigener CI-Job, noch experimentell). Portal, Freigabe-Dialog und Erfassen sind nur übersetzt, nicht
   auf einem echten Desktop geprüft.

@@ -10,6 +10,19 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 
 ## [Unreleased]
 
+### Neu
+
+- **Drag & Drop vom Mac- und vom Linux-Server:** Dateien lassen sich jetzt auch von einem Mac oder einem
+  Linux-Rechner mit X11 über die Kante zu einem Client ziehen, nicht mehr nur von Windows aus: mit gedrückter
+  Taste aus dem Finder bzw. Dateimanager an die Kante ziehen und drüben loslassen. Fortschritt, Abbrechen, die
+  Rückkehr ohne Loslassen und die Rechte je Rechner gelten wie gewohnt. Unter X11 geht auch die Gegenrichtung,
+  vom Linux-Client zum Server. Unter Wayland bleibt Drag & Drop aus: Dort sieht kein Programm fremde
+  Drag-&-Drop-Vorgänge.
+- **Ablegen unter dem Cursor auch am Mac und unter Linux:** Am Mac landen gezogene Dateien im Ordner des
+  Finder-Fensters unter dem Cursor oder auf dem Schreibtisch, unter Linux (X11) auf dem Schreibtisch, sonst wie
+  bisher in `Downloads/Qross`. Direkt in ein Programm, etwa als Anhang in eine E-Mail, legt Qross weiterhin
+  nicht ab.
+
 ### Verbessert
 
 - **Einstellungen mit Bereichen:** Allgemein, Profile, Tastatur, Spielemodus, Updates, Zwischenablage und Info
