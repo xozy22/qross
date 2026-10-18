@@ -254,6 +254,9 @@ jobs:
   macos-check:
     name: macOS-Paket auf frischem Mac prüfen
     needs: build
+    # Auch wenn ein anderes System scheitert, solange das macOS-Paket gebaut ist; veröffentlicht wird
+    # trotzdem nur, wenn alle Builds grün sind (publish braucht build und diesen Job).
+    if: ${{ !cancelled() }}
     runs-on: macos-26
     # Normal unter 3 Minuten; ein Hänger (etwa ein offener Dialog) darf das Release nicht blockieren.
     timeout-minutes: 15
