@@ -310,6 +310,14 @@ pub fn folder_at(x: i32, y: i32) -> Option<PathBuf> {
     injector().ok()?.drop_folder(x, y)
 }
 
+/// Diagnose: wie [`folder_at`], dazu jeder Schritt der Suche als Text (Fensterliste, Elemente des
+/// Finder-Fensters). Nur am Mac.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn trace_folder_at(x: i32, y: i32) -> (Option<PathBuf>, Vec<String>) {
+    mac::trace_folder_at(x, y)
+}
+
 /// Nur für Tests: die Drag-Erkennung des Mac-Servers, ohne Event-Tap (der braucht Rechte).
 #[cfg(target_os = "macos")]
 #[doc(hidden)]

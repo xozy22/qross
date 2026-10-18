@@ -28,6 +28,7 @@ use crate::arboard_clipboard::ArboardClipboard;
 use crate::{Capture, Clipboard, Injector, Permission};
 
 pub use drag::DragWatch;
+pub use finder::trace_folder_at;
 pub use game::game_state;
 pub(crate) use pasteboard::concealed;
 pub use permissions::{granted as has_permission, request as request_permission};

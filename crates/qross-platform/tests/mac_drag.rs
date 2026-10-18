@@ -116,17 +116,27 @@ fn a_finder_window_under_the_cursor_gives_its_folder() {
 
     // Der Finder braucht einen Moment für Fenster und Inhalt.
     let start = Instant::now();
-    let mut last = None;
+    let mut report = Vec::new();
     while start.elapsed() < Duration::from_secs(15) {
-        if let Some(frame) = front_finder_window() {
-            let (x, y) = (frame.origin.x + frame.size.width / 2.0, frame.origin.y + frame.size.height / 2.0);
-            last = qross_platform::folder_at(x as i32, y as i32);
-            if last.as_deref().and_then(|p| std::fs::canonicalize(p).ok()).as_deref() == Some(Path::new(&dir)) {
-                let _ = std::fs::remove_dir_all(dir.parent().unwrap());
-                return;
+        report = match front_finder_window() {
+            Some(frame) => {
+                let (x, y) = (frame.origin.x + frame.size.width / 2.0, frame.origin.y + frame.size.height / 2.0);
+                let (folder, trace) = qross_platform::trace_folder_at(x as i32, y as i32);
+                if folder.as_deref().and_then(|p| std::fs::canonicalize(p).ok()).as_deref() == Some(Path::new(&dir)) {
+                    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+                    return;
+                }
+                let size = frame.size;
+                [format!("Finder-Fenster {}×{} bei {},{}, Mitte {x},{y}", size.width, size.height, frame.origin.x, frame.origin.y)]
+                    .into_iter()
+                    .chain(trace)
+                    .collect()
             }
-        }
+            None => vec!["kein gewöhnliches Fenster des Finders in der Fensterliste".to_owned()],
+        };
         std::thread::sleep(Duration::from_millis(250));
     }
-    panic!("Ordner des Finder-Fensters: {last:?}, erwartet {}", dir.display());
+    panic!("Ordner des Finder-Fensters nicht erkannt, erwartet {}:
+{}", dir.display(), report.join("
+"));
 }
