@@ -1,0 +1,21 @@
+### cubic
+QUIC-CC: Cubic, Link: Netem, Verzögerung 1 ms ± 0.3 ms, Bandbreite 100 Mbit/s, Maus 500 Hz, Tasten 20 Hz, Clipboard 20000000 B, 15 s je Lauf
+
+| Modus | Verlust | Cursor p50 | p99 | p99.9 | max | >50 ms | Maus verloren | Taste p50 | p99 | max | Clipboard Ø |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| QUIC, Datagramme+Streams | 0 % | 1.77 | 20.40 | 23.77 | 37.8 | 0 | 0/7440 | 1.80 | 20.48 | 21.7 | 1702.9 ms |
+| QUIC, Datagramme+Streams | 1 % | 1.77 | 7.61 | 28.05 | 34.6 | 0 | 98/7322 | 1.81 | 9.22 | 11.9 | 2302.0 ms |
+### bbr
+QUIC-CC: Bbr, Link: Netem, Verzögerung 1 ms ± 0.3 ms, Bandbreite 100 Mbit/s, Maus 500 Hz, Tasten 20 Hz, Clipboard 20000000 B, 15 s je Lauf
+
+| Modus | Verlust | Cursor p50 | p99 | p99.9 | max | >50 ms | Maus verloren | Taste p50 | p99 | max | Clipboard Ø |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| QUIC, Datagramme+Streams | 0 % | 1.64 | 33.76 | 36.13 | 42.0 | 0 | 0/7468 | 1.60 | 33.18 | 39.0 | 1707.0 ms |
+| QUIC, Datagramme+Streams | 1 % | 1.68 | 12.20 | 26.50 | 31.9 | 0 | 70/7469 | 1.69 | 12.90 | 28.8 | 1702.9 ms |
+### new-reno
+QUIC-CC: NewReno, Link: Netem, Verzögerung 1 ms ± 0.3 ms, Bandbreite 100 Mbit/s, Maus 500 Hz, Tasten 20 Hz, Clipboard 20000000 B, 15 s je Lauf
+
+| Modus | Verlust | Cursor p50 | p99 | p99.9 | max | >50 ms | Maus verloren | Taste p50 | p99 | max | Clipboard Ø |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| QUIC, Datagramme+Streams | 0 % | 1.67 | 15.00 | 21.45 | 35.5 | 0 | 0/7464 | 1.68 | 15.54 | 17.0 | 1702.9 ms |
+| QUIC, Datagramme+Streams | 1 % | 1.67 | 6.25 | 25.87 | 30.4 | 0 | 79/7441 | 1.66 | 7.15 | 37.0 | 2218.0 ms |

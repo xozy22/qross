@@ -1,0 +1,15 @@
+[package]
+name = "glide-proto"
+description = "Wire-Protokoll von Glide"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+tokio.workspace = true

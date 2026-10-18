@@ -1,0 +1,11 @@
+[package]
+name = "glide-core"
+description = "Plattformunabhängige Logik von Glide: Layout, Server- und Client-Zustand"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+glide-proto.workspace = true
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,24 @@
+### Standard-ACKs
+QUIC-CC: Cubic, Link: Relay, Verzögerung 1 ms ± 0.3 ms, Bandbreite unbegrenzt, Maus 500 Hz, Tasten 20 Hz, Clipboard 0 B, 10 s je Lauf
+
+| Modus | Verlust | Cursor p50 | p99 | p99.9 | max | >50 ms | Maus verloren | Taste p50 | p99 | max | Clipboard Ø |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| QUIC, 1 Stream | 1 % | 2.19 | 8.14 | 9.41 | 12.2 | 0 | 0/4998 | 2.66 | 6.69 | 8.7 | – |
+| QUIC, Datagramme+Streams | 1 % | 2.18 | 4.16 | 6.25 | 9.8 | 0 | 50/4996 | 2.19 | 7.17 | 9.0 | – |
+| QUIC, 1 Stream | 2 % | 2.19 | 8.28 | 11.78 | 13.2 | 0 | 0/4995 | 2.58 | 9.17 | 12.1 | – |
+| QUIC, Datagramme+Streams | 2 % | 2.18 | 4.19 | 4.42 | 6.2 | 0 | 119/5000 | 2.20 | 3.30 | 7.3 | – |
+| QUIC, 1 Stream | 5 % | 2.20 | 12.27 | 20.18 | 22.2 | 0 | 0/4987 | 2.63 | 12.01 | 13.0 | – |
+| QUIC, Datagramme+Streams | 5 % | 2.19 | 4.24 | 6.18 | 7.3 | 0 | 211/4995 | 2.34 | 8.36 | 14.2 | – |
+
+### Sofortige ACKs
+QUIC: sofortige ACKs (ACK-Frequency-Erweiterung)
+QUIC-CC: Cubic, Link: Relay, Verzögerung 1 ms ± 0.3 ms, Bandbreite unbegrenzt, Maus 500 Hz, Tasten 20 Hz, Clipboard 0 B, 10 s je Lauf
+
+| Modus | Verlust | Cursor p50 | p99 | p99.9 | max | >50 ms | Maus verloren | Taste p50 | p99 | max | Clipboard Ø |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| QUIC, 1 Stream | 1 % | 2.19 | 7.25 | 10.17 | 14.2 | 0 | 0/4990 | 2.19 | 3.25 | 7.1 | – |
+| QUIC, Datagramme+Streams | 1 % | 2.19 | 3.76 | 4.24 | 4.8 | 0 | 51/5000 | 2.23 | 3.28 | 7.3 | – |
+| QUIC, 1 Stream | 2 % | 2.27 | 8.34 | 10.82 | 12.2 | 0 | 0/4850 | 2.54 | 9.26 | 11.5 | – |
+| QUIC, Datagramme+Streams | 2 % | 2.21 | 4.33 | 6.16 | 7.5 | 0 | 115/4990 | 2.27 | 7.46 | 9.4 | – |
+| QUIC, 1 Stream | 5 % | 2.22 | 10.23 | 16.23 | 18.2 | 0 | 0/4998 | 2.31 | 7.45 | 12.3 | – |
+| QUIC, Datagramme+Streams | 5 % | 2.19 | 4.26 | 6.20 | 8.0 | 0 | 258/4999 | 2.35 | 7.33 | 15.3 | – |
