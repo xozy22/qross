@@ -10,6 +10,7 @@ use crate::input::CaptureEvent;
 use crate::keys::{KeyMap, SwitchTarget};
 use crate::layout::Layout;
 use crate::screen::{beyond, Screen};
+use crate::sharing::SharingRules;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerEvent {
@@ -145,6 +146,8 @@ pub struct ServerState {
     remote_probe_failed: bool,
     /// Dateien vom Client warten auf das Ablegen hier
     incoming: Option<u64>,
+    /// Rechte je Rechner; hier zählt nur Drag & Drop (Zwischenablage und Dateien prüft die Netzschicht)
+    sharing: SharingRules,
 }
 
 impl ServerState {
@@ -173,7 +176,14 @@ impl ServerState {
             next_probe: 1,
             remote_probe_failed: false,
             incoming: None,
+            sharing: SharingRules::default(),
         }
+    }
+
+    /// Rechte je Rechner (Standard: alles erlaubt). Gilt ab dem nächsten Ereignis: Wohin Drag &
+    /// Drop nicht darf, wird mit gedrückter Taste gar nicht erst gewechselt.
+    pub fn set_sharing(&mut self, sharing: SharingRules) {
+        self.sharing = sharing;
     }
 
     /// Tasten je Rechner umbelegen (Name des Rechners → gedrückte Taste → gesendete Taste).
@@ -300,8 +310,9 @@ impl ServerState {
             return;
         }
         self.remote_probe = None;
-        if !has_files {
-            // Z. B. ein Fenster oder markierter Text: mit gedrückter Taste nicht wechseln
+        // Ohne Dateien (z. B. ein Fenster oder markierter Text) oder ohne Rechte, sie abzugeben:
+        // mit gedrückter Taste nicht wechseln
+        if !has_files || !self.sharing.for_client(&client).drag.from_client() {
             self.remote_probe_failed = true;
             return;
         }
@@ -373,8 +384,9 @@ impl ServerState {
                 }
                 if buttons_down {
                     // Mit gedrückter Taste nur wechseln, wenn Dateien gezogen werden
-                    // (nicht z. B. beim Verschieben eines Fensters an den Rand).
-                    if self.probe.is_none() {
+                    // (nicht z. B. beim Verschieben eines Fensters an den Rand) und der Client
+                    // sie bekommen darf.
+                    if self.probe.is_none() && self.sharing.for_client(&target).drag.to_client() {
                         self.probe = Some((edge, x, y));
                         out.push(Action::ProbeDrag { x, y });
                     }
@@ -392,6 +404,10 @@ impl ServerState {
                     return;
                 };
                 let Some(screen) = self.clients.get(&target) else { return };
+                // Rechte inzwischen entzogen: Der Drag bleibt hier.
+                if !self.sharing.for_client(&target).drag.to_client() {
+                    return;
+                }
                 let (nx, ny) = enter_point(self.local.hull(), edge, x, y, screen);
                 out.push(Action::CancelLocalDrag);
                 self.enter(target.clone(), nx, ny, out);
@@ -549,8 +565,13 @@ impl ServerState {
         if let Some(edge) = crossing {
             if let Some(target) = self.layout.neighbor(&name, edge).map(str::to_owned) {
                 if self.remote_buttons != 0 {
-                    // Mit gedrückter Taste nur wechseln, wenn der Client Dateien zum Server zieht.
-                    if target == self.me && self.remote_probe.is_none() && !self.remote_probe_failed {
+                    // Mit gedrückter Taste nur wechseln, wenn der Client Dateien zum Server zieht
+                    // und sie abgeben darf.
+                    if target == self.me
+                        && self.remote_probe.is_none()
+                        && !self.remote_probe_failed
+                        && self.sharing.for_client(&name).drag.from_client()
+                    {
                         let probe = self.next_probe;
                         self.next_probe = self.next_probe.wrapping_add(1);
                         self.remote_probe = Some((probe, edge, cx, cy));
@@ -651,6 +672,7 @@ fn scale(v: i32, from_start: i32, from_len: u32, to_start: i32, to_len: u32) -> 
 mod tests {
     use super::*;
     use crate::layout::LinkConfig;
+    use crate::sharing::{Share, Sharing};
     use qross_proto::{KeyCode, MouseButton};
     use std::path::PathBuf;
 
@@ -852,6 +874,54 @@ mod tests {
         let actions = s.handle(edge_hit(Edge::Right, 1919, 540));
         assert!(actions.contains(&Action::CancelIncoming { transfer: 7 }), "{actions:?}");
         assert!(s.handle(ServerEvent::Capture(CaptureEvent::LocalDrop { x: 1, y: 1 })).is_empty());
+    }
+
+    /// Rechte nur für „laptop“, alles andere wie gehabt
+    fn laptop_may(drag: Share) -> SharingRules {
+        let laptop = Sharing { drag, ..Sharing::ALL };
+        SharingRules { default: Sharing::ALL, clients: [("laptop".to_owned(), laptop)].into() }
+    }
+
+    #[test]
+    fn without_drag_rights_to_the_client_a_held_button_never_switches() {
+        let mut s = state();
+        s.set_sharing(laptop_may(Share::FromClient));
+        assert!(s.handle(held_edge_hit()).is_empty(), "nicht einmal nachsehen, ob Dateien gezogen werden");
+        assert_eq!(s.active_screen(), "pc");
+        // Ohne gedrückte Taste wechselt der Cursor wie immer
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).contains(&Action::CaptureRemote));
+
+        // Rechte entzogen, während die Prüfung lief: Der Drag bleibt auf dem Server.
+        let mut s = state();
+        assert_eq!(s.handle(held_edge_hit()), vec![Action::ProbeDrag { x: 1919, y: 540 }]);
+        s.set_sharing(laptop_may(Share::Off));
+        assert!(s.handle(probe_result(&["a.txt"])).is_empty());
+        assert_eq!(s.active_screen(), "pc");
+    }
+
+    #[test]
+    fn without_drag_rights_from_the_client_a_held_button_stays_there() {
+        let mut s = state();
+        s.set_sharing(laptop_may(Share::ToClient));
+        let actions = drag_on_laptop_to_pc(&mut s);
+        let switching = |a: &Action| matches!(a, Action::QueryRemoteDrag { .. } | Action::ReleaseCapture { .. });
+        assert!(!actions.iter().any(switching), "keine Nachfrage, kein Wechsel: {actions:?}");
+        assert_eq!(s.active_screen(), "laptop");
+        // Eine Antwort, um die niemand gebeten hat, ändert nichts.
+        assert!(s.handle(offer(1, true)).is_empty());
+        assert_eq!(s.active_screen(), "laptop");
+
+        s.handle(button(false));
+        assert!(s.handle(delta(-10, 0)).contains(&Action::Send { to: "laptop".into(), input: Input::Leave }));
+        assert_eq!(s.active_screen(), "pc");
+
+        // Rechte entzogen, während die Nachfrage lief: Die Dateien bleiben drüben.
+        let mut s = state();
+        assert_eq!(drag_on_laptop_to_pc(&mut s)[0], Action::QueryRemoteDrag { to: "laptop".into(), probe: 1 });
+        s.set_sharing(laptop_may(Share::Off));
+        assert!(s.handle(offer(1, true)).is_empty());
+        assert!(s.handle(delta(-10, 0)).is_empty(), "solange die Taste gedrückt ist");
+        assert_eq!(s.active_screen(), "laptop");
     }
 
     #[test]

@@ -6,17 +6,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qross_core::keys::{parse_switch_keys, HotkeyEvent, HotkeyTracker, KeyConfig, KeyOptions};
+use qross_core::sharing::{Share, Sharing, SharingRules};
 use qross_core::{CaptureEvent, Inject, Layout, LinkConfig};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::progress::{Direction, Kind, Phase, Progress, Transfers};
-use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform};
+use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle};
 use qross_net::{clipfiles, files};
 use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, RecordingCapture, RecordingInjector, SharedClipboard};
 use qross_platform::Clipboard;
 use qross_proto::{
-    read_frame, write_frame, ClipboardData, Control, Edge, GameState, KeyCode, MouseButton, MouseMove, Platform, Rect,
-    ScreenInfo, PROTOCOL_VERSION, SERVER_VERSION,
+    read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, DragMessage, Edge, FileEntry, GameState,
+    KeyCode, MouseButton, MouseMove, Platform, Rect, ScreenInfo, StreamKind, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -55,6 +56,8 @@ struct Setup {
     client_notices: Arc<Mutex<Vec<ClientNotice>>>,
     server_transfers: Transfers,
     client_transfers: Transfers,
+    /// Rechte je Rechner des Servers (Standard: alles erlaubt)
+    sharing: SharingHandle,
     server_task: JoinHandle<anyhow::Result<()>>,
     client_task: JoinHandle<anyhow::Result<()>>,
 }
@@ -115,6 +118,7 @@ fn start_client_screen(
         .with_notices(notice_tx);
     let addr = server.local_addr().unwrap();
     let server_transfers = server.transfers();
+    let sharing = server.sharing();
 
     let capture = RecordingCapture::default();
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -170,6 +174,7 @@ fn start_client_screen(
         client_notices,
         server_transfers,
         client_transfers,
+        sharing,
         server_task,
         client_task,
     }
@@ -1158,4 +1163,328 @@ async fn copied_files_report_progress_and_the_sender_can_cancel() {
     });
     assert!(!failed, "ein Abbruch ist kein Fehler");
     let _ = std::fs::remove_dir_all(&base);
+}
+
+// ------------------------------------------------------------------ Rechte je Rechner
+
+/// Nur „laptop“ eingeschränkt, alle anderen dürfen alles
+fn laptop_rules(laptop: Sharing) -> SharingRules {
+    SharingRules { default: Sharing::ALL, clients: [("laptop".to_owned(), laptop)].into() }
+}
+
+/// Zuletzt beim Client gemeldete Rechte
+fn client_sharing(s: &Setup) -> Option<Sharing> {
+    s.client_notices.lock().unwrap().iter().rev().find_map(|n| match n {
+        ClientNotice::Sharing(sharing) => Some(*sharing),
+        _ => None,
+    })
+}
+
+/// Setzt die Rechte von „laptop“ und wartet, bis der Client sie kennt. Dann gelten sie auch beim
+/// Server, denn der schickt sie erst, wenn er sie übernommen hat.
+async fn share_with_laptop(s: &Setup, laptop: Sharing) {
+    s.sharing.set(laptop_rules(laptop));
+    wait_for("Rechte beim Client", || client_sharing(s) == Some(laptop)).await;
+}
+
+/// Vergisst die bisherigen Aufrufe, damit `enter_laptop` und `released` erneut warten können.
+fn forget_calls(s: &Setup) {
+    s.capture.0.lock().unwrap().clear();
+    s.injected.0.lock().unwrap().clear();
+}
+
+fn sent_by_client(s: &Setup) -> bool {
+    client_progress(s).iter().any(|p| p.direction == Direction::Sending)
+}
+
+#[tokio::test]
+async fn rights_reach_the_client_at_once_without_reconnecting() {
+    let s = start(true, None);
+    wait_for("Rechte nach dem Verbinden", || client_sharing(&s) == Some(Sharing::ALL)).await;
+    let laptop = Sharing { clipboard: Share::ToClient, files: Share::Off, drag: Share::FromClient };
+    share_with_laptop(&s, laptop).await;
+    // Eine Vorgabe für unbekannte Rechner betrifft „laptop“ mit eigenem Eintrag nicht.
+    let mut rules = laptop_rules(laptop);
+    rules.default = Sharing { clipboard: Share::Off, files: Share::Off, drag: Share::Off };
+    s.sharing.set(rules);
+    s.sharing.set(laptop_rules(Sharing::ALL));
+    wait_for("wieder alles erlaubt", || client_sharing(&s) == Some(Sharing::ALL)).await;
+
+    let notices = s.client_notices.lock().unwrap();
+    assert_eq!(notices.iter().filter(|n| matches!(n, ClientNotice::Connected { .. })).count(), 1);
+    assert!(!notices.iter().any(|n| matches!(n, ClientNotice::Disconnected { .. })), "die Verbindung bleibt bestehen");
+    let seen: Vec<Sharing> =
+        notices.iter().filter_map(|n| if let ClientNotice::Sharing(x) = n { Some(*x) } else { None }).collect();
+    assert_eq!(seen, [Sharing::ALL, laptop, Sharing::ALL], "nur Änderungen, die den Rechner betreffen");
+}
+
+#[tokio::test]
+async fn the_clipboard_travels_only_where_it_may() {
+    let mut s = start(true, None);
+    share_with_laptop(&s, Sharing { clipboard: Share::FromClient, ..Sharing::ALL }).await;
+    s.server_clip.set_text("vom Server").unwrap();
+    enter_laptop(&s).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(s.client_clip.text(), None, "zum Laptop nicht erlaubt");
+
+    s.client_clip.set_text("vom Laptop").unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let server_clip = s.server_clip.clone();
+    wait_for("Text vom Laptop beim Server", || server_clip.clone().text().as_deref() == Some("vom Laptop")).await;
+
+    // Umgekehrt, ohne neu zu verbinden
+    share_with_laptop(&s, Sharing { clipboard: Share::ToClient, ..Sharing::ALL }).await;
+    s.server_clip.set_text("zweiter Text").unwrap();
+    forget_calls(&s);
+    enter_laptop(&s).await;
+    let client_clip = s.client_clip.clone();
+    wait_for("Text vom Server beim Laptop", || client_clip.clone().text().as_deref() == Some("zweiter Text")).await;
+    s.client_clip.set_text("bleibt auf dem Laptop").unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("zurück beim Server", || released(&capture)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(s.server_clip.text().as_deref(), Some("zweiter Text"), "vom Laptop nicht erlaubt");
+}
+
+#[tokio::test]
+async fn copied_files_travel_only_where_they_may() {
+    let mut s = start(true, None);
+    // Dateien nur zum Laptop; die Namen als Text gehören zur Zwischenablage und dürfen überallhin.
+    share_with_laptop(&s, Sharing { files: Share::ToClient, ..Sharing::ALL }).await;
+    let (source, report) = copied_files("rechte-hin");
+    let names = ClipboardData::from_text("Bericht.pdf\nProjekt");
+    s.server_clip.write_files(&[source.join("Bericht.pdf"), source.join("Projekt")], &names).unwrap();
+    enter_laptop(&s).await;
+    let client_clip = s.client_clip.clone();
+    wait_up_to(Duration::from_secs(20), "Dateien beim Laptop", || !client_clip.clone().files().is_empty()).await;
+    assert_pasteable(&s.client_clip.files(), &report);
+
+    // Zurück nur die Namen; der Laptop versucht die Dateien gar nicht erst.
+    let (back, _) = copied_files("rechte-her");
+    s.client_clip.write_files(&[back.join("Bericht.pdf")], &ClipboardData::from_text("Bericht.pdf")).unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let server_clip = s.server_clip.clone();
+    wait_for("Name beim Server", || server_clip.clone().text().as_deref() == Some("Bericht.pdf")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(s.server_clip.files().is_empty(), "keine Dateien vom Laptop");
+    assert!(!sent_by_client(&s), "der Laptop überträgt nichts");
+
+    // Andersherum: Dateien nur vom Laptop. Zum Laptop gehen nur noch die Namen.
+    share_with_laptop(&s, Sharing { files: Share::FromClient, ..Sharing::ALL }).await;
+    let sent_before = server_progress(&s).len();
+    s.server_clip.write_files(&[source.join("Bericht.pdf"), source.join("Projekt")], &names).unwrap();
+    forget_calls(&s);
+    enter_laptop(&s).await;
+    let client_clip = s.client_clip.clone();
+    wait_for("Namen beim Laptop", || client_clip.clone().read().as_ref() == Some(&names)).await;
+    assert!(s.client_clip.files().is_empty(), "keine Dateien zum Laptop");
+    assert_eq!(server_progress(&s).len(), sent_before, "der Server überträgt nichts");
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&back);
+}
+
+#[tokio::test]
+async fn drag_and_drop_only_from_the_client() {
+    let s = start(true, None);
+    share_with_laptop(&s, Sharing { drag: Share::FromClient, ..Sharing::ALL }).await;
+    // Zum Laptop nicht: Der Server sieht nicht einmal nach, ob Dateien gezogen werden.
+    let held = CaptureEvent::EdgeHit { edge: Edge::Right, x: 1919, y: 540, buttons_down: true };
+    for _ in 0..8 {
+        s.events.send(held.clone()).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let calls = s.capture.0.lock().unwrap().clone();
+    assert!(!calls.iter().any(|c| matches!(c, CaptureCall::ProbeDrag { .. } | CaptureCall::Remote)), "{calls:?}");
+
+    // Vom Laptop zum Server schon
+    let (source, report) = copied_files("rechte-drag-her");
+    let target = source.with_file_name(format!("qross-rechte-drag-her-ziel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::create_dir_all(&target).unwrap();
+    *s.capture.1.lock().unwrap() = Some(target.clone());
+    enter_laptop(&s).await;
+    *s.injected.2.lock().unwrap() = vec![source.join("Bericht.pdf")];
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: true }).unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("Dateien vom Laptop", || capture.0.lock().unwrap().contains(&CaptureCall::AwaitLocalDrop)).await;
+    s.events.send(CaptureEvent::LocalDrop { x: 300, y: 200 }).unwrap();
+    let file = target.join("Bericht.pdf");
+    wait_up_to(Duration::from_secs(20), "abgelegte Datei", || file.exists()).await;
+    assert_eq!(std::fs::read(&file).unwrap(), report);
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+#[tokio::test]
+async fn drag_and_drop_only_to_the_client() {
+    let s = start(true, None);
+    share_with_laptop(&s, Sharing { drag: Share::ToClient, ..Sharing::ALL }).await;
+    // Zum Laptop wie gewohnt
+    let (source, report) = copied_files("rechte-drag-hin");
+    let target = source.with_file_name(format!("qross-rechte-drag-hin-ziel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::create_dir_all(&target).unwrap();
+    *s.injected.1.lock().unwrap() = Some(target.clone());
+    let held = CaptureEvent::EdgeHit { edge: Edge::Right, x: 1919, y: 540, buttons_down: true };
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Drag-Prüfung", || {
+        let _ = events.send(held.clone());
+        capture.0.lock().unwrap().contains(&CaptureCall::ProbeDrag { x: 1919, y: 540 })
+    })
+    .await;
+    s.events.send(CaptureEvent::DragProbeResult { files: vec![source.join("Bericht.pdf")] }).unwrap();
+    let injected = s.injected.clone();
+    wait_for("Enter beim Laptop", || injected.0.lock().unwrap().contains(&Inject::MoveTo { x: 1, y: 399 })).await;
+    s.events.send(CaptureEvent::MouseDelta { dx: 50, dy: 0 }).unwrap();
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+    let file = target.join("Bericht.pdf");
+    wait_up_to(Duration::from_secs(20), "abgelegte Datei", || file.exists()).await;
+    assert_eq!(std::fs::read(&file).unwrap(), report);
+
+    // Vom Laptop zurück nicht: Der Server fragt nicht nach, die Dateien bleiben drüben und der
+    // Cursor auch, solange die Taste gedrückt ist.
+    *s.injected.2.lock().unwrap() = vec![source.join("Bericht.pdf")];
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: true }).unwrap();
+    for _ in 0..5 {
+        s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+    assert!(!released(&s.capture), "mit gedrückter Taste bleibt der Cursor auf dem Laptop");
+    assert_eq!(s.injected.2.lock().unwrap().len(), 1, "der Laptop gibt seinen Drag nicht ab");
+    assert!(!sent_by_client(&s));
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("Rückkehr nach dem Loslassen", || released(&capture)).await;
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+#[tokio::test]
+async fn revoking_rights_cancels_a_running_drag() {
+    let s = start(true, None);
+    let base = std::env::temp_dir().join(format!("qross-rechte-entzogen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let name = "rechte-entzogen.bin";
+    let source = big_file(&base.join("quelle"), name);
+    let target = base.join("ziel");
+    std::fs::create_dir_all(&target).unwrap();
+    *s.injected.1.lock().unwrap() = Some(target.clone());
+
+    let held = CaptureEvent::EdgeHit { edge: Edge::Right, x: 1919, y: 540, buttons_down: true };
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Drag-Prüfung", || {
+        let _ = events.send(held.clone());
+        capture.0.lock().unwrap().contains(&CaptureCall::ProbeDrag { x: 1919, y: 540 })
+    })
+    .await;
+    s.events.send(CaptureEvent::DragProbeResult { files: vec![source] }).unwrap();
+    let id = wait_for_progress("Fortschritt beim Server", || server_progress(&s), running(Direction::Sending)).await.transfer;
+    wait_for_progress("Fortschritt beim Laptop", || client_progress(&s), |p| p.transfer == id && running(Direction::Receiving)(p))
+        .await;
+
+    // Drag & Drop zum Laptop entzogen: Die laufende Übertragung bricht sofort ab.
+    s.sharing.set(laptop_rules(Sharing { drag: Share::FromClient, ..Sharing::ALL }));
+    wait_for_progress("Abbruch beim Server", || server_progress(&s), ended(id, Phase::Cancelled { by_peer: false })).await;
+    wait_for_progress("Abbruch beim Laptop", || client_progress(&s), ended(id, Phase::Cancelled { by_peer: true })).await;
+    wait_for("aufgeräumtes Staging", || drag_leftovers(id, name).is_empty()).await;
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "nichts abgelegt");
+    assert!(drag_leftovers(id, name).is_empty());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Ein Stream wie von Qross 0.6: Typ-Byte, eine Nachricht
+async fn send_raw(conn: &quinn::Connection, kind: StreamKind, message: &impl serde::Serialize) {
+    let mut stream = conn.open_uni().await.unwrap();
+    stream.write_all(&[kind as u8]).await.unwrap();
+    write_frame(&mut stream, message).await.unwrap();
+    stream.finish().unwrap();
+}
+
+#[tokio::test]
+async fn an_older_client_that_tries_anyway_is_refused_cleanly() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let nothing = Sharing { clipboard: Share::Off, files: Share::Off, drag: Share::Off };
+    let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
+    let notices = collect(notice_rx);
+    let server =
+        Server::bind(config, &server_id, trust).unwrap().with_sharing(laptop_rules(nothing)).with_notices(notice_tx);
+    let (addr, sharing) = (server.local_addr().unwrap(), server.sharing());
+    let capture = RecordingCapture::default();
+    let server_clip = SharedClipboard::default();
+    let (_events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(capture.clone()),
+        events: events_rx,
+        clipboard: Box::new(server_clip.clone()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+    }));
+
+    // Ein Client wie Qross 0.6: Nach dem Welcome liest er den Control-Stream nicht mehr und kennt
+    // seine Rechte deshalb nicht.
+    let (_endpoint, conn) = connect_raw(addr, &client_id).await;
+    let (mut control, mut control_rx) = conn.open_bi().await.unwrap();
+    let hello = Control::Hello {
+        version: PROTOCOL_VERSION,
+        name: "laptop".into(),
+        screen: ScreenInfo { bounds: LAPTOP },
+        platform: Platform::Windows,
+    };
+    write_frame(&mut control, &hello).await.unwrap();
+    let welcome = read_frame::<_, ControlV05>(&mut control_rx).await.unwrap();
+    assert!(matches!(welcome, Some(ControlV05::Welcome { version: SERVER_VERSION, .. })), "{welcome:?}");
+
+    let (source, _) = copied_files("rechte-alt");
+    let entries = files::collect(&[source.join("Bericht.pdf")]).unwrap();
+    let list: Vec<FileEntry> = entries.iter().map(|e| e.entry.clone()).collect();
+    let sender = Transfers::new();
+    // Text, kopierte Dateien samt Inhalt und gezogene Dateien, ohne dass der Server gefragt hätte
+    send_raw(&conn, StreamKind::Clipboard, &ClipboardMsg::Data(ClipboardData::from_text("geheim"))).await;
+    let copied = clipfiles::new_transfer_id();
+    let files_msg = ClipboardMsg::Files { transfer: copied, entries: list.clone(), data: ClipboardData::from_text("Bericht.pdf") };
+    send_raw(&conn, StreamKind::Clipboard, &files_msg).await;
+    let _ = files::send_tracked(conn.clone(), StreamKind::ClipboardFile, copied, entries.clone(), "pc", &sender).await;
+    let dragged = clipfiles::new_transfer_id();
+    send_raw(&conn, StreamKind::Drag, &DragMessage::Offer { probe: 1, transfer: dragged, entries: list }).await;
+    let _ = files::send_tracked(conn.clone(), StreamKind::File, dragged, entries, "pc", &sender).await;
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(server_clip.clone().read(), None, "nichts in der Zwischenablage des Servers");
+    assert!(server_clip.clone().files().is_empty());
+    assert!(!clipfiles::default_store().join(copied.to_string()).exists(), "keine Reste in der Ablage");
+    assert!(drag_leftovers(dragged, "Bericht.pdf").is_empty(), "keine Reste im Drag-Staging");
+    assert!(!capture.0.lock().unwrap().contains(&CaptureCall::AwaitLocalDrop), "kein Ablegen");
+    let transfers = notices.lock().unwrap().iter().filter(|n| matches!(n, ServerNotice::Transfer(_))).count();
+    assert_eq!(transfers, 0, "keine Übertragung angenommen");
+    assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
+
+    // Gegenprobe ohne neue Verbindung: Mit Rechten kommt derselbe Weg an, als Text auch bei Dateien.
+    sharing.set(laptop_rules(Sharing { clipboard: Share::Both, ..nothing }));
+    let mut arrived = false;
+    for _ in 0..100 {
+        send_raw(&conn, StreamKind::Clipboard, &files_msg).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if server_clip.clone().text().as_deref() == Some("Bericht.pdf") {
+            arrived = true;
+            break;
+        }
+    }
+    assert!(arrived, "mit Rechten kommt der Text an");
+    assert!(server_clip.clone().files().is_empty(), "Dateien weiterhin nicht");
+    assert!(!clipfiles::default_store().join(copied.to_string()).exists());
+    server_task.abort();
+    let _ = std::fs::remove_dir_all(&source);
 }

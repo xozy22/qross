@@ -1,7 +1,8 @@
 //! Wire-Protokoll von Qross. Beschreibung: `docs/protokoll.md`.
 //!
 //! Kanäle einer QUIC-Verbindung:
-//! - **Control** (bidirektionaler Stream, vom Client geöffnet): Hello/Welcome, Bildschirmänderungen
+//! - **Control** (bidirektionaler Stream, vom Client geöffnet): Hello/Welcome, Bildschirmänderungen,
+//!   Rechte je Rechner
 //! - **Input** (unidirektionaler Stream Server → Client): Tasten, Maustasten, Rad, Enter/Leave
 //! - **Datagramme** (Server → Client): Mausposition bzw. im Spielemodus Mausbewegung,
 //!   unzuverlässig, die neueste gewinnt
@@ -27,13 +28,17 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// - 3: Qross 0.2 und 0.3
 /// - 4: `Control::Monitors` (seit Qross 0.5)
 /// - 5: `Control::Game` und `Datagram::MouseDelta`, der Spielemodus (seit Qross 0.6)
-pub const SERVER_VERSION: u16 = 5;
+/// - 7: `Control::Sharing`, Rechte je Rechner (seit Qross 0.7)
+pub const SERVER_VERSION: u16 = 7;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
 /// die Verbindung bei unbekannten Control-Nachrichten.
 pub const MONITORS_SINCE: u16 = 4;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Game` senden. Ein Client, der sie
 /// sendet, versteht damit auch `Datagram::MouseDelta`.
 pub const GAME_MODE_SINCE: u16 = 5;
+/// Ab dieser `Welcome`-Version schickt der Server `Control::Sharing`: nach dem `Welcome` und bei
+/// jeder Änderung der Rechte.
+pub const SHARING_SINCE: u16 = 7;
 /// Höchstzahl Monitore, die der Server aus `Control::Monitors` übernimmt
 pub const MAX_MONITORS: usize = 16;
 /// ALPN-Kennung im TLS-Handshake
@@ -77,7 +82,9 @@ pub struct ScreenInfo {
 ///
 /// Neue Varianten werden nur hinten angefügt. Anders als bei `Clipboard` trennen ältere Server die
 /// Verbindung, wenn sie eine Nachricht nicht lesen können; der Client sendet neue Varianten deshalb
-/// nur, wenn die Version im `Welcome` sie abdeckt (z. B. `MONITORS_SINCE`).
+/// nur, wenn die Version im `Welcome` sie abdeckt (z. B. `MONITORS_SINCE`). In der Gegenrichtung
+/// lesen Clients bis Qross 0.6 nach dem `Welcome` nichts mehr; was der Server danach schickt, bleibt
+/// bei ihnen ungelesen liegen. Neuere Clients überspringen Nachrichten, die sie nicht kennen.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Control {
     /// Client → Server, erste Nachricht
@@ -98,6 +105,57 @@ pub enum Control {
     /// nach dem `Welcome` nur, wenn schon etwas läuft. Steht der Cursor dort, hält der Server ihn
     /// fest und schickt solange `Datagram::MouseDelta` statt `Datagram::MouseMove`.
     Game(GameState),
+    /// Server → Client (seit Qross 0.7, ab `SHARING_SINCE`): Was der Server mit diesem Client teilt.
+    /// Folgt direkt auf das `Welcome` und kommt nach jeder Änderung erneut. Der Client zeigt das an
+    /// und versucht Verbotenes gar nicht erst; durchgesetzt wird es ohnehin auf dem Server, auch
+    /// gegenüber älteren Clients, die die Nachricht nie lesen.
+    Sharing(Sharing),
+}
+
+/// Rechte je Rechner: In welche Richtung eine Art von Inhalten zwischen Server und Client wandern
+/// darf. „Vom Client“ heißt: zum Server und von dort zu anderen Rechnern, soweit diese empfangen
+/// dürfen. In Konfigurationsdateien: `"both"`, `"to-client"`, `"from-client"`, `"off"`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Share {
+    /// In beide Richtungen (Standard, wie vor Qross 0.7)
+    #[default]
+    Both,
+    /// Nur vom Server zum Client
+    ToClient,
+    /// Nur vom Client zum Server
+    FromClient,
+    /// Gar nicht
+    Off,
+}
+
+impl Share {
+    /// Darf der Client so etwas bekommen?
+    pub const fn to_client(self) -> bool {
+        matches!(self, Self::Both | Self::ToClient)
+    }
+
+    /// Darf der Client so etwas abgeben?
+    pub const fn from_client(self) -> bool {
+        matches!(self, Self::Both | Self::FromClient)
+    }
+}
+
+/// Was der Server mit einem Client teilt (`Control::Sharing`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sharing {
+    /// Zwischenablage: Text, HTML und Bild (`Clipboard::Data` und was `Clipboard::Files` an Text
+    /// mitbringt)
+    pub clipboard: Share,
+    /// Kopierte Dateien: `Clipboard::Files` und Streams vom Typ `ClipboardFile`
+    pub files: Share,
+    /// Drag & Drop: `Input::DragStart`, Streams vom Typ `File` und `Drag`
+    pub drag: Share,
+}
+
+impl Sharing {
+    /// Alles in beide Richtungen
+    pub const ALL: Self = Self { clipboard: Share::Both, files: Share::Both, drag: Share::Both };
 }
 
 /// Spielemodus: Was auf einem Rechner gerade im Vordergrund läuft.
@@ -415,5 +473,42 @@ mod tests {
 
         assert!(!GameState::default().is_active());
         assert!(GameState { fullscreen: false, captured: true }.is_active());
+    }
+
+    /// So sah `Control` in Qross 0.6 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ControlV06 {
+        Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+        Welcome { version: u16, server_name: String, platform: Platform },
+        Reject { reason: String },
+        ScreenChanged(ScreenInfo),
+        Monitors(Vec<Rect>),
+        Game(GameState),
+    }
+
+    #[test]
+    fn sharing_reaches_clients_that_read_it() {
+        // Ein Client aus 0.6 liest das Welcome eines neuen Servers wie bisher; danach liest er den
+        // Control-Stream nicht mehr. Ein neuer Client liest die Rechte.
+        const { assert!(GAME_MODE_SINCE < SHARING_SINCE && SHARING_SINCE <= SERVER_VERSION) };
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Linux };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV06>(&bytes).unwrap(), ControlV06::Welcome { version: SERVER_VERSION, .. }));
+
+        let sharing = Sharing { clipboard: Share::ToClient, files: Share::Off, drag: Share::FromClient };
+        let bytes = postcard::to_stdvec(&Control::Sharing(sharing)).unwrap();
+        assert!(postcard::from_bytes::<ControlV06>(&bytes).is_err(), "ein Client aus 0.6 könnte sie nicht lesen");
+        assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), Control::Sharing(sharing));
+        assert!(bytes.len() <= 4, "{} Bytes", bytes.len());
+    }
+
+    #[test]
+    fn shares_name_their_directions() {
+        let all = [Share::Both, Share::ToClient, Share::FromClient, Share::Off];
+        let to: Vec<bool> = all.iter().map(|s| s.to_client()).collect();
+        let from: Vec<bool> = all.iter().map(|s| s.from_client()).collect();
+        assert_eq!(to, [true, true, false, false]);
+        assert_eq!(from, [true, false, true, false]);
+        assert_eq!(Sharing::default(), Sharing::ALL, "ohne Angabe ist alles erlaubt (wie vor Qross 0.7)");
     }
 }

@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use qross_core::keys::{parse_key_map, parse_switch_keys, Hotkey, KeyConfig, KeyOptions, MediaKeys};
 use qross_core::server::SwitchOptions;
+use qross_core::sharing::{Share, Sharing, SharingRules};
 use qross_core::LinkConfig;
 use qross_proto::DEFAULT_PORT;
 use serde::Deserialize;
@@ -31,6 +32,52 @@ pub struct ServerFile {
     pub keys: KeysSection,
     #[serde(default)]
     pub game: GameSection,
+    #[serde(default)]
+    pub sharing: SharingSection,
+}
+
+/// Abschnitt `[sharing]`: Rechte je Rechner. Die Werte direkt darunter gelten für jeden Rechner,
+/// soweit `[sharing.clients.<name>]` nichts anderes sagt; ohne Angabe ist alles erlaubt.
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SharingSection {
+    pub clipboard: Option<Share>,
+    pub files: Option<Share>,
+    pub drag: Option<Share>,
+    /// Name des Rechners → eigene Rechte
+    #[serde(default)]
+    pub clients: HashMap<String, ShareEntries>,
+}
+
+/// Was ein Rechner teilen darf: `"both"`, `"to-client"`, `"from-client"` oder `"off"`
+#[derive(Deserialize, Debug, Default, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct ShareEntries {
+    /// Zwischenablage: Text, HTML, Bild
+    pub clipboard: Option<Share>,
+    /// Kopierte Dateien
+    pub files: Option<Share>,
+    /// Drag & Drop
+    pub drag: Option<Share>,
+}
+
+impl ShareEntries {
+    fn over(self, base: Sharing) -> Sharing {
+        Sharing {
+            clipboard: self.clipboard.unwrap_or(base.clipboard),
+            files: self.files.unwrap_or(base.files),
+            drag: self.drag.unwrap_or(base.drag),
+        }
+    }
+}
+
+impl SharingSection {
+    pub fn rules(&self) -> SharingRules {
+        let section = ShareEntries { clipboard: self.clipboard, files: self.files, drag: self.drag };
+        let default = section.over(Sharing::ALL);
+        let clients = self.clients.iter().map(|(name, entries)| (name.clone(), entries.over(default))).collect();
+        SharingRules { default, clients }
+    }
 }
 
 /// Abschnitt `[game]`: der Spielemodus.
@@ -242,6 +289,25 @@ mod tests {
         let file: ServerFile = toml::from_str("name = \"pc\"").unwrap();
         assert_eq!(file.switching.options(), SwitchOptions::RECOMMENDED);
         assert_eq!(file.clipboard.file_limit(), qross_net::clipfiles::DEFAULT_LIMIT);
+    }
+
+    #[test]
+    fn sharing_falls_back_to_the_section_and_then_to_everything() {
+        let example: ServerFile = toml::from_str(include_str!("../../../qross.example.toml")).unwrap();
+        assert!(!example.sharing.rules().restricts(), "das Beispiel schränkt nichts ein");
+        let file: ServerFile = toml::from_str("name = \"pc\"").unwrap();
+        assert_eq!(file.sharing.rules(), SharingRules::default());
+
+        let text = "[sharing]\ndrag = \"off\"\n\n[sharing.clients.laptop]\nclipboard = \"to-client\"\nfiles = \"from-client\"\n";
+        let rules = toml::from_str::<ServerFile>(text).unwrap().sharing.rules();
+        assert_eq!(rules.default, Sharing { drag: Share::Off, ..Sharing::ALL });
+        let laptop = Sharing { clipboard: Share::ToClient, files: Share::FromClient, drag: Share::Off };
+        assert_eq!(rules.for_client("laptop"), laptop, "fehlende Angaben kommen aus [sharing]");
+        assert_eq!(rules.for_client("tablet"), rules.default);
+
+        assert!(toml::from_str::<ServerFile>("[sharing]\nclipboard = \"beide\"").is_err(), "nur bekannte Werte");
+        assert!(toml::from_str::<ServerFile>("[sharing]\naudio = \"off\"").is_err(), "Tippfehler fallen auf");
+        assert!(toml::from_str::<ServerFile>("[sharing.clients.laptop]\naudio = \"off\"").is_err());
     }
 
     #[test]

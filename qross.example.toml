@@ -64,3 +64,19 @@ AltLeft = "MetaLeft"
 # bekommt das Spiel dann relative Mausbewegungen statt Positionen, auch für Spiele, die den Zeiger
 # einfangen. Clients melden das ab Qross 0.6. false = aus
 enabled = true
+
+# Rechte je Rechner (optional): was zwischen diesem Server und einem Client wandern darf.
+# "both" = in beide Richtungen (Standard), "to-client" = nur zum Client, "from-client" = nur vom
+# Client, "off" = gar nicht. Was ein Client abgeben darf, landet auf dem Server und von dort bei
+# anderen Rechnern, soweit diese es bekommen dürfen. Der Server setzt das auch bei älteren Clients durch.
+# Die Werte direkt unter [sharing] gelten für jeden Rechner ohne eigene Angabe.
+# [sharing]
+# clipboard = "both"   # Zwischenablage: Text, HTML, Bild
+# files = "both"       # kopierte Dateien (Strg+C im Explorer)
+# drag = "both"        # Drag & Drop
+#
+# Beispiel: Vom Firmen-Laptop darf nichts herunter, hinauf aber schon.
+# [sharing.clients.laptop]
+# clipboard = "to-client"
+# files = "to-client"
+# drag = "to-client"

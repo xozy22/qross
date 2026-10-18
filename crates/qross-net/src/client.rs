@@ -9,12 +9,13 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use qross_core::client::{ClientState, Transition};
+use qross_core::sharing::describe as describe_sharing;
 use qross_core::Inject;
 use qross_platform::{Clipboard, Injector};
 use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
-    FileEntry, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, StreamKind, DEFAULT_PORT,
-    GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION,
+    FileEntry, FrameError, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, Sharing, StreamKind,
+    DEFAULT_PORT, GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SHARING_SINCE,
 };
 use quinn::{Connection, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -26,6 +27,7 @@ use crate::files::{self, FileOutcome, Receiver, Staging};
 use crate::game::{self, Detector};
 use crate::progress::{Progress, Transfers};
 use crate::quality::{self, Quality};
+use crate::rights::{self, Allowed};
 use crate::streams::{read_kind, send_drag_message};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
@@ -90,6 +92,8 @@ enum FromServer {
     ClipboardFile(FileOutcome),
     /// Server fragt: Werden hier gerade Dateien gezogen? (Drag & Drop zum Server)
     DragQuery { probe: u32 },
+    /// Was der Server mit diesem Rechner teilt (seit Qross 0.7)
+    Sharing(Sharing),
 }
 
 /// Zwischenablage dieses Clients: Zugriff, ankommende kopierte Dateien, Meldungen dazu.
@@ -132,6 +136,9 @@ pub enum ClientNotice {
     /// Stand einer Dateiübertragung etwa viermal pro Sekunde und zum Schluss ihr Ergebnis
     /// (siehe [`crate::progress`]). Abbrechen über die `Transfers` aus [`run_with_transfers`].
     Transfer(Progress),
+    /// Was der Server mit diesem Rechner teilt (Rechte je Rechner): nach dem Verbinden und bei
+    /// jeder Änderung. Server bis Qross 0.6 melden das nie; dort ist alles erlaubt.
+    Sharing(Sharing),
 }
 
 type Notices<'a> = Option<&'a mpsc::UnboundedSender<ClientNotice>>;
@@ -333,6 +340,10 @@ async fn session(
     let mut receiver = Receiver::new(Staging::create(&files::drag_staging_base())?, clip.transfers.clone());
 
     let (tx, mut rx) = mpsc::unbounded_channel();
+    // Rechte je Rechner: nur neuere Server schicken nach dem Welcome noch etwas.
+    if server_version >= SHARING_SINCE {
+        tokio::spawn(receive_control(control_rx, tx.clone()));
+    }
     tokio::spawn(receive_datagrams(conn.clone(), tx.clone()));
     let stagings = (receiver.staging(), clip.incoming.staging(), clip.transfers.clone());
     tokio::spawn(receive_streams(conn.clone(), tx, stagings));
@@ -352,6 +363,8 @@ async fn session(
     let mut moves = 0u32;
     let mut last_pos = (0, 0);
     let mut screen_poll = tokio::time::interval(Duration::from_secs(2));
+    // Was der Server mit diesem Rechner teilt; ältere Server melden nichts und erlauben alles.
+    let mut sharing = Sharing::ALL;
 
     let outcome: Result<()> = async {
         loop {
@@ -403,18 +416,24 @@ async fn session(
                                     "Cursor verlässt diesen Rechner ({moves} Bewegungen, zuletzt bei {},{})",
                                     last_pos.0, last_pos.1
                                 );
-                                // Beim Verlassen das eigene Clipboard mitgeben, falls es sich geändert hat.
-                                let (hub, synced, conn) = (clip.hub.clone(), clip_synced.clone(), conn.clone());
-                                let (limit, peer, notify) = (config.clipboard_file_limit, server_name.clone(), clip.notify.clone());
-                                let transfers = clip.transfers.clone();
-                                tokio::spawn(async move {
-                                    let known = *synced.lock().unwrap();
-                                    let (seq, content) = hub.changed_since(Some(known)).await;
-                                    *synced.lock().unwrap() = seq;
-                                    if let Some(content) = content {
-                                        clipfiles::send(conn, content, limit, peer, notify, transfers).await;
-                                    }
-                                });
+                                // Beim Verlassen das eigene Clipboard mitgeben, falls es sich geändert hat
+                                // und der Server es annimmt.
+                                let allowed = Allowed { clipboard: sharing.clipboard.from_client(), files: sharing.files.from_client() };
+                                if allowed.any() {
+                                    let (hub, synced, conn) = (clip.hub.clone(), clip_synced.clone(), conn.clone());
+                                    let (limit, peer, notify) = (config.clipboard_file_limit, server_name.clone(), clip.notify.clone());
+                                    let transfers = clip.transfers.clone();
+                                    tokio::spawn(async move {
+                                        let known = *synced.lock().unwrap();
+                                        let (seq, content) = hub.changed_since(Some(known)).await;
+                                        *synced.lock().unwrap() = seq;
+                                        if let Some(content) = content.and_then(|c| rights::content(c, allowed)) {
+                                            clipfiles::send(conn, content, limit, peer, notify, transfers).await;
+                                        }
+                                    });
+                                } else {
+                                    debug!("Zwischenablage bleibt hier: der Server nimmt sie nicht an");
+                                }
                             }
                             None => {}
                         }
@@ -445,7 +464,12 @@ async fn session(
                     }
                     FromServer::DragQuery { probe } => {
                         let (reply, dragged) = oneshot::channel();
-                        let _ = inject.send(ToInjector::TakeDragged { x: last_pos.0, y: last_pos.1, reply });
+                        if sharing.drag.from_client() {
+                            let _ = inject.send(ToInjector::TakeDragged { x: last_pos.0, y: last_pos.1, reply });
+                        } else {
+                            // Nicht erlaubt: Der Drag bleibt hier, die Antwort lautet „keine Dateien“.
+                            let _ = reply.send(Vec::new());
+                        }
                         let (peer, transfers) = (server_name.clone(), clip.transfers.clone());
                         tokio::spawn(offer_dragged_files(conn.clone(), probe, dragged, peer, transfers));
                     }
@@ -454,6 +478,13 @@ async fn session(
                         Ok(None) => {}
                         Err(failed) => (clip.notify)(FilesNotice::Failed { peer: failed.peer, reason: failed.reason }),
                     },
+                    FromServer::Sharing(now) => {
+                        if now != sharing {
+                            info!("Rechte dieses Rechners beim Server: {}", describe_sharing(now));
+                        }
+                        sharing = now;
+                        notify(notices, ClientNotice::Sharing(now));
+                    }
                 },
                 _ = screen_poll.tick() => {
                     let now = (screen.bounds)();
@@ -563,6 +594,21 @@ async fn resolve(server: &str) -> Result<SocketAddr> {
         .or(addrs.first())
         .copied()
         .with_context(|| format!("„{server}“ hat keine Adresse"))
+}
+
+/// Was der Server nach dem `Welcome` auf dem Control-Stream schickt (seit Qross 0.7: die Rechte).
+async fn receive_control(mut control: RecvStream, tx: mpsc::UnboundedSender<FromServer>) {
+    loop {
+        match read_frame::<_, Control>(&mut control).await {
+            Ok(Some(Control::Sharing(sharing))) => {
+                let _ = tx.send(FromServer::Sharing(sharing));
+            }
+            Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht vom Server"),
+            // Von einer neueren Version: überspringen, der Frame ist gelesen
+            Err(FrameError::Codec(e)) => debug!("unbekannte Control-Nachricht vom Server: {e}"),
+            Ok(None) | Err(_) => return,
+        }
+    }
 }
 
 async fn receive_datagrams(conn: Connection, tx: mpsc::UnboundedSender<FromServer>) {

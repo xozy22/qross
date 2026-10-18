@@ -345,6 +345,31 @@ impl Transfers {
         }
     }
 
+    /// Rechte entzogen: bricht laufende Übertragungen dieser Art mit `peer` in dieser Richtung ab,
+    /// wie mit „Abbrechen“. Liefert, wie viele es waren.
+    pub(crate) fn cancel_with(&self, peer: &str, direction: Direction, kind: Kind) -> usize {
+        let cancels: Vec<CancelFn> = {
+            let mut entries = self.entries();
+            entries
+                .iter_mut()
+                .filter(|((d, _), entry)| {
+                    *d == direction
+                        && entry.phase.is_running()
+                        && entry.info.as_ref().is_some_and(|i| i.peer == peer && i.kind == kind)
+                })
+                .filter_map(|(_, entry)| {
+                    entry.finish(Phase::Cancelled { by_peer: false });
+                    entry.cancel.clone()
+                })
+                .collect()
+        };
+        self.0.wake.notify_one();
+        for cancel in &cancels {
+            cancel();
+        }
+        cancels.len()
+    }
+
     /// Meldet über `report`, solange der zurückgegebene Wächter lebt: laufende Übertragungen etwa
     /// alle [`REPORT_EVERY`], beendete einmal mit ihrem Ergebnis. Ohne Übertragungen ruht er.
     pub(crate) fn spawn_reporter(&self, report: impl Fn(Progress) + Send + 'static) -> Reporter {
@@ -489,6 +514,26 @@ mod tests {
         assert_eq!(phase(1), Some(Phase::Failed("Verbindung getrennt".into())));
         assert_eq!(phase(2), Some(Phase::Running));
         assert_eq!(phase(3), Some(Phase::Running));
+    }
+
+    #[test]
+    fn revoked_rights_cancel_only_that_kind_direction_and_peer() {
+        let transfers = Transfers::new();
+        let clipboard = |peer: &str| Info { kind: Kind::Clipboard, peer: peer.into(), ..info(10) };
+        let drag = transfers.begin_sending(1, info(10));
+        let copied = transfers.begin_sending(2, clipboard("laptop"));
+        let _other = transfers.begin_sending(3, clipboard("mac"));
+        transfers.begin(Direction::Receiving, 4, clipboard("laptop"), || {});
+        assert_eq!(transfers.cancel_with("laptop", Direction::Sending, Kind::Clipboard), 1);
+        assert!(copied.is_cancelled() && !drag.is_cancelled());
+
+        let (out, _) = collect(&transfers, Instant::now());
+        let phase = |id| out.iter().find(|p| p.transfer == id).map(|p| p.phase.clone());
+        assert_eq!(phase(2), Some(Phase::Cancelled { by_peer: false }));
+        for id in [1, 3, 4] {
+            assert_eq!(phase(id), Some(Phase::Running), "Übertragung {id}");
+        }
+        assert_eq!(transfers.cancel_with("laptop", Direction::Sending, Kind::Clipboard), 0, "läuft nicht mehr");
     }
 
     #[test]
