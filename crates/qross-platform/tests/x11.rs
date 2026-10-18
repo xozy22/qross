@@ -93,27 +93,10 @@ fn x11_capture_and_injection() {
             injector.inject(&Inject::Key { key, down });
         }
     };
-    // DIAGNOSE (wieder entfernen)
-    let map = conn.get_modifier_mapping().unwrap().reply().unwrap();
-    eprintln!("DIAG Modifier-Map ({} je Modifier): {:?}", map.keycodes_per_modifier(), map.keycodes);
     hotkey(&mut injector);
-    let keymap = conn.query_keymap().unwrap().reply().unwrap().keys;
-    let down = |code: usize| keymap[code / 8] & (1 << (code % 8)) != 0;
-    eprintln!("DIAG direkt nach dem Einspeisen: Strg(37) {} Alt(64) {} 2(11) {}", down(37), down(64), down(11));
-    let (fast, fast_events) = diag_wait(&mut rx, 1500);
-    let fast_keys = collect_keys(&conn, Duration::from_secs(1), 6);
-    eprintln!("DIAG lokal schnell: {fast:?}, Ereignisse {fast_events:?}, Fenster {fast_keys:?}");
-    let slow_hotkey = |injector: &mut Box<dyn qross_platform::Injector>| {
-        let (ctrl, alt, digit2) = (KeyCode(0xE0), KeyCode(0xE2), KeyCode(0x1F));
-        for (key, down) in [(ctrl, true), (alt, true), (digit2, true), (digit2, false), (alt, false), (ctrl, false)] {
-            injector.inject(&Inject::Key { key, down });
-            std::thread::sleep(Duration::from_millis(40));
-        }
-    };
-    slow_hotkey(&mut injector);
-    let (slow, slow_events) = diag_wait(&mut rx, 1500);
-    let slow_keys = collect_keys(&conn, Duration::from_secs(1), 6);
-    eprintln!("DIAG lokal langsam: {slow:?}, Ereignisse {slow_events:?}, Fenster {slow_keys:?}");
+    assert_eq!(wait_event(&mut rx, |e| matches!(e, CaptureEvent::SwitchTo(_))), laptop);
+    let keycodes = collect_keys(&conn, Duration::from_secs(2), 4);
+    assert_eq!(keycodes, vec![(37, true), (64, true), (64, false), (37, false)], "Strg, Alt – die 2 (Keycode 11) nicht");
 
     // Remote: relative Bewegung, Klick und Taste werden abgefangen und gemeldet
     capture.capture_remote();
@@ -138,8 +121,10 @@ fn x11_capture_and_injection() {
 
     // Remote: Das Kürzel meldet den Wechsel, die 2 selbst geht nicht an den Client
     hotkey(&mut injector);
-    let (remote, remote_events) = diag_wait(&mut rx, 1500);
-    eprintln!("DIAG remote schnell: {remote:?}, Ereignisse {remote_events:?}");
+    assert_eq!(wait_event(&mut rx, |e| matches!(e, CaptureEvent::SwitchTo(_))), laptop);
+    std::thread::sleep(Duration::from_millis(200));
+    let rest: Vec<CaptureEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(!rest.iter().any(|e| matches!(e, CaptureEvent::Key { key: KeyCode(0x1F), .. })), "{rest:?}");
 
     // Zurück: Grab endet, Zeiger an der gewünschten Stelle
     capture.release(42, 43);
@@ -148,27 +133,6 @@ fn x11_capture_and_injection() {
     injector.inject(&Inject::Key { key: KeyCode::A, down: true });
     injector.inject(&Inject::Key { key: KeyCode::A, down: false });
     assert_eq!(collect_keys(&conn, Duration::from_secs(2), 2).len(), 2, "nach release wieder lokal");
-
-    assert_eq!(fast, Some(laptop.clone()), "lokal schnell");
-    assert_eq!(fast_keys, vec![(37, true), (64, true), (64, false), (37, false)], "Strg, Alt – die 2 (Keycode 11) nicht");
-    assert_eq!(slow, Some(laptop.clone()), "lokal langsam");
-    assert_eq!(remote, Some(laptop), "remote");
-    assert!(!remote_events.iter().any(|e| matches!(e, CaptureEvent::Key { key: KeyCode(0x1F), .. })), "{remote_events:?}");
-}
-
-/// DIAGNOSE (wieder entfernen): alle Ereignisse bis `ms`, dazu das erste `SwitchTo`
-fn diag_wait(rx: &mut tokio::sync::mpsc::UnboundedReceiver<CaptureEvent>, ms: u64) -> (Option<CaptureEvent>, Vec<CaptureEvent>) {
-    let start = Instant::now();
-    let mut events = Vec::new();
-    while start.elapsed() < Duration::from_millis(ms) {
-        match rx.try_recv() {
-            Ok(event) => events.push(event),
-            Err(_) => std::thread::sleep(Duration::from_millis(5)),
-        }
-    }
-    let switch = events.iter().find(|e| matches!(e, CaptureEvent::SwitchTo(_))).cloned();
-    events.retain(|e| !matches!(e, CaptureEvent::EdgeHit { .. }));
-    (switch, events)
 }
 
 fn collect_keys(conn: &impl Connection, limit: Duration, want: usize) -> Vec<(u8, bool)> {
@@ -185,6 +149,7 @@ fn collect_keys(conn: &impl Connection, limit: Duration, want: usize) -> Vec<(u8
     keys
 }
 
+#[track_caller]
 fn wait_event(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<CaptureEvent>,
     want: impl Fn(&CaptureEvent) -> bool,
