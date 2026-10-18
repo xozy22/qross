@@ -11,11 +11,13 @@ mod clipboard;
 pub mod clipfiles;
 pub mod discovery;
 pub mod files;
+pub mod game;
 mod identity;
 pub mod quality;
 pub mod server;
 mod streams;
-mod tls;
+/// TLS-Konfiguration; öffentlich auch für Tests, die ältere Gegenstellen nachbauen
+pub mod tls;
 mod trust;
 
 pub use identity::{Fingerprint, Identity};

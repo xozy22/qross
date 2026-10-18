@@ -13,15 +13,17 @@ use qross_core::Inject;
 use qross_platform::{Clipboard, Injector};
 use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
-    FileEntry, Input, MouseMove, Platform, Rect, ScreenInfo, StreamKind, DEFAULT_PORT, MONITORS_SINCE, PROTOCOL_VERSION,
+    FileEntry, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, StreamKind, DEFAULT_PORT,
+    GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION,
 };
 use quinn::{Connection, Endpoint, RecvStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Incoming, Notify, Ready};
 use crate::files::{self, FileOutcome, Receiver, Staging};
+use crate::game::{self, Detector};
 use crate::quality::{self, Quality};
 use crate::streams::{read_kind, send_drag_message};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
@@ -52,12 +54,16 @@ pub struct ClientPlatform {
     pub screen: Box<dyn Fn() -> Rect + Send + Sync>,
     /// Die einzelnen Monitore in den Koordinaten von `screen` (leer: unbekannt)
     pub monitors: Box<dyn Fn() -> Vec<Rect> + Send + Sync>,
+    /// Spielemodus: was im Vordergrund läuft (üblich: `qross_platform::game_state`; ohne
+    /// Spielemodus `GameState::default`, dann meldet der Client nie etwas)
+    pub game: Detector,
 }
 
-/// Abfrage der eigenen Bildschirmfläche (aus `ClientPlatform`)
+/// Abfrage der eigenen Bildschirmfläche und des Vordergrunds (aus `ClientPlatform`)
 struct ScreenQuery {
     bounds: Box<dyn Fn() -> Rect + Send + Sync>,
     monitors: Box<dyn Fn() -> Vec<Rect> + Send + Sync>,
+    game: watch::Receiver<GameState>,
 }
 
 /// Fehler, bei denen eine Wiederverbindung sinnlos ist.
@@ -74,6 +80,8 @@ impl std::error::Error for Fatal {}
 
 enum FromServer {
     Move(MouseMove),
+    /// Relative Bewegung (Spielemodus)
+    Delta(MouseDelta),
     Input(Input),
     Clipboard(ClipboardData),
     File(FileOutcome),
@@ -171,8 +179,8 @@ async fn run_inner(
     platform: ClientPlatform,
     notices: Notices<'_>,
 ) -> Result<()> {
-    let ClientPlatform { mut injector, clipboard, screen, monitors } = platform;
-    let screen = ScreenQuery { bounds: screen, monitors };
+    let ClientPlatform { mut injector, clipboard, screen, monitors, game } = platform;
+    let screen = ScreenQuery { bounds: screen, monitors, game: game::watch(game) };
     let mut clipboard = ClipboardSide {
         hub: ClipboardHub::spawn(clipboard),
         incoming: Incoming::new(Staging::persistent(&clipfiles::default_store())?),
@@ -193,7 +201,7 @@ async fn run_inner(
             match job {
                 ToInjector::Inject(event) => {
                     match event {
-                        Inject::MoveTo { .. } => tracing::trace!(?event, "einspeisen"),
+                        Inject::MoveTo { .. } | Inject::MoveBy { .. } => tracing::trace!(?event, "einspeisen"),
                         _ => debug!(?event, "einspeisen"),
                     }
                     injector.inject(&event);
@@ -279,6 +287,14 @@ async fn session(
         debug!(?monitors, "Monitore an den Server gemeldet");
         write_frame(&mut control, &Control::Monitors(monitors.clone())).await?;
     }
+    // Spielemodus nur an Server, die ihn kennen; anfangs nur, wenn schon etwas im Vollbild läuft.
+    let report_game = server_version >= GAME_MODE_SINCE;
+    let mut game_rx = screen.game.clone();
+    let mut game = *game_rx.borrow_and_update();
+    if report_game && game.is_active() {
+        info!("Spielemodus: {} im Vordergrund, an den Server gemeldet", game::describe(game));
+        write_frame(&mut control, &Control::Game(game)).await?;
+    }
     // Läuft bis zum Ende dieser Sitzung
     let _quality = notices.cloned().map(|tx| {
         quality::monitor(conn.clone(), move |q| {
@@ -316,6 +332,12 @@ async fn session(
                         if let Some(event) = state.on_move(mv) {
                             moves += 1;
                             last_pos = (mv.x, mv.y);
+                            let _ = inject.send(ToInjector::Inject(event));
+                        }
+                    }
+                    FromServer::Delta(delta) => {
+                        if let Some(event) = state.on_delta(delta) {
+                            moves += 1;
                             let _ = inject.send(ToInjector::Inject(event));
                         }
                     }
@@ -417,6 +439,14 @@ async fn session(
                         }
                     }
                 }
+                Ok(()) = game_rx.changed(), if report_game => {
+                    let now = *game_rx.borrow_and_update();
+                    if now != game {
+                        game = now;
+                        debug!("Spielemodus: {} im Vordergrund, an den Server gemeldet", game::describe(game));
+                        write_frame(&mut control, &Control::Game(game)).await?;
+                    }
+                }
                 reason = conn.closed() => return Err(anyhow!("Verbindung getrennt: {reason}")),
             }
         }
@@ -507,6 +537,9 @@ async fn receive_datagrams(conn: Connection, tx: mpsc::UnboundedSender<FromServe
         match decode_datagram(&bytes) {
             Ok(Datagram::MouseMove(mv)) => {
                 let _ = tx.send(FromServer::Move(mv));
+            }
+            Ok(Datagram::MouseDelta(delta)) => {
+                let _ = tx.send(FromServer::Delta(delta));
             }
             Err(e) => debug!("ungültiges Datagramm: {e}"),
         }

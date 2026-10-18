@@ -11,7 +11,7 @@ use qross_net::discovery;
 use qross_net::server::{Server, ServerConfig, ServerPlatform};
 use qross_net::{Fingerprint, Identity, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{LogInjector, MemoryClipboard};
-use qross_proto::Rect;
+use qross_proto::{GameState, Rect};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -59,6 +59,9 @@ enum Command {
         /// Eingaben nur protokollieren statt ausführen (Test auf einem einzigen Rechner)
         #[arg(long)]
         dry_run: bool,
+        /// Spielemodus aus: dem Server nie melden, dass hier ein Vollbildprogramm läuft
+        #[arg(long)]
+        no_game_mode: bool,
     },
     /// Qross-Server im LAN suchen
     Discover,
@@ -94,7 +97,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Server { config } => run_server(&data_dir, &config).await,
-        Command::Client { server, name, server_fingerprint, clipboard_max_mb, dry_run } => {
+        Command::Client { server, name, server_fingerprint, clipboard_max_mb, dry_run, no_game_mode } => {
             let server = match server {
                 Some(server) => server,
                 None => find_server().await?,
@@ -105,7 +108,7 @@ async fn main() -> Result<()> {
                 server_fingerprint,
                 clipboard_file_limit: config::mb_to_bytes(clipboard_max_mb),
             };
-            run_client(&data_dir, config, dry_run).await
+            run_client(&data_dir, config, dry_run, !no_game_mode).await
         }
         Command::Discover => {
             let servers = discovery::discover(DISCOVERY_WAIT).await?;
@@ -148,18 +151,23 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     if let Some(lock) = file.keys.config()?.options.lock {
         info!("Fang-Taste: {} hält den Cursor auf dem aktuellen Bildschirm fest", lock.label(cfg!(target_os = "macos")));
     }
+    if file.game.enabled {
+        info!("Spielemodus: Bei Vollbildprogrammen bleibt der Cursor auf dem Rechner, auf dem sie laufen");
+    }
 
     let server = Server::bind(ServerConfig { name, listen: file.listen, layout }, &identity, trust)?
         .with_switch_options(file.switching.options())
         .with_discovery(file.discovery)
         .with_clipboard_file_limit(file.clipboard.file_limit())
-        .with_keys(file.keys.config()?);
+        .with_keys(file.keys.config()?)
+        .with_game_mode(file.game.enabled);
     let platform = ServerPlatform {
         capture,
         events: events_rx,
         clipboard: qross_platform::clipboard(),
         screen: Box::new(qross_platform::screen_bounds),
         monitors: Box::new(qross_platform::monitors),
+        game: Box::new(qross_platform::game_state),
     };
     tokio::select! {
         result = server.run(platform) => result,
@@ -170,7 +178,7 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     }
 }
 
-async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool) -> Result<()> {
+async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool, game_mode: bool) -> Result<()> {
     let identity = Identity::load_or_create(data_dir)?;
     let fingerprint = identity.fingerprint();
     info!("Dieser Rechner: „{}“, Fingerprint {fingerprint}", config.name);
@@ -185,6 +193,7 @@ async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool) -> Res
             clipboard: Box::new(MemoryClipboard::default()),
             screen: Box::new(|| Rect::new(0, 0, 1920, 1080)),
             monitors: Box::new(Vec::new),
+            game: Box::new(GameState::default),
         }
     } else {
         ClientPlatform {
@@ -192,6 +201,7 @@ async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool) -> Res
             clipboard: qross_platform::clipboard(),
             screen: Box::new(qross_platform::screen_bounds),
             monitors: Box::new(qross_platform::monitors),
+            game: if game_mode { Box::new(qross_platform::game_state) } else { Box::new(GameState::default) },
         }
     };
     tokio::select! {

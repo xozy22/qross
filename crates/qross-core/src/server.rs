@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use qross_proto::{Edge, Input, MouseButton, MouseMove, Rect};
+use qross_proto::{Edge, GameState, Input, MouseButton, MouseDelta, MouseMove, Rect};
 
 use crate::input::CaptureEvent;
 use crate::keys::KeyMap;
@@ -25,6 +25,10 @@ pub enum ServerEvent {
     RemoteDragOffer { client: String, probe: u32, transfer: u64, has_files: bool },
     /// Die eigenen Monitore des Servers
     LocalMonitors(Vec<Rect>),
+    /// Spielemodus: Was im Vordergrund des Servers selbst läuft
+    LocalGame(GameState),
+    /// Spielemodus: Was im Vordergrund eines Clients läuft (seit Qross 0.6)
+    ClientGame { name: String, game: GameState },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +59,20 @@ pub enum Action {
     DropIncoming { transfer: u64, x: i32, y: i32 },
     /// Nicht abgelegt (Cursor ging zurück, Client getrennt): Übertragung verwerfen
     CancelIncoming { transfer: u64 },
+    /// Als Datagramm senden: relative Bewegung statt Position (Spielemodus)
+    MoveBy { to: String, delta: MouseDelta },
+}
+
+/// Warum der Cursor gerade auf seinem Bildschirm bleibt
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// Er darf wechseln
+    Free,
+    /// Fang-Taste
+    Locked,
+    /// Spielemodus: Auf dem Bildschirm läuft ein Vollbildprogramm oder ein Spiel hat den Zeiger
+    /// eingefangen. Die Fang-Taste löst den Halt, bis der Cursor den Bildschirm wechselt.
+    Game(GameState),
 }
 
 /// Wann der Cursor den Bildschirm wechseln darf.
@@ -99,6 +117,15 @@ pub struct ServerState {
     seq: u32,
     /// Cursor bleibt auf dem aktuellen Bildschirm (Rollen-Taste), z. B. für Spiele
     locked: bool,
+    /// Spielemodus: bei Vollbild oder eingefangenem Zeiger auf dem aktiven Bildschirm festhalten
+    /// und Clients dort relative Bewegungen schicken
+    game_mode: bool,
+    /// Was im Vordergrund des Servers bzw. der Clients läuft
+    local_game: GameState,
+    games: HashMap<String, GameState>,
+    /// Die Fang-Taste hat den Halt des Spielemodus gelöst: bis der Cursor den Bildschirm wechselt
+    /// oder dort ein Vollbild beginnt bzw. endet
+    game_released: bool,
     /// Laufende Drag-Prüfung an dieser Kantenposition
     probe: Option<(Edge, i32, i32)>,
     /// Dateien werden gerade auf den aktiven Client gezogen
@@ -131,6 +158,10 @@ impl ServerState {
             epoch: 0,
             seq: 0,
             locked: false,
+            game_mode: true,
+            local_game: GameState::default(),
+            games: HashMap::new(),
+            game_released: false,
             probe: None,
             drag: None,
             next_transfer: 1,
@@ -154,8 +185,58 @@ impl ServerState {
         self.options = options;
     }
 
+    /// Spielemodus ein- oder ausschalten (Standard: an).
+    pub fn set_game_mode(&mut self, enabled: bool) {
+        self.game_mode = enabled;
+    }
+
+    /// Per Fang-Taste festgehalten?
     pub fn is_locked(&self) -> bool {
         self.locked
+    }
+
+    /// Warum der Cursor gerade nicht wechselt (die Fang-Taste geht dem Spielemodus vor)
+    pub fn hold(&self) -> Hold {
+        if self.locked {
+            Hold::Locked
+        } else {
+            self.game_hold().map_or(Hold::Free, Hold::Game)
+        }
+    }
+
+    fn held(&self) -> bool {
+        self.locked || self.game_hold().is_some()
+    }
+
+    /// Hält der Spielemodus den Cursor fest? Dann mit dem Zustand des aktiven Bildschirms.
+    /// Steht er dabei auf einem Client, bekommt der relative Bewegungen.
+    fn game_hold(&self) -> Option<GameState> {
+        let game = match &self.active {
+            Active::Local => self.local_game,
+            Active::Remote { name, .. } => self.games.get(name).copied().unwrap_or_default(),
+        };
+        (self.game_mode && game.is_active() && !self.game_released).then_some(game)
+    }
+
+    /// Neuer Spielemodus-Zustand von `screen` (`None`: der Server selbst).
+    fn set_game(&mut self, screen: Option<String>, game: GameState) {
+        let (old, on_it) = match &screen {
+            None => (self.local_game, self.active == Active::Local),
+            Some(name) => (
+                self.games.get(name).copied().unwrap_or_default(),
+                matches!(&self.active, Active::Remote { name: active, .. } if active == name),
+            ),
+        };
+        // Beginnt oder endet dort, wo der Cursor ist, ein Vollbild, gilt wieder der Spielemodus.
+        if on_it && old.is_active() != game.is_active() {
+            self.game_released = false;
+        }
+        match screen {
+            None => self.local_game = game,
+            Some(name) => {
+                self.games.insert(name, game);
+            }
+        }
     }
 
     /// Name des Bildschirms, auf dem sich der Cursor gerade befindet
@@ -192,6 +273,7 @@ impl ServerState {
             }
             ServerEvent::ClientDisconnected { name } => {
                 self.clients.remove(&name);
+                self.games.remove(&name);
                 if matches!(&self.active, Active::Remote { name: active, .. } if *active == name) {
                     self.go_local(self.local.center(), &mut out);
                 }
@@ -200,6 +282,12 @@ impl ServerState {
             ServerEvent::LocalMonitors(monitors) => self.local.set_monitors(monitors),
             ServerEvent::RemoteDragOffer { client, probe, transfer, has_files } => {
                 self.on_remote_offer(client, probe, transfer, has_files, &mut out)
+            }
+            ServerEvent::LocalGame(game) => self.set_game(None, game),
+            ServerEvent::ClientGame { name, game } => {
+                if self.clients.contains_key(&name) {
+                    self.set_game(Some(name), game);
+                }
             }
         }
         out
@@ -266,7 +354,7 @@ impl ServerState {
     fn on_capture(&mut self, event: CaptureEvent, now: Instant, out: &mut Vec<Action>) {
         match event {
             CaptureEvent::EdgeHit { edge, x, y, buttons_down } => {
-                if self.active != Active::Local || self.locked {
+                if self.active != Active::Local || self.held() {
                     return;
                 }
                 let Some(target) = self.layout.neighbor(&self.me, edge).map(str::to_owned) else {
@@ -353,7 +441,16 @@ impl ServerState {
                     self.go_local(self.local.center(), out);
                 }
             }
-            CaptureEvent::ToggleLock => self.locked = !self.locked,
+            CaptureEvent::ToggleLock => {
+                if self.held() {
+                    // Löst beides: die Fang-Taste und den Halt des Spielemodus
+                    self.game_released = self.game_hold().is_some();
+                    self.locked = false;
+                } else {
+                    self.locked = true;
+                    self.game_released = false;
+                }
+            }
             CaptureEvent::LocalDrop { x, y } => {
                 if let (Some(transfer), Active::Local) = (self.incoming.take(), &self.active) {
                     out.push(Action::DropIncoming { transfer, x, y });
@@ -378,6 +475,19 @@ impl ServerState {
         let (nx, ny) = (x.saturating_add(dx), y.saturating_add(dy));
         // Nur auf Monitorflächen bewegen (ohne Monitorliste: im Rechteck klemmen)
         let (cx, cy) = screen.step((x, y), (nx, ny));
+
+        if self.game_hold().is_some() {
+            // Spielemodus: die Bewegung selbst schicken, damit ein Spiel mit eingefangenem Zeiger
+            // auch am Rand des Bildschirms weiterdreht. Die Position läuft geklemmt mit, für Klicks
+            // und für die Zeit danach. Nur Clients, die `Control::Game` senden, kommen hierher.
+            self.active = Active::Remote { name: name.clone(), x: cx, y: cy };
+            if (dx, dy) != (0, 0) {
+                self.seq = self.seq.wrapping_add(1);
+                let delta = MouseDelta { epoch: self.epoch, seq: self.seq, dx, dy };
+                out.push(Action::MoveBy { to: name, delta });
+            }
+            return;
+        }
 
         // Wechsel über die äußere Kante, und nur dort, wo ein Monitor an ihr liegt
         let crossing = if self.locked {
@@ -431,6 +541,7 @@ impl ServerState {
             Active::Remote { name, .. } => out.push(Action::Send { to: name.clone(), input: Input::Leave }),
         }
         self.epoch = self.epoch.wrapping_add(1);
+        self.game_released = false;
         out.push(Action::Send { to: target.clone(), input: Input::Enter { epoch: self.epoch, x, y } });
         out.push(Action::SyncClipboard { to: target.clone() });
         self.active = Active::Remote { name: target, x, y };
@@ -438,6 +549,7 @@ impl ServerState {
 
     fn go_local(&mut self, (x, y): (i32, i32), out: &mut Vec<Action>) {
         self.active = Active::Local;
+        self.game_released = false;
         self.drag = None;
         self.reset_remote_drag(out);
         out.push(Action::ReleaseCapture { x, y });
@@ -907,6 +1019,153 @@ mod tests {
         s.handle(ServerEvent::ClientScreenChanged { name: "mac".into(), screen: Rect::new(0, 0, 1512, 982) });
         s.handle(ServerEvent::ClientMonitors { name: "mac".into(), monitors: vec![Rect::new(0, 0, 1512, 982)] });
         assert_eq!(s.handle(delta(-11, 0)), vec![move_mac(2, 1500, 418)]);
+    }
+
+    const FULLSCREEN: GameState = GameState { fullscreen: true, captured: false };
+    const CAPTURED: GameState = GameState { fullscreen: false, captured: true };
+
+    fn laptop_game(game: GameState) -> ServerEvent {
+        ServerEvent::ClientGame { name: "laptop".into(), game }
+    }
+
+    fn move_by(seq: u32, dx: i32, dy: i32) -> Action {
+        Action::MoveBy { to: "laptop".into(), delta: MouseDelta { epoch: 1, seq, dx, dy } }
+    }
+
+    #[test]
+    fn fullscreen_on_the_server_keeps_the_cursor_there() {
+        let mut s = state();
+        s.handle(ServerEvent::LocalGame(FULLSCREEN));
+        assert_eq!(s.hold(), Hold::Game(FULLSCREEN));
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).is_empty(), "Vollbild: kein Wechsel");
+        assert!(!s.is_locked(), "die Fang-Taste bleibt unberührt");
+
+        // Das Spiel endet: wieder frei
+        s.handle(ServerEvent::LocalGame(GameState::default()));
+        assert_eq!(s.hold(), Hold::Free);
+        assert!(!s.handle(edge_hit(Edge::Right, 1919, 540)).is_empty());
+        assert_eq!(s.active_screen(), "laptop");
+    }
+
+    #[test]
+    fn game_mode_can_be_switched_off() {
+        let mut s = state();
+        s.set_game_mode(false);
+        s.handle(ServerEvent::LocalGame(CAPTURED));
+        assert_eq!(s.hold(), Hold::Free);
+        assert!(!s.handle(edge_hit(Edge::Right, 1919, 540)).is_empty());
+        s.handle(laptop_game(FULLSCREEN));
+        assert!(matches!(s.handle(delta(5, 0)).as_slice(), [Action::Move { .. }]), "absolute Positionen wie bisher");
+    }
+
+    #[test]
+    fn game_on_a_client_holds_the_cursor_and_sends_deltas() {
+        let mut s = state();
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        s.handle(laptop_game(CAPTURED));
+        assert_eq!(s.hold(), Hold::Game(CAPTURED));
+        // Weit über die linke Kante: kein Wechsel, und das Spiel bekommt die volle Bewegung
+        assert_eq!(s.handle(delta(-5000, 3)), vec![move_by(1, -5000, 3)]);
+        assert_eq!(s.active_screen(), "laptop");
+        assert_eq!(s.handle(delta(-7, 0)), vec![move_by(2, -7, 0)], "auch am Rand geht nichts verloren");
+        assert!(s.handle(delta(0, 0)).is_empty());
+        // Klicks tragen die mitgeführte, geklemmte Position
+        let click = ServerEvent::Capture(CaptureEvent::Button { button: MouseButton::Left, down: true });
+        assert_eq!(
+            s.handle(click),
+            vec![Action::Send {
+                to: "laptop".into(),
+                input: Input::Button { button: MouseButton::Left, down: true, x: 0, y: 402 }
+            }]
+        );
+        s.handle(ServerEvent::Capture(CaptureEvent::Button { button: MouseButton::Left, down: false }));
+
+        // Das Spiel endet: wieder absolute Positionen, und die linke Kante führt zurück
+        s.handle(laptop_game(GameState::default()));
+        assert_eq!(s.hold(), Hold::Free);
+        assert_eq!(s.handle(delta(5, 0)), vec![move_laptop(3, 5, 402)]);
+        assert_eq!(
+            s.handle(delta(-50, 0)),
+            vec![Action::Send { to: "laptop".into(), input: Input::Leave }, Action::ReleaseCapture { x: 1918, y: 542 }]
+        );
+    }
+
+    fn move_laptop(seq: u32, x: i32, y: i32) -> Action {
+        Action::Move { to: "laptop".into(), mv: MouseMove { epoch: 1, seq, x, y } }
+    }
+
+    #[test]
+    fn lock_key_releases_the_game_hold_until_the_screen_changes() {
+        let lock = ServerEvent::Capture(CaptureEvent::ToggleLock);
+        let mut s = state();
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        s.handle(laptop_game(FULLSCREEN));
+        s.handle(lock.clone());
+        assert_eq!(s.hold(), Hold::Free, "Fang-Taste löst den Spielemodus");
+        assert!(!s.is_locked());
+        // Frei: absolute Positionen, damit der sichtbare Cursor zur Kante findet
+        assert!(s.handle(delta(-5000, 0)).contains(&Action::Send { to: "laptop".into(), input: Input::Leave }));
+        assert_eq!(s.active_screen(), "pc");
+
+        // Zurück auf den Laptop: Das Vollbild läuft noch, also wieder festgehalten
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert_eq!(s.hold(), Hold::Game(FULLSCREEN));
+        // Ein zweiter Druck hält per Fang-Taste fest, die relativen Bewegungen bleiben
+        s.handle(lock.clone());
+        s.handle(lock.clone());
+        assert_eq!(s.hold(), Hold::Locked);
+        assert!(matches!(s.handle(delta(-9, 0)).as_slice(), [Action::MoveBy { .. }]));
+        s.handle(lock);
+        assert_eq!(s.hold(), Hold::Free);
+        assert!(matches!(s.handle(delta(1, 0)).as_slice(), [Action::Move { .. }]));
+    }
+
+    #[test]
+    fn a_new_fullscreen_holds_again_after_releasing() {
+        let lock = ServerEvent::Capture(CaptureEvent::ToggleLock);
+        let mut s = state();
+        s.handle(ServerEvent::LocalGame(FULLSCREEN));
+        s.handle(lock.clone());
+        assert_eq!(s.hold(), Hold::Free);
+        // Wechsel innerhalb des Vollbilds (Menü → Spiel mit eingefangenem Zeiger): bleibt gelöst
+        s.handle(ServerEvent::LocalGame(GameState { fullscreen: true, captured: true }));
+        assert_eq!(s.hold(), Hold::Free);
+        // Ende und neuer Start: wieder festgehalten
+        s.handle(ServerEvent::LocalGame(GameState::default()));
+        s.handle(ServerEvent::LocalGame(FULLSCREEN));
+        assert_eq!(s.hold(), Hold::Game(FULLSCREEN));
+        // Ohne Vollbild sperrt und löst die Fang-Taste wie bisher
+        s.handle(ServerEvent::LocalGame(GameState::default()));
+        s.handle(lock.clone());
+        assert_eq!(s.hold(), Hold::Locked);
+        s.handle(lock);
+        assert_eq!(s.hold(), Hold::Free);
+    }
+
+    #[test]
+    fn game_states_of_other_screens_do_not_hold() {
+        let mut s = state();
+        s.handle(laptop_game(FULLSCREEN));
+        assert_eq!(s.hold(), Hold::Free, "Vollbild auf dem Laptop, Cursor auf dem PC");
+        s.handle(ServerEvent::ClientGame { name: "unbekannt".into(), game: FULLSCREEN });
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert_eq!(s.hold(), Hold::Game(FULLSCREEN));
+        // Getrennt und neu verbunden: der alte Zustand gilt nicht mehr
+        s.handle(ServerEvent::ClientDisconnected { name: "laptop".into() });
+        s.handle(ServerEvent::ClientConnected { name: "laptop".into(), screen: LAPTOP });
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert_eq!(s.hold(), Hold::Free);
+        assert!(matches!(s.handle(delta(1, 0)).as_slice(), [Action::Move { .. }]));
+    }
+
+    #[test]
+    fn panic_return_leaves_a_game_on_the_client() {
+        let mut s = state();
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        s.handle(laptop_game(CAPTURED));
+        let actions = s.handle(ServerEvent::Capture(CaptureEvent::PanicReturn));
+        assert!(actions.contains(&Action::ReleaseCapture { x: 960, y: 540 }), "{actions:?}");
+        assert_eq!((s.active_screen(), s.hold()), ("pc", Hold::Free));
     }
 
     #[test]

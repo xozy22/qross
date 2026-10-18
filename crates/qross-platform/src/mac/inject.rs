@@ -75,6 +75,28 @@ impl MacInjector {
 }
 
 impl MacInjector {
+    /// Bewegung an `self.pos`; mit gedrückter Taste als „Dragged“. Die Deltas lesen Spiele, die
+    /// den Zeiger vom Cursor gelöst haben (Spielemodus).
+    fn post_move(&self, dx: i32, dy: i32) {
+        let (kind, button) = if self.buttons[MouseButton::Left as usize] {
+            (CGEventType::LeftMouseDragged, CGMouseButton::Left)
+        } else if self.buttons[MouseButton::Right as usize] {
+            (CGEventType::RightMouseDragged, CGMouseButton::Right)
+        } else if self.buttons.iter().any(|b| *b) {
+            (CGEventType::OtherMouseDragged, CGMouseButton::Center)
+        } else {
+            (CGEventType::MouseMoved, CGMouseButton::Left)
+        };
+        let event = self.mouse(kind, button);
+        if let Some(e) = &event {
+            if (dx, dy) != (0, 0) {
+                e.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, dx.into());
+                e.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, dy.into());
+            }
+        }
+        self.post(event);
+    }
+
     fn tap_escape(&self) {
         const KVK_ESCAPE: u16 = 0x35;
         for down in [true, false] {
@@ -103,16 +125,16 @@ impl Injector for MacInjector {
         match *event {
             Inject::MoveTo { x, y } => {
                 self.pos = CGPoint::new(x.into(), y.into());
-                let (kind, button) = if self.buttons[MouseButton::Left as usize] {
-                    (CGEventType::LeftMouseDragged, CGMouseButton::Left)
-                } else if self.buttons[MouseButton::Right as usize] {
-                    (CGEventType::RightMouseDragged, CGMouseButton::Right)
-                } else if self.buttons.iter().any(|b| *b) {
-                    (CGEventType::OtherMouseDragged, CGMouseButton::Center)
-                } else {
-                    (CGEventType::MouseMoved, CGMouseButton::Left)
-                };
-                self.post(self.mouse(kind, button));
+                self.post_move(0, 0);
+            }
+            Inject::MoveBy { dx, dy } => {
+                // Vom tatsächlichen Cursor aus: Ein Spiel setzt ihn womöglich selbst zurück.
+                let here = CGEvent::new(self.source.clone()).map(|e| e.location()).unwrap_or(self.pos);
+                let b = super::screen_bounds();
+                let x = (here.x + f64::from(dx)).clamp(b.x.into(), b.right().into());
+                let y = (here.y + f64::from(dy)).clamp(b.y.into(), b.bottom().into());
+                self.pos = CGPoint::new(x, y);
+                self.post_move(dx, dy);
             }
             Inject::Button { button, down } => {
                 self.buttons[button as usize] = down;

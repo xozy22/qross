@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use qross_core::keys::KeyOptions;
 use qross_core::{CaptureEvent, Inject};
-use qross_proto::{ClipboardData, Rect};
+use qross_proto::{ClipboardData, GameState, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Steuerung der Eingabe-Erfassung auf dem Server.
@@ -156,6 +156,18 @@ pub fn monitors() -> Vec<Rect> {
         }
     }
     monitors
+}
+
+/// Spielemodus: Läuft im Vordergrund ein Vollbildprogramm, bzw. hat ein Programm den Zeiger
+/// eingefangen? Wird regelmäßig abgefragt und darf dafür ein paar Millisekunden brauchen.
+/// - Windows: Auskunft der Shell (`SHQueryUserNotificationState`) oder Vordergrundfenster ohne
+///   Titelleiste, das seinen Monitor bedeckt; eingefangen per `GetClipCursor`
+/// - macOS: das fokussierte Fenster ist im Vollbild (`AXFullScreen`) oder bedeckt einen Bildschirm
+///   samt Menüleiste; Einfangen lässt sich nicht abfragen
+/// - X11: das aktive Fenster hat `_NET_WM_STATE_FULLSCREEN`; Einfangen lässt sich nicht abfragen,
+///   ohne selbst nach dem Zeiger zu greifen
+pub fn game_state() -> GameState {
+    imp::game_state()
 }
 
 /// Startet die Erfassung. Ereignisse landen in `events`.

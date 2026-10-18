@@ -169,7 +169,13 @@ fn tooltip(status: &Status) -> String {
         (_, Phase::Starting) => "startet …".to_owned(),
         _ => status.message.clone(),
     };
-    let lock = if status.locked { " · Cursor gesperrt" } else { "" };
+    let lock = if status.locked {
+        " · Cursor gesperrt"
+    } else if status.game_hold.is_some() {
+        " · Spielemodus hält den Cursor"
+    } else {
+        ""
+    };
     format!("Qross {role} – {detail}{lock}")
 }
 

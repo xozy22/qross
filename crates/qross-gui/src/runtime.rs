@@ -18,7 +18,7 @@ use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, Stop
 use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{LogInjector, MemoryClipboard};
 use qross_platform::Capture;
-use qross_proto::{Platform, Rect, DEFAULT_PORT};
+use qross_proto::{GameState, Platform, Rect, DEFAULT_PORT};
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
 use tauri::{AppHandle, Emitter};
@@ -83,6 +83,9 @@ pub struct Status {
     pub cursor_on: Option<String>,
     /// Server: Cursor per Rollen-Taste auf `cursor_on` festgehalten
     pub locked: bool,
+    /// Server: Der Spielemodus hält den Cursor auf `cursor_on` fest, weil dort ein Programm im
+    /// Vollbild läuft (`fullscreen`) oder ein Spiel den Zeiger eingefangen hat (`captured`)
+    pub game_hold: Option<&'static str>,
     pub clients: Vec<ClientInfo>,
     pub pending: Vec<PendingClient>,
     /// Client: Name des verbundenen Servers
@@ -363,7 +366,8 @@ impl Runtime {
             .with_switch_options(s.switch_options())
             .with_discovery(s.discovery)
             .with_clipboard_file_limit(settings.clipboard_file_limit())
-            .with_keys(keys);
+            .with_keys(keys)
+            .with_game_mode(settings.game_mode);
         let stop = server.stop_handle();
         let platform = ServerPlatform {
             capture,
@@ -371,6 +375,7 @@ impl Runtime {
             clipboard: qross_platform::clipboard(),
             screen: Box::new(qross_platform::screen_bounds),
             monitors: Box::new(qross_platform::monitors),
+            game: Box::new(qross_platform::game_state),
         };
 
         let rt = self.clone();
@@ -456,6 +461,10 @@ impl Runtime {
                 s.local_screen = Some(LocalScreen { width: screen.width, height: screen.height, monitors });
             }),
             ServerNotice::Quality { name, quality } => self.emit_quality(Some(name), quality),
+            ServerNotice::GameHold { screen, game } => self.update(|s| {
+                s.game_hold = game.map(|g| if g.captured { "captured" } else { "fullscreen" });
+                s.cursor_on = Some(screen);
+            }),
         }
     }
 
@@ -569,6 +578,7 @@ impl Runtime {
                 clipboard: Box::new(MemoryClipboard::default()),
                 screen: Box::new(|| Rect::new(0, 0, 1920, 1080)),
                 monitors: Box::new(Vec::new),
+                game: Box::new(GameState::default),
             }
         } else {
             ClientPlatform {
@@ -576,6 +586,7 @@ impl Runtime {
                 clipboard: qross_platform::clipboard(),
                 screen: Box::new(qross_platform::screen_bounds),
                 monitors: Box::new(qross_platform::monitors),
+                game: if settings.game_mode { Box::new(qross_platform::game_state) } else { Box::new(GameState::default) },
             }
         };
 

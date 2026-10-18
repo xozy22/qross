@@ -9,7 +9,7 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
-use x11rb::CURRENT_TIME;
+use x11rb::{CURRENT_TIME, NONE};
 
 use crate::keymap_linux::{evdev_from_hid, X11_OFFSET};
 use crate::Injector;
@@ -49,6 +49,13 @@ impl Injector for X11Injector {
                 let clamp = |v: i32| v.clamp(i16::MIN.into(), i16::MAX.into()) as i16;
                 // detail 0 = absolute Position
                 self.fake(MOTION_NOTIFY_EVENT, 0, clamp(x), clamp(y));
+            }
+            Inject::MoveBy { dx, dy } => {
+                // detail 1 = relativ, wie XTestFakeRelativeMotionEvent (dort ohne Root-Fenster)
+                let clamp = |v: i32| v.clamp(i16::MIN.into(), i16::MAX.into()) as i16;
+                if let Err(e) = self.conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 1, CURRENT_TIME, NONE, clamp(dx), clamp(dy), 0) {
+                    tracing::warn!("XTest fehlgeschlagen: {e}");
+                }
             }
             Inject::Button { button, down } => {
                 let detail = match button {

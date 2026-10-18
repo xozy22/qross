@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use qross_core::keys::KeyConfig;
-use qross_core::server::{Action, ServerEvent, ServerState, SwitchOptions};
+use qross_core::server::{Action, Hold, ServerEvent, ServerState, SwitchOptions};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard};
 use qross_proto::{
     encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
-    FileEntry, Input, Platform, Rect, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
+    FileEntry, GameState, Input, Platform, Rect, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming};
 use tokio::sync::{mpsc, oneshot};
@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Notify, Ready};
 use crate::files::{FileOutcome, Receiver, Staging};
+use crate::game::{self, Detector};
 use crate::quality::{self, Quality};
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
@@ -43,6 +44,8 @@ pub struct ServerPlatform {
     pub screen: Box<dyn Fn() -> Rect + Send + Sync>,
     /// Die einzelnen Monitore in den Koordinaten von `screen` (leer: unbekannt)
     pub monitors: Box<dyn Fn() -> Vec<Rect> + Send + Sync>,
+    /// Spielemodus: was im Vordergrund läuft (üblich: `qross_platform::game_state`)
+    pub game: Detector,
 }
 
 pub struct Server {
@@ -57,6 +60,8 @@ pub struct Server {
     clipboard_file_limit: u64,
     /// Fang-Taste, Medientasten, Umbelegung je Rechner
     keys: KeyConfig,
+    /// Bei Vollbild bzw. eingefangenem Zeiger festhalten und relative Bewegungen schicken
+    game_mode: bool,
     fingerprint: Fingerprint,
 }
 
@@ -91,6 +96,10 @@ pub enum ServerNotice {
     LocalScreenChanged { screen: Rect, monitors: Vec<Rect> },
     /// Verbindungsqualität zu einem Client, etwa jede Sekunde (siehe [`quality`]).
     Quality { name: String, quality: Quality },
+    /// Spielemodus: Der Cursor bleibt auf `screen`, weil dort ein Vollbildprogramm läuft bzw. ein
+    /// Spiel den Zeiger eingefangen hat (`game`), oder ist wieder frei (`game: None`). Die
+    /// Fang-Taste löst den Halt; ist sie selbst gedrückt, meldet das `CursorLocked`.
+    GameHold { screen: String, game: Option<GameState> },
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -114,6 +123,7 @@ enum NetEvent {
     },
     ScreenChanged { name: String, id: usize, screen: Rect },
     Monitors { name: String, id: usize, monitors: Vec<Rect> },
+    Game { name: String, id: usize, game: GameState },
     Clipboard { name: String, id: usize, data: ClipboardData },
     ClipboardFiles { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     ClipboardFile { name: String, id: usize, outcome: FileOutcome },
@@ -156,8 +166,17 @@ impl Server {
             discovery,
             clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
             keys: KeyConfig::default(),
+            game_mode: true,
             fingerprint: identity.fingerprint(),
         })
+    }
+
+    /// Spielemodus (Standard: an): Läuft auf dem Rechner mit dem Cursor ein Vollbildprogramm oder
+    /// hat dort ein Spiel den Zeiger eingefangen, bleibt der Cursor dort, und ein Client bekommt
+    /// relative Bewegungen. Clients melden das erst ab Qross 0.6.
+    pub fn with_game_mode(mut self, enabled: bool) -> Self {
+        self.game_mode = enabled;
+        self
     }
 
     /// Fang-Taste, Medientasten und Umbelegung je Rechner (Standard: Rollen-Taste,
@@ -232,7 +251,12 @@ impl Server {
         let (net_tx, mut net_rx) = mpsc::unbounded_channel();
         tokio::spawn(accept_loop(self.endpoint.clone(), net_tx, stagings));
 
-        let ServerPlatform { capture, mut events, clipboard, screen, monitors } = platform;
+        let ServerPlatform { capture, mut events, clipboard, screen, monitors, game } = platform;
+        // Ohne Spielemodus wird gar nicht erst nachgesehen; der Sender hält den Kanal dann offen.
+        let (_no_game, mut local_game) = tokio::sync::watch::channel(GameState::default());
+        if self.game_mode {
+            local_game = game::watch(game);
+        }
         let clipboard = ClipboardHub::spawn(clipboard);
         let files_notify: Notify = {
             let notices = self.notices.clone();
@@ -247,6 +271,7 @@ impl Server {
         let mut state = ServerState::new(self.config.name.clone(), self.config.layout.clone(), local_screen);
         state.handle(ServerEvent::LocalMonitors(local_monitors.clone()));
         state.set_switch_options(self.switching);
+        state.set_game_mode(self.game_mode);
         state.set_key_maps(self.keys.remap.clone());
         capture.set_key_options(self.keys.options);
         let _discovery = self.discovery.then(|| {
@@ -257,6 +282,8 @@ impl Server {
         // Clipboard-Sequenznummer, die ein Client zuletzt bekommen hat
         let clip_synced: ClipSynced = Arc::new(Mutex::new(HashMap::new()));
         let mut screen_poll = tokio::time::interval(Duration::from_secs(2));
+        // Zuletzt gemeldetes Festhalten und der Bildschirm dazu
+        let mut hold = (Hold::Free, self.config.name.clone());
         info!("Server „{}“ lauscht auf {}", self.config.name, self.local_addr()?);
         if !local_monitors.is_empty() {
             info!("eigene Monitore: {}", describe_monitors(&local_monitors));
@@ -285,11 +312,11 @@ impl Server {
                         }
                         let mut actions = state.handle(ServerEvent::Capture(CaptureEvent::MouseDelta { dx, dy }));
                         if let Some(event) = next {
-                            actions.extend(self.on_capture(&mut state, event));
+                            actions.extend(state.handle(ServerEvent::Capture(event)));
                         }
                         actions
                     }
-                    Some(event) => self.on_capture(&mut state, event),
+                    Some(event) => state.handle(ServerEvent::Capture(event)),
                     None => bail!("Eingabe-Erfassung wurde beendet"),
                 },
                 Some(event) = net_rx.recv() => match event {
@@ -347,6 +374,10 @@ impl Server {
                         }
                         state.handle(ServerEvent::ClientMonitors { name, monitors })
                     }
+                    NetEvent::Game { name, id, game } if is_current(&clients, &name, id) => {
+                        debug!("Spielemodus: „{name}“ meldet {}", game::describe(game));
+                        state.handle(ServerEvent::ClientGame { name, game })
+                    }
                     NetEvent::Clipboard { name, id, data } if is_current(&clients, &name, id) => {
                         info!("Zwischenablage von „{name}“: {}", data.summary());
                         incoming.supersede();
@@ -402,6 +433,11 @@ impl Server {
                     }
                     _ => Vec::new(),
                 },
+                Ok(()) = local_game.changed() => {
+                    let game = *local_game.borrow_and_update();
+                    debug!("Spielemodus: auf diesem Rechner {}", game::describe(game));
+                    state.handle(ServerEvent::LocalGame(game))
+                }
                 _ = screen_poll.tick() => {
                     let (now, now_monitors) = (screen(), monitors());
                     let mut actions = Vec::new();
@@ -426,21 +462,42 @@ impl Server {
                 let files = (self.clipboard_file_limit, &files_notify);
                 apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops);
             }
+            self.report_hold(&state, &mut hold);
         }
     }
 
-    fn on_capture(&self, state: &mut ServerState, event: CaptureEvent) -> Vec<Action> {
-        let toggle = event == CaptureEvent::ToggleLock;
-        let actions = state.handle(ServerEvent::Capture(event));
-        if toggle {
-            if state.is_locked() {
-                info!("Cursor auf „{}“ festgehalten (Rollen-Taste löst)", state.active_screen());
+    /// Fang-Taste und Spielemodus: Hat sich geändert, ob und warum der Cursor festgehalten wird?
+    fn report_hold(&self, state: &ServerState, last: &mut (Hold, String)) {
+        let now = (state.hold(), state.active_screen().to_owned());
+        if now == *last {
+            return;
+        }
+        let (old, old_screen) = std::mem::replace(last, now.clone());
+        let (hold, screen) = now;
+        let locked = hold == Hold::Locked;
+        if locked != (old == Hold::Locked) {
+            if locked {
+                info!("Cursor auf „{screen}“ festgehalten (Fang-Taste löst)");
             } else {
                 info!("Cursor wieder frei");
             }
-            self.notify(ServerNotice::CursorLocked { locked: state.is_locked(), screen: state.active_screen().to_owned() });
+            self.notify(ServerNotice::CursorLocked { locked, screen: screen.clone() });
         }
-        actions
+        let game_of = |hold: Hold| match hold {
+            Hold::Game(game) => Some(game),
+            _ => None,
+        };
+        let (game, before) = (game_of(hold), game_of(old));
+        // Neu, beendet, anders (Vollbild ↔ eingefangen) oder auf einem anderen Bildschirm
+        if game != before || (game.is_some() && screen != old_screen) {
+            match game {
+                Some(g) => info!("Spielemodus: Cursor bleibt auf „{screen}“ ({}; Fang-Taste löst)", game::describe(g)),
+                // Mit der Fang-Taste festgehalten: Das hat `CursorLocked` schon gemeldet.
+                None if !locked => info!("Spielemodus: Cursor wieder frei"),
+                None => {}
+            }
+            self.notify(ServerNotice::GameHold { screen, game });
+        }
     }
 
     fn admit(&mut self, name: &str, fingerprint: &Fingerprint, clients: &HashMap<String, ClientHandle>) -> Result<(), String> {
@@ -541,13 +598,8 @@ fn apply(
                 let _ = client.input.send(input);
             }
         }
-        Action::Move { to, mv } => {
-            if let Some(client) = clients.get(&to) {
-                if let Err(e) = client.conn.send_datagram(encode_datagram(&Datagram::MouseMove(mv)).into()) {
-                    debug!("Datagramm an „{to}“ nicht gesendet: {e}");
-                }
-            }
-        }
+        Action::Move { to, mv } => send_datagram(clients, &to, Datagram::MouseMove(mv)),
+        Action::MoveBy { to, delta } => send_datagram(clients, &to, Datagram::MouseDelta(delta)),
         Action::SyncClipboard { to } => {
             let Some(client) = clients.get(&to) else { return };
             let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), client.conn.clone());
@@ -590,6 +642,14 @@ fn apply(
         Action::CancelIncoming { transfer } => {
             debug!("Übertragung {transfer} nicht abgelegt");
             drops.cancel_undropped();
+        }
+    }
+}
+
+fn send_datagram(clients: &HashMap<String, ClientHandle>, to: &str, datagram: Datagram) {
+    if let Some(client) = clients.get(to) {
+        if let Err(e) = client.conn.send_datagram(encode_datagram(&datagram).into()) {
+            debug!("Datagramm an „{to}“ nicht gesendet: {e}");
         }
     }
 }
@@ -677,7 +737,8 @@ async fn handle_connection(
     match verdict {
         Ok(server_name) => {
             debug!("„{name}“ läuft unter {platform:?}");
-            // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore.
+            // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore
+            // und, sobald dort etwas im Vollbild läuft, den Spielemodus.
             let welcome = Control::Welcome { version: SERVER_VERSION, server_name, platform: Platform::current() };
             write_frame(&mut send, &welcome).await?;
         }
@@ -700,6 +761,9 @@ async fn handle_connection(
             Ok(Some(Control::Monitors(mut monitors))) => {
                 monitors.truncate(MAX_MONITORS);
                 let _ = tx.send(NetEvent::Monitors { name: name.clone(), id, monitors });
+            }
+            Ok(Some(Control::Game(game))) => {
+                let _ = tx.send(NetEvent::Game { name: name.clone(), id, game });
             }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht"),
             Ok(None) | Err(_) => break,

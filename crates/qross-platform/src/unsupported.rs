@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use qross_core::CaptureEvent;
-use qross_proto::Rect;
+use qross_proto::{GameState, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{dryrun, Capture, Clipboard, Injector};
@@ -15,6 +15,10 @@ pub fn screen_bounds() -> Rect {
 
 pub fn monitors() -> Vec<Rect> {
     Vec::new()
+}
+
+pub fn game_state() -> GameState {
+    GameState::default()
 }
 
 pub fn start_capture(_events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Arc<dyn Capture>> {

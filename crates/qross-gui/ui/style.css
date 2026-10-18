@@ -395,6 +395,8 @@ main { overflow: auto; overflow-x: hidden; min-height: 0; }
 
 .note { margin: 14px 0 0; padding: 10px 14px; border-radius: 12px; background: var(--amber-soft); color: var(--amber); font-size: 13px; }
 .note.error { background: var(--coral-soft); color: var(--coral); }
+.note.game-note { margin: 0 0 14px; }
+.settings-section .game-more { margin: 10px 0 0; }
 
 /* ------------------------------------------------------------ Seitenleiste */
 

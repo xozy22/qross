@@ -234,7 +234,8 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
 
     let status = rt.status();
     let server_changed = settings.server.needs_restart(&old.server);
-    let limit_changed = settings.clipboard_files_mb != old.clipboard_files_mb;
+    // Kopierte Dateien und Spielemodus gelten für beide Rollen
+    let limit_changed = settings.clipboard_files_mb != old.clipboard_files_mb || settings.game_mode != old.game_mode;
     match status.role {
         Some(role) if role != settings.role => rt.stop().await,
         Some(Role::Server) if (server_changed || limit_changed) && settings.server.validate().is_ok() => {

@@ -72,6 +72,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | ✔¹ ² |
 | Mehrere Monitore je Rechner: Skizze im Layout, Cursor nur auf Monitorflächen | ✔ | ✔ | ✔¹ |
 | Verbindungsqualität: Latenz, Jitter, Verlust, Durchsatz | ✔ | ✔ | ✔¹ |
+| Spielemodus: bei Vollbild festhalten, relative Mausbewegung für Spiele | ✔ Vollbild, eingefangener Zeiger | ✔ Vollbild | ✔ Vollbild¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔² |
 
 ¹ macOS wird in der CI auf Apple Silicon gebaut und getestet, auch mit der echten Zwischenablage. Erfassung und
@@ -85,7 +86,7 @@ Servers ohnehin dort, unter X11 gehen sie immer an den aktiven Rechner.
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
   (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, kopierte
   Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, mehrere Monitore je Client, Messwerte der
-  Verbindungsqualität, Ablehnung unbekannter Clients, LAN-Suche).
+  Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5, Ablehnung unbekannter Clients, LAN-Suche).
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
   die der Explorer anschließend selbst einfügt.
 - Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
@@ -95,6 +96,10 @@ Servers ohnehin dort, unter X11 gehen sie immer an den aktiven Rechner.
 **Bedienung:**
 - **Rollen-Taste** hält den Cursor auf dem aktuellen Bildschirm fest, z. B. für Spiele. Die Taste ist frei
   wählbar (Einstellungen bzw. `[keys] lock` in `qross.toml`).
+- **Spielemodus:** Läuft auf dem Rechner mit dem Cursor ein Spiel, ein Video oder eine Präsentation im Vollbild,
+  bleibt der Cursor dort, bis es endet. Spiele auf einem Client bekommen dabei relative Mausbewegungen wie von
+  einer echten Maus, auch wenn sie den Zeiger einfangen. Die Fang-Taste gibt den Cursor frei; abschaltbar in
+  den Einstellungen bzw. mit `[game] enabled = false`.
 - **Strg+Alt+Shift+Esc** holt Maus und Tastatur sofort zurück (macOS: Strg+Option+Shift+Esc).
 
 ## Download
@@ -198,6 +203,8 @@ Hinweise:
   (so lange gegen die Kante drücken, bevor gewechselt wird, Standard 0).
 - `[keys]` in `qross.toml`: `lock` (Fang-Taste, z. B. `"Ctrl+Alt+KeyL"`, leer = aus), `media` (`"active"` oder
   `"local"`) und `[keys.remap.<rechner>]` zum Umbelegen. Tastennamen wie `KeyboardEvent.code` im Browser.
+- `[game] enabled` in `qross.toml` (Standard `true`) schaltet den Spielemodus; `qross client --no-game-mode`
+  meldet dem Server nie, dass auf dem Client etwas im Vollbild läuft.
 - `[clipboard] max_file_mb` in `qross.toml` bzw. `qross client --clipboard-max-mb`: kopierte Dateien bis zu
   dieser Gesamtgröße beim Wechsel mitgeben (Standard 1000, 0 = aus). Sie liegen danach im Cache
   (`%LOCALAPPDATA%\Qross\clipboard`) und werden nach einem Tag aufgeräumt.

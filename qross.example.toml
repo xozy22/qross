@@ -47,3 +47,11 @@ media = "active"
 # Beispiel: Am Mac Alt und Windows-Taste tauschen, damit Cmd dort liegt, wo am Mac Cmd ist
 [keys.remap.laptop]
 AltLeft = "MetaLeft"
+
+# Spielemodus (optional)
+[game]
+# Läuft auf dem Rechner mit dem Cursor ein Programm im Vollbild (Spiel, Video, Präsentation),
+# bleibt der Cursor dort wie mit der Fang-Taste; die Fang-Taste gibt ihn frei. Auf einem Client
+# bekommt das Spiel dann relative Mausbewegungen statt Positionen, auch für Spiele, die den Zeiger
+# einfangen. Clients melden das ab Qross 0.6. false = aus
+enabled = true

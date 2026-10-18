@@ -14,7 +14,7 @@ pub struct LogInjector;
 impl Injector for LogInjector {
     fn inject(&mut self, event: &Inject) {
         match event {
-            Inject::MoveTo { .. } => tracing::trace!(?event, "würde einspeisen"),
+            Inject::MoveTo { .. } | Inject::MoveBy { .. } => tracing::trace!(?event, "würde einspeisen"),
             _ => tracing::info!(?event, "würde einspeisen"),
         }
     }

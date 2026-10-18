@@ -11,7 +11,11 @@ use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform};
 use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, RecordingCapture, RecordingInjector, SharedClipboard};
 use qross_platform::Clipboard;
-use qross_proto::{ClipboardData, Edge, KeyCode, MouseButton, Rect};
+use qross_proto::{
+    read_frame, write_frame, ClipboardData, Control, Edge, GameState, KeyCode, MouseButton, MouseMove, Platform, Rect,
+    ScreenInfo, PROTOCOL_VERSION, SERVER_VERSION,
+};
+use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
@@ -27,6 +31,14 @@ const MAC_EXTERNAL: Rect = Rect::new(1512, -400, 3744, 1800);
 /// Bildschirm des Test-Clients (Gesamtfläche, Monitore); lässt sich während des Tests ändern.
 type ClientScreen = Arc<Mutex<(Rect, Vec<Rect>)>>;
 
+/// Was im Vordergrund läuft (Spielemodus); lässt sich während des Tests ändern.
+type Game = Arc<Mutex<GameState>>;
+
+fn detector(game: &Game) -> Box<dyn Fn() -> GameState + Send + Sync> {
+    let game = game.clone();
+    Box::new(move || *game.lock().unwrap())
+}
+
 struct Setup {
     events: UnboundedSender<CaptureEvent>,
     capture: RecordingCapture,
@@ -34,6 +46,8 @@ struct Setup {
     injected: RecordingInjector,
     client_clip: SharedClipboard,
     client_screen: ClientScreen,
+    server_game: Game,
+    client_game: Game,
     notices: Arc<Mutex<Vec<ServerNotice>>>,
     server_task: JoinHandle<anyhow::Result<()>>,
     client_task: JoinHandle<anyhow::Result<()>>,
@@ -91,12 +105,14 @@ fn start_client_screen(
     let capture = RecordingCapture::default();
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
     let server_clip = SharedClipboard::default();
+    let (server_game, client_game) = (Game::default(), Game::default());
     let server_task = tokio::spawn(server.run(ServerPlatform {
         capture: Arc::new(capture.clone()),
         events: events_rx,
         clipboard: Box::new(server_clip.clone()),
         screen: Box::new(|| PC),
         monitors: Box::new(Vec::new),
+        game: detector(&server_game),
     }));
 
     let injected = RecordingInjector::default();
@@ -118,10 +134,23 @@ fn start_client_screen(
             clipboard: Box::new(client_clip.clone()),
             screen: Box::new(move || screen.lock().unwrap().0),
             monitors: Box::new(move || monitors.lock().unwrap().1.clone()),
+            game: detector(&client_game),
         },
     ));
 
-    Setup { events, capture, server_clip, injected, client_clip, client_screen, notices, server_task, client_task }
+    Setup {
+        events,
+        capture,
+        server_clip,
+        injected,
+        client_clip,
+        client_screen,
+        server_game,
+        client_game,
+        notices,
+        server_task,
+        client_task,
+    }
 }
 
 async fn wait_for(what: &str, condition: impl FnMut() -> bool) {
@@ -585,6 +614,7 @@ async fn connection_quality_is_measured_on_both_sides() {
         clipboard: Box::new(SharedClipboard::default()),
         screen: Box::new(|| PC),
         monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
     }));
     let (client_tx, mut client_rx) = tokio::sync::mpsc::unbounded_channel();
     let client_task = tokio::spawn(client::run_with_notices(
@@ -601,6 +631,7 @@ async fn connection_quality_is_measured_on_both_sides() {
             clipboard: Box::new(SharedClipboard::default()),
             screen: Box::new(|| LAPTOP),
             monitors: Box::new(Vec::new),
+            game: Box::new(GameState::default),
         },
         client_tx,
     ));
@@ -630,4 +661,260 @@ async fn connection_quality_is_measured_on_both_sides() {
     assert!(second.rx_bytes_per_s + third.rx_bytes_per_s > 0, "{second:?} {third:?}");
     server_task.abort();
     client_task.abort();
+}
+
+// ---------------------------------------------------------------- Spielemodus
+
+const FULLSCREEN: GameState = GameState { fullscreen: true, captured: false };
+const CAPTURED: GameState = GameState { fullscreen: false, captured: true };
+
+/// Wartet auf die Meldung, dass der Spielemodus den Cursor auf `screen` hält (`None`: wieder frei).
+async fn wait_for_game_hold(s: &Setup, screen: &str, game: Option<GameState>) {
+    let notices = s.notices.clone();
+    wait_for("Meldung des Spielemodus", || {
+        notices.lock().unwrap().iter().any(|n| {
+            matches!(n, ServerNotice::GameHold { screen: on, game: g } if on == screen && *g == game)
+        })
+    })
+    .await;
+}
+
+async fn wait_for_client(s: &Setup) {
+    let notices = s.notices.clone();
+    wait_for("Client verbunden", || {
+        notices.lock().unwrap().iter().any(|n| matches!(n, ServerNotice::ClientConnected { name, .. } if name == "laptop"))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn fullscreen_on_the_server_keeps_the_cursor_there() {
+    let s = start(true, None);
+    *s.server_game.lock().unwrap() = FULLSCREEN;
+    wait_for_game_hold(&s, "pc", Some(FULLSCREEN)).await;
+    wait_for_client(&s).await;
+
+    for _ in 0..20 {
+        s.events.send(edge_hit()).unwrap();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!s.capture.0.lock().unwrap().contains(&CaptureCall::Remote), "Vollbild auf dem Server: kein Wechsel");
+
+    // Das Spiel endet: Der Cursor wechselt wieder
+    *s.server_game.lock().unwrap() = GameState::default();
+    wait_for_game_hold(&s, "pc", None).await;
+    enter_laptop(&s).await;
+}
+
+#[tokio::test]
+async fn a_game_on_the_client_gets_relative_moves_and_holds_the_cursor() {
+    let s = start(true, None);
+    enter_laptop(&s).await;
+    *s.client_game.lock().unwrap() = CAPTURED;
+    wait_for_game_hold(&s, "laptop", Some(CAPTURED)).await;
+
+    // Weit über die linke Kante zum PC: Das Spiel bekommt die ganze Bewegung, gewechselt wird nicht.
+    move_by(&s, -500, 7, 1).await;
+    move_by(&s, -500, 0, 2).await;
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: true }).unwrap();
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+    let injected = s.injected.clone();
+    let expected = [
+        Inject::MoveBy { dx: -500, dy: 7 },
+        Inject::MoveBy { dx: -500, dy: 0 },
+        Inject::Button { button: MouseButton::Left, down: false },
+    ];
+    wait_for("Bewegungen und Klick beim Client", || {
+        let log = injected.0.lock().unwrap();
+        expected.iter().all(|e| log.contains(e))
+    })
+    .await;
+    assert!(!released(&s.capture), "der Spielemodus hält den Cursor auf dem Client");
+
+    let log = injected.0.lock().unwrap().clone();
+    let first = log.iter().position(|i| *i == expected[0]).unwrap();
+    assert!(
+        !log[first..].iter().any(|i| matches!(i, Inject::MoveTo { .. })),
+        "keine absoluten Sprünge, auch nicht beim Klick: {log:?}"
+    );
+
+    // Das Spiel endet: wieder Positionen, und die linke Kante führt zurück zum PC
+    s.notices.lock().unwrap().clear();
+    *s.client_game.lock().unwrap() = GameState::default();
+    wait_for_game_hold(&s, "laptop", None).await;
+    move_by(&s, 5, 0, 3).await;
+    assert!(injected.0.lock().unwrap().contains(&Inject::MoveTo { x: 5, y: 406 }));
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("Rückkehr zum Server", || released(&capture)).await;
+}
+
+#[tokio::test]
+async fn the_lock_key_releases_the_game_hold() {
+    let s = start(true, None);
+    enter_laptop(&s).await;
+    *s.client_game.lock().unwrap() = FULLSCREEN;
+    wait_for_game_hold(&s, "laptop", Some(FULLSCREEN)).await;
+
+    s.events.send(CaptureEvent::ToggleLock).unwrap();
+    wait_for_game_hold(&s, "laptop", None).await;
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("Rückkehr zum Server", || released(&capture)).await;
+}
+
+/// Baut eine QUIC-Verbindung mit der Identität `id` auf, ohne den Qross-Client.
+async fn connect_raw(addr: std::net::SocketAddr, id: &Identity) -> (quinn::Endpoint, quinn::Connection) {
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(qross_net::tls::client_config(id).unwrap());
+    let conn = endpoint.connect(addr, qross_net::tls::SERVER_NAME).unwrap().await.unwrap();
+    (endpoint, conn)
+}
+
+/// So sah `Datagram` bis Qross 0.5 aus.
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+enum DatagramV05 {
+    MouseMove(MouseMove),
+}
+
+/// So sah `Control` in Qross 0.5 aus.
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+enum ControlV05 {
+    Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+    Welcome { version: u16, server_name: String, platform: Platform },
+    Reject { reason: String },
+    ScreenChanged(ScreenInfo),
+    Monitors(Vec<Rect>),
+}
+
+#[tokio::test]
+async fn an_older_client_stays_connected_and_gets_positions() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let server = Server::bind(config, &server_id, trust).unwrap();
+    let addr = server.local_addr().unwrap();
+    let capture = RecordingCapture::default();
+    let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(capture.clone()),
+        events: events_rx,
+        clipboard: Box::new(SharedClipboard::default()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+    }));
+
+    // Ein Client wie Qross 0.5: Hello, Welcome, danach meldet er nie einen Spielemodus.
+    let (_endpoint, conn) = connect_raw(addr, &client_id).await;
+    let (mut control, mut control_rx) = conn.open_bi().await.unwrap();
+    let screen = ScreenInfo { bounds: LAPTOP };
+    let hello = Control::Hello { version: PROTOCOL_VERSION, name: "laptop".into(), screen, platform: Platform::Windows };
+    write_frame(&mut control, &hello).await.unwrap();
+    let welcome = read_frame::<_, ControlV05>(&mut control_rx).await.unwrap();
+    assert!(matches!(welcome, Some(ControlV05::Welcome { version: SERVER_VERSION, .. })), "{welcome:?}");
+
+    let datagrams = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let (conn, datagrams) = (conn.clone(), datagrams.clone());
+        tokio::spawn(async move {
+            while let Ok(bytes) = conn.read_datagram().await {
+                let decoded = postcard::from_bytes::<DatagramV05>(&bytes).map_err(|e| e.to_string());
+                datagrams.lock().unwrap().push(decoded);
+            }
+        })
+    };
+    let calls = capture.clone();
+    wait_for("Wechsel zum alten Client", || {
+        let _ = events.send(edge_hit());
+        calls.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    for _ in 0..10 {
+        events.send(CaptureEvent::MouseDelta { dx: 20, dy: 1 }).unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    let received = datagrams.clone();
+    wait_for("Positionen beim alten Client", || received.lock().unwrap().len() >= 5).await;
+    let log = datagrams.lock().unwrap().clone();
+    assert!(log.iter().all(Result::is_ok), "ein Client aus 0.5 muss jedes Datagramm lesen können: {log:?}");
+    assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
+    reader.abort();
+    server_task.abort();
+}
+
+/// Ein Server wie Qross 0.5 bzw. 0.6 (`welcome_version`). Ein Client mit Vollbildprogramm meldet
+/// sich an; geliefert wird alles, was er danach auf dem Control-Stream schickt (als Rohdaten).
+async fn client_reports_to(welcome_version: u16) -> Vec<Vec<u8>> {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let endpoint =
+        quinn::Endpoint::server(qross_net::tls::server_config(&server_id).unwrap(), "127.0.0.1:0".parse().unwrap())
+            .unwrap();
+    let addr = endpoint.local_addr().unwrap();
+    let client_task = tokio::spawn(client::run(
+        ClientConfig {
+            name: "laptop".into(),
+            server: addr.to_string(),
+            server_fingerprint: Some(server_id.fingerprint()),
+            clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+        },
+        Identity::generate().unwrap(),
+        TrustStore::in_memory(),
+        ClientPlatform {
+            injector: Box::new(RecordingInjector::default()),
+            clipboard: Box::new(SharedClipboard::default()),
+            screen: Box::new(|| LAPTOP),
+            monitors: Box::new(Vec::new),
+            game: Box::new(|| FULLSCREEN),
+        },
+    ));
+
+    let conn = endpoint.accept().await.unwrap().await.unwrap();
+    let (mut control, mut control_rx) = conn.accept_bi().await.unwrap();
+    let hello = read_frame::<_, Control>(&mut control_rx).await.unwrap();
+    assert!(matches!(hello, Some(Control::Hello { version: PROTOCOL_VERSION, .. })), "{hello:?}");
+    let welcome = Control::Welcome { version: welcome_version, server_name: "pc".into(), platform: Platform::Windows };
+    write_frame(&mut control, &welcome).await.unwrap();
+
+    // Eine Weile mitlesen; frühestens nach einer Abfragerunde wüsste der Client vom Vollbild.
+    let mut frames = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_millis(1200), async {
+        loop {
+            let mut len = [0u8; 4];
+            if control_rx.read_exact(&mut len).await.is_err() {
+                return;
+            }
+            let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+            if control_rx.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            frames.push(body);
+        }
+    })
+    .await;
+    assert!(conn.close_reason().is_none(), "der Client bleibt verbunden");
+    assert!(!client_task.is_finished());
+    client_task.abort();
+    frames
+}
+
+#[tokio::test]
+async fn the_client_reports_fullscreen_only_to_servers_that_know_it() {
+    // Qross 0.5 trennt bei unbekannten Control-Nachrichten: Es bekommt keine.
+    for frame in client_reports_to(4).await {
+        let msg = postcard::from_bytes::<ControlV05>(&frame);
+        assert!(msg.is_ok(), "ein Server aus 0.5 kann {msg:?} nicht lesen");
+    }
+    // Ein neuer Server erfährt vom Vollbild
+    let frames = client_reports_to(SERVER_VERSION).await;
+    let messages: Vec<Control> = frames.iter().map(|f| postcard::from_bytes(f).unwrap()).collect();
+    assert_eq!(messages, vec![Control::Game(FULLSCREEN)]);
 }
