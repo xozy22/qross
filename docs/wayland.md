@@ -170,6 +170,14 @@ seit 1.27. Für Qross ist das ein eigener nächster Schritt.
   oder als Client der XWayland-Rückfall für X11-Programme.
 - **GNOME bis 50 als Server:** Der Freigabe-Dialog erscheint bei jedem Start des Servers und nach
   jedem Neuaufbau der Sitzung, z. B. wenn ein Monitor angesteckt wird.
+- **Feststelltaste und Num:** Als Client übernimmt Qross den Stand des Servers, indem es die Taste
+  über libei drückt; direkt setzen lässt er sich dort nicht. Wie die Tasten stehen, erfährt Qross aus
+  `ei_keyboard.modifiers`, sofern der Compositor das meldet. Bis dahin gilt der zuletzt vorgegebene
+  Stand als erreicht: Eine Änderung am Server schaltet mit, stand der Client aber schon anders, bleibt
+  er verkehrt herum, bis der Compositor seinen Stand meldet. Num erkennt Qross auf Mod2, wie in den
+  üblichen Belegungen; Rollen ist unter Wayland kein Modifier und bleibt außen vor. Als **Server**
+  liest Qross den Stand nicht (InputCapture gibt ihn nicht heraus, und ob der Compositor beim
+  Erfassen selbst umschaltet, ist offen). Die Taste geht dann wie früher nur an den Client.
 - **Tastaturbelegung:** Der Client deutet Tasten mit seiner Belegung. Bei verschiedenen Belegungen
   auf Server und Client gilt dasselbe wie unter X11. Deskflow meldet Probleme mit AltGr unter
   Wayland [B, Diskussion #7499]; ob Qross das betrifft, ist nicht geprüft.
@@ -193,8 +201,8 @@ seit 1.27. Für Qross ist das ein eigener nächster Schritt.
 ## Was geprüft ist
 
 - Reine Logik (`wayland_logic.rs`): Barrieren für einen, zwei und gespiegelte Monitore, negative
-  Koordinaten, Kantenzuordnung, Rad- und Tastenumrechnung, Sitzungswahl. Unit-Tests laufen auf allen
-  Plattformen.
+  Koordinaten, Kantenzuordnung, Rad- und Tastenumrechnung, Sitzungswahl, welche Sperrtasten zu drücken
+  sind. Unit-Tests laufen auf allen Plattformen.
 - Einspeisen gegen eine EIS-Gegenstelle aus `reis` im Testprozess (`tests/wayland_ei.rs`, läuft in
   der normalen Linux-CI): Handshake, Geräte, Regionen als Monitore, Bewegung, Tasten, Rad.
 - Einspeisen in einen echten mutter ohne Bildschirm (`tests/wayland_mutter.rs`, eigener CI-Job,
@@ -242,6 +250,10 @@ Protokoll ausführlich.
    - Cursor vom Server herüberschieben: Er bewegt sich auf allen Monitoren. Klicks, Rad (beide
      Richtungen), Tippen mit Umlauten, Strg+C/V funktionieren in einem Wayland-Programm (z. B.
      Texteditor) und in einem X11-Programm (z. B. `xterm`).
+   - Feststelltaste am Server einschalten, Cursor herüberschieben: Der Client schreibt groß. Auf dem
+     Client die Feststelltaste drücken: Server und Client schalten aus. Im Protokoll steht
+     „libei: Stand der Modifier“; fehlt das, meldet der Compositor seinen Stand nicht, und der Client
+     schaltet nur bei Änderungen mit.
    - Client beenden und neu starten: Diesmal kommt kein Dialog.
    - Freigabe über das System beenden (GNOME: Symbol oben rechts, „Stopp“): Im Protokoll steht
      „unterbrochen“, danach baut Qross die Verbindung ohne Dialog neu auf.

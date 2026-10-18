@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use qross_core::chars::KeyChars;
 use qross_core::keys::{KeyOptions, SwitchTarget};
 use qross_core::{CaptureEvent, Inject};
-use qross_proto::{Edge, KeyCode, MouseButton};
+use qross_proto::{Edge, KeyCode, LockState, MouseButton};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     ConnectionExt as _, CreateWindowAux, EventMask, InputFocus, WindowClass, MOTION_NOTIFY_EVENT,
@@ -88,6 +88,17 @@ fn x11_capture_and_injection() {
     // --- Erfassen -----------------------------------------------------------------------
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let capture = qross_platform::start_capture(tx).unwrap();
+
+    // Feststelltaste und Num: Das Einspeisen setzt sie über XKB, die Erfassung liest sie
+    assert!(injector.syncs_locks());
+    let before = capture.locks();
+    assert_eq!((before.caps.is_some(), before.scroll), (true, None), "Rollen gibt es unter X11 nicht: {before:?}");
+    let on = LockState { caps: Some(true), num: before.num.map(|_| true), scroll: Some(true) };
+    injector.inject(&Inject::Locks(on));
+    wait_locks(&*capture, LockState { scroll: None, ..on });
+    let off = LockState { caps: Some(false), num: before.num.map(|_| false), scroll: None };
+    injector.inject(&Inject::Locks(off));
+    wait_locks(&*capture, off);
     let fake_move = |x: i16, y: i16, relative: bool| {
         conn.xtest_fake_input(MOTION_NOTIFY_EVENT, relative as u8, CURRENT_TIME, root, x, y, 0).unwrap();
         conn.flush().unwrap();
@@ -145,6 +156,14 @@ fn x11_capture_and_injection() {
     assert_eq!(key, CaptureEvent::Typed { key: KeyCode::A, chars: KeyChars::text("A", 'a') });
     assert!(collect_keys(&conn, Duration::from_millis(300), 1).is_empty(), "abgefangene Tasten erreichen das Fenster nicht");
 
+    // Feststelltaste während des Grabs: Der X-Server schaltet selbst um, die Erfassung meldet den Stand
+    let caps = |on| CaptureEvent::Locks(LockState { caps: Some(on), ..off });
+    for on in [true, false] {
+        injector.inject(&Inject::Key { key: KeyCode::CAPS_LOCK, down: true });
+        injector.inject(&Inject::Key { key: KeyCode::CAPS_LOCK, down: false });
+        assert_eq!(wait_event(&mut rx, |e| matches!(e, CaptureEvent::Locks(_))), caps(on));
+    }
+
     // Remote: Das Kürzel meldet den Wechsel, die 2 selbst geht nicht an den Client
     hotkey(&mut injector);
     assert_eq!(wait_event(&mut rx, |e| matches!(e, CaptureEvent::SwitchTo(_))), laptop);
@@ -159,6 +178,16 @@ fn x11_capture_and_injection() {
     injector.inject(&Inject::Key { key: KeyCode::A, down: true });
     injector.inject(&Inject::Key { key: KeyCode::A, down: false });
     assert_eq!(collect_keys(&conn, Duration::from_secs(2), 2).len(), 2, "nach release wieder lokal");
+}
+
+/// Wartet, bis die Erfassung diesen Stand der Sperrtasten liest (gesetzt hat ihn eine andere Verbindung)
+#[track_caller]
+fn wait_locks(capture: &dyn qross_platform::Capture, want: LockState) {
+    let start = Instant::now();
+    while capture.locks() != want {
+        assert!(start.elapsed() < Duration::from_secs(2), "Sperrtasten {:?}, erwartet {want:?}", capture.locks());
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn collect_keys(conn: &impl Connection, limit: Duration, want: usize) -> Vec<(u8, bool)> {

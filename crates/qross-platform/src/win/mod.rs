@@ -5,6 +5,7 @@ mod dnd;
 mod game;
 mod inject;
 mod layout;
+mod locks;
 mod shell;
 
 use std::ptr::{null, null_mut};

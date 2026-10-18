@@ -114,6 +114,10 @@ impl Injector for MacInjector {
         true
     }
 
+    fn syncs_locks(&self) -> bool {
+        true
+    }
+
     fn take_dragged_files(&mut self, _x: i32, _y: i32) -> Vec<std::path::PathBuf> {
         // Nur ein Drag, der nach dem Drücken der Taste begonnen hat, zählt.
         let Some(mark) = self.drag_mark.filter(|_| self.buttons[MouseButton::Left as usize]) else { return Vec::new() };
@@ -236,6 +240,16 @@ impl Injector for MacInjector {
                         self.post(event);
                     }
                     None => self.inject(&Inject::Key { key, down }),
+                }
+            }
+            Inject::Locks(locks) => {
+                super::locks::set(locks);
+                // Eingespeiste Tasten tragen ihre Flags selbst: ohne AlphaShift kämen trotz
+                // Feststelltaste Kleinbuchstaben an.
+                match locks.caps {
+                    Some(true) => self.flags |= CGEventFlags::CGEventFlagAlphaShift,
+                    Some(false) => self.flags.remove(CGEventFlags::CGEventFlagAlphaShift),
+                    None => {}
                 }
             }
         }

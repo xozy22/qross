@@ -10,6 +10,17 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 
 ## [Unreleased]
 
+### Neu
+
+- **Feststelltaste, Num und Rollen auf allen Rechnern gleich:** Betritt der Cursor einen Client, übernimmt der
+  den Stand des Servers. Drückst du die Feststelltaste, während der Cursor auf einem Client ist, schaltet der
+  Server mit: Die Leuchten der Tastatur stimmen, und nach dem Zurückwechseln kommt nicht plötzlich alles in
+  Großbuchstaben. Wie bei Synergy, ohne Einstellung. Unter Windows alle drei, unter X11 Feststelltaste und Num.
+  Am Mac schaltet Qross die Feststelltaste über das System um, denn ein künstlicher Tastendruck tut das dort
+  nicht; Num und Rollen gibt es am Mac nicht, sie bleiben am Client, wie sie sind. Unter Wayland nur als
+  Client, per Tastendruck und so gut der Compositor seinen Stand meldet (siehe `docs/wayland.md`).
+  Kompatibel: Mit Clients und Servern bis 0.7 geht die Taste wie bisher nur an den Rechner mit dem Cursor.
+
 ### Verbessert
 
 - **Einstellungen mit Bereichen:** Allgemein, Profile, Tastatur, Spielemodus, Updates, Zwischenablage und Info

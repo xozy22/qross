@@ -1,8 +1,8 @@
 //! Reine Logik für Wayland (Desktop-Portale und libei): Auswahl der Sitzung, Zeigerbarrieren an den
-//! Monitorkanten, Maustasten und Mausrad. Ohne Systemaufrufe, damit sie auf jeder Plattform getestet
-//! werden kann; benutzt wird sie unter Linux.
+//! Monitorkanten, Maustasten, Mausrad und Sperrtasten. Ohne Systemaufrufe, damit sie auf jeder
+//! Plattform getestet werden kann; benutzt wird sie unter Linux.
 
-use qross_proto::{Edge, MouseButton, Rect};
+use qross_proto::{Edge, Lock, LockState, MouseButton, Rect};
 
 // ------------------------------------------------------------------ Sitzung
 
@@ -233,6 +233,49 @@ impl Motion {
     }
 }
 
+// ------------------------------------------------------------------ Sperrtasten
+
+/// Bits der eingerasteten Modifier in `ei_keyboard.modifiers` (Reihenfolge von xkbcommon): Lock ist
+/// immer Bit 1, Num liegt in den üblichen Belegungen auf Mod2 (Bit 4). Rollen ist kein Modifier.
+const EI_LOCKS: [(Lock, u32); 2] = [(Lock::Caps, 1 << 1), (Lock::Num, 1 << 4)];
+
+/// Sperrtasten beim Einspeisen über libei: Setzen geht dort nur, indem man die Taste drückt. Den
+/// Stand meldet der Compositor (`ei_keyboard.modifiers`), aber nicht jeder und erst nach einer Weile.
+/// Bis dahin gilt der zuletzt vorgegebene als erreicht; eine Änderung des Servers schaltet dann
+/// wenigstens mit, wie früher die Taste selbst.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EiLocks {
+    /// Zuletzt gemeldete eingerastete Modifier, nachgeführt um die eigenen Tastendrücke
+    locked: Option<u32>,
+    /// Zuletzt vorgegebener Stand
+    last: LockState,
+}
+
+impl EiLocks {
+    /// `ei_keyboard.modifiers` vom Compositor
+    pub fn on_modifiers(&mut self, locked: u32) {
+        self.locked = Some(locked);
+    }
+
+    /// Welche Tasten für `target` zu drücken sind; der erwartete Stand danach wird gemerkt, damit
+    /// eine schnell folgende Vorgabe nicht ein zweites Mal umschaltet.
+    pub fn taps(&mut self, target: LockState) -> Vec<Lock> {
+        let mut taps = Vec::new();
+        for (lock, bit) in EI_LOCKS {
+            let Some(want) = target.get(lock) else { continue };
+            let now = self.locked.map(|mask| mask & bit != 0).or(self.last.get(lock));
+            if now.is_some_and(|now| now != want) {
+                taps.push(lock);
+                if let Some(mask) = &mut self.locked {
+                    *mask ^= bit;
+                }
+            }
+            self.last.set(lock, Some(want));
+        }
+        taps
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,6 +410,26 @@ mod tests {
         assert_eq!(wheel.add(0.0, 0.1), Some((0, -1)));
         wheel.reset();
         assert_eq!(wheel.add(-15.0, 0.0), Some((-120, 0)));
+    }
+
+    #[test]
+    fn lock_keys_are_pressed_only_where_the_state_differs() {
+        let caps_on = LockState { caps: Some(true), num: Some(true), scroll: Some(false) };
+        let mut locks = EiLocks::default();
+        // Noch nichts gemeldet, nichts vorgegeben: nicht raten
+        assert!(locks.taps(caps_on).is_empty());
+        // Danach schaltet eine Änderung des Servers mit
+        assert_eq!(locks.taps(LockState { caps: Some(false), ..caps_on }), vec![Lock::Caps]);
+
+        // Mit gemeldetem Stand (Lock eingerastet, Num nicht): genau die abweichenden Tasten
+        locks.on_modifiers(1 << 1);
+        assert_eq!(locks.taps(LockState { caps: Some(false), num: Some(true), scroll: Some(true) }), vec![Lock::Caps, Lock::Num]);
+        // Schnell hinterher dieselbe Vorgabe: Der Compositor hat noch nichts gemeldet, aber die
+        // eigenen Tastendrücke zählen schon
+        assert!(locks.taps(LockState { caps: Some(false), num: Some(true), scroll: None }).is_empty());
+        locks.on_modifiers(1 << 4);
+        assert!(locks.taps(LockState { caps: None, num: Some(true), scroll: None }).is_empty(), "unbekannt bleibt");
+        assert_eq!(locks.taps(LockState { num: Some(false), ..LockState::default() }), vec![Lock::Num]);
     }
 
     #[test]

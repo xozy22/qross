@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use qross_proto::{Edge, GameState, Input, KeyCode, MouseButton, MouseDelta, MouseMove, Rect};
+use qross_proto::{Edge, GameState, Input, KeyCode, Lock, LockState, MouseButton, MouseDelta, MouseMove, Rect};
 
 use crate::chars::{KeyChars, Typist};
 use crate::input::CaptureEvent;
@@ -33,6 +33,12 @@ pub enum ServerEvent {
     ClientGame { name: String, game: GameState },
     /// Der Client kann Zeichen eingeben (`Control::TypesText`, seit Qross 0.7)
     ClientTypesText { name: String },
+    /// Feststelltaste, Num und Rollen des Servers beim Start: welche Qross hier lesen kann und wie
+    /// sie stehen. Danach meldet die Erfassung Änderungen mit `CaptureEvent::Locks`.
+    LocalLocks(LockState),
+    /// Der Client kann seine Sperrtasten auf den Stand des Servers bringen (`Control::SyncsLocks`,
+    /// seit Qross 0.8)
+    ClientSyncsLocks { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +71,9 @@ pub enum Action {
     CancelIncoming { transfer: u64 },
     /// Als Datagramm senden: relative Bewegung statt Position (Spielemodus)
     MoveBy { to: String, delta: MouseDelta },
+    /// Feststelltaste, Num und Rollen des Servers jetzt lesen und an diesen Client schicken
+    /// (`Input::Locks`), gleich hinter dem, was schon unterwegs ist
+    SyncLocks { to: String },
 }
 
 /// Warum der Cursor gerade auf seinem Bildschirm bleibt
@@ -157,6 +166,10 @@ pub struct ServerState {
     incoming: Option<u64>,
     /// Rechte je Rechner; hier zählt nur Drag & Drop (Zwischenablage und Dateien prüft die Netzschicht)
     sharing: SharingRules,
+    /// Zuletzt bekannter Stand der Sperrtasten des Servers; `None` je Taste: hier nicht lesbar
+    locks: LockState,
+    /// Verbundene Clients, die ihre Sperrtasten auf den Stand des Servers bringen können
+    syncs_locks: HashSet<String>,
 }
 
 impl ServerState {
@@ -189,6 +202,8 @@ impl ServerState {
             remote_probe_failed: false,
             incoming: None,
             sharing: SharingRules::default(),
+            locks: LockState::default(),
+            syncs_locks: HashSet::new(),
         }
     }
 
@@ -311,6 +326,7 @@ impl ServerState {
                 self.clients.remove(&name);
                 self.games.remove(&name);
                 self.typing.remove(&name);
+                self.syncs_locks.remove(&name);
                 if matches!(&self.active, Active::Remote { name: active, .. } if *active == name) {
                     self.go_local(self.local.center(), &mut out);
                 }
@@ -335,8 +351,23 @@ impl ServerState {
                     }
                 }
             }
+            ServerEvent::LocalLocks(locks) => self.locks = locks,
+            ServerEvent::ClientSyncsLocks { name } => {
+                if self.clients.contains_key(&name) {
+                    // Die Meldung kam erst, als der Cursor schon dort war
+                    if matches!(&self.active, Active::Remote { name: active, .. } if *active == name) {
+                        out.push(Action::SyncLocks { to: name.clone() });
+                    }
+                    self.syncs_locks.insert(name);
+                }
+            }
         }
         out
+    }
+
+    /// Bekommt der Client mit dem Cursor den Stand der Sperrtasten statt ihrer Tastendrücke?
+    fn syncs_locks_on(&self, name: &str) -> bool {
+        self.syncs_locks.contains(name)
     }
 
     fn on_remote_offer(&mut self, client: String, probe: u32, transfer: u64, has_files: bool, out: &mut Vec<Action>) {
@@ -515,6 +546,14 @@ impl ServerState {
                     out.push(Action::DropIncoming { transfer, x, y });
                 }
             }
+            CaptureEvent::Locks(locks) => {
+                self.locks = locks;
+                if let Active::Remote { name, .. } = &self.active {
+                    if self.syncs_locks_on(name) {
+                        out.push(Action::Send { to: name.clone(), input: Input::Locks(locks) });
+                    }
+                }
+            }
         }
     }
 
@@ -565,6 +604,13 @@ impl ServerState {
     fn on_key(&mut self, key: KeyCode, down: bool, chars: Option<&KeyChars>, out: &mut Vec<Action>) {
         let Active::Remote { name, .. } = &self.active else { return };
         let remap = self.key_maps.get(name).and_then(|map| map.get(&key)).copied();
+        // Feststelltaste & Co.: Der Server schaltet mit und schickt seinen neuen Stand
+        // (`CaptureEvent::Locks`). Ein Tastendruck schaltete den Client ein zweites Mal um. Kennt der
+        // Server den Stand nicht oder ist die Taste umbelegt, geht sie wie jede andere.
+        let synced = Lock::of_key(key).is_some_and(|lock| self.locks.get(lock).is_some());
+        if synced && remap.is_none() && self.syncs_locks_on(name) {
+            return;
+        }
         let inputs = match &mut self.typist {
             Some(typist) if down => typist.press(key, remap, chars),
             Some(typist) => typist.release(key, remap.unwrap_or(key)),
@@ -663,6 +709,9 @@ impl ServerState {
         self.game_released = false;
         self.typist = (self.key_mode(&target) == KeyMode::Chars).then(Typist::new);
         out.push(Action::Send { to: target.clone(), input: Input::Enter { epoch: self.epoch, x, y } });
+        if self.syncs_locks_on(&target) {
+            out.push(Action::SyncLocks { to: target.clone() });
+        }
         out.push(Action::SyncClipboard { to: target.clone() });
         self.active = Active::Remote { name: target, x, y };
     }
@@ -1517,6 +1566,133 @@ mod tests {
         s.handle(switch_to("pc"));
         // Die Mitte der Gesamtfläche liegt auf dem externen Monitor
         assert!(s.handle(switch_to("mac")).contains(&enter_mac(2, 2628, 500)));
+    }
+
+    const CAPS: KeyCode = KeyCode::CAPS_LOCK;
+    const NUM: KeyCode = KeyCode::NUM_LOCK;
+    /// Wie unter Windows: alle drei bekannt
+    const ALL_OFF: LockState = LockState { caps: Some(false), num: Some(true), scroll: Some(false) };
+
+    fn locks(locks: LockState) -> ServerEvent {
+        ServerEvent::Capture(CaptureEvent::Locks(locks))
+    }
+
+    /// Server mit Sperrtasten `local`, „laptop“ kann sie abgleichen (`syncs`)
+    fn lock_state(local: LockState, syncs: bool) -> ServerState {
+        let mut s = state();
+        s.handle(ServerEvent::LocalLocks(local));
+        if syncs {
+            s.handle(ServerEvent::ClientSyncsLocks { name: "laptop".into() });
+        }
+        s
+    }
+
+    #[test]
+    fn a_client_that_syncs_gets_the_lock_state_instead_of_the_keys() {
+        let mut s = lock_state(ALL_OFF, true);
+        assert_eq!(
+            s.handle(edge_hit(Edge::Right, 1919, 540)),
+            vec![
+                Action::CaptureRemote,
+                Action::Send { to: "laptop".into(), input: Input::Enter { epoch: 1, x: 1, y: 399 } },
+                Action::SyncLocks { to: "laptop".into() },
+                Action::SyncClipboard { to: "laptop".into() },
+            ],
+            "beim Betreten übernimmt der Client den Stand des Servers"
+        );
+        // Feststelltaste auf dem Client: Der Server schaltet mit und schickt seinen neuen Stand,
+        // die Taste selbst schaltete den Client ein zweites Mal um.
+        assert!(s.handle(key(CAPS, true)).is_empty());
+        let on = LockState { caps: Some(true), ..ALL_OFF };
+        assert_eq!(s.handle(locks(on)), to_laptop(vec![Input::Locks(on)]));
+        assert!(s.handle(key(CAPS, false)).is_empty());
+        assert!(s.handle(key(NUM, true)).is_empty());
+        assert!(s.handle(key(KeyCode::SCROLL_LOCK, true)).is_empty());
+        assert_eq!(s.handle(key(KeyCode::A, true)), to_laptop(vec![Input::Key { key: KeyCode::A, down: true }]));
+
+        // Zurück auf dem Server: Der hat den Stand schon; nichts zu schicken
+        let back = s.handle(delta(-5000, 0));
+        assert!(back.iter().any(|a| matches!(a, Action::ReleaseCapture { .. })), "{back:?}");
+        assert!(!back.iter().any(|a| matches!(a, Action::SyncLocks { .. })), "{back:?}");
+        assert!(s.handle(locks(ALL_OFF)).is_empty(), "lokal geht nichts an Clients");
+    }
+
+    #[test]
+    fn older_clients_keep_getting_lock_keys() {
+        let mut s = lock_state(ALL_OFF, false);
+        let enter = s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert!(!enter.iter().any(|a| matches!(a, Action::SyncLocks { .. })), "{enter:?}");
+        assert_eq!(s.handle(key(CAPS, true)), to_laptop(vec![Input::Key { key: CAPS, down: true }]));
+        assert!(s.handle(locks(LockState { caps: Some(true), ..ALL_OFF })).is_empty(), "kann Locks nicht lesen");
+        assert_eq!(s.handle(key(CAPS, false)), to_laptop(vec![Input::Key { key: CAPS, down: false }]));
+    }
+
+    #[test]
+    fn locks_the_server_cannot_read_go_as_keys() {
+        // Wie am Mac: nur die Feststelltaste, Num und Rollen gibt es dort nicht
+        let mac = LockState { caps: Some(false), num: None, scroll: None };
+        let mut s = lock_state(mac, true);
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert!(s.handle(key(CAPS, true)).is_empty());
+        assert_eq!(s.handle(key(NUM, true)), to_laptop(vec![Input::Key { key: NUM, down: true }]));
+
+        // Server ohne lesbare Sperrtasten (Wayland): alles wie bisher, auch beim Betreten
+        let mut s = lock_state(LockState::default(), true);
+        let enter = s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert!(enter.contains(&Action::SyncLocks { to: "laptop".into() }), "die Netzschicht schickt nur Bekanntes");
+        assert_eq!(s.handle(key(CAPS, true)), to_laptop(vec![Input::Key { key: CAPS, down: true }]));
+    }
+
+    #[test]
+    fn remapped_lock_keys_go_as_the_key_they_became() {
+        let mut s = lock_state(ALL_OFF, true);
+        s.set_key_maps(HashMap::from([("laptop".to_owned(), HashMap::from([(CAPS, KeyCode::ESCAPE)]))]));
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert_eq!(s.handle(key(CAPS, true)), to_laptop(vec![Input::Key { key: KeyCode::ESCAPE, down: true }]));
+    }
+
+    #[test]
+    fn syncing_counts_from_its_report_until_disconnecting() {
+        let mut s = lock_state(ALL_OFF, false);
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        // Die Meldung kam erst, als der Cursor schon dort war: gleich abgleichen
+        assert_eq!(s.handle(ServerEvent::ClientSyncsLocks { name: "laptop".into() }), vec![Action::SyncLocks { to: "laptop".into() }]);
+        assert!(s.handle(key(CAPS, true)).is_empty());
+        assert!(s.handle(ServerEvent::ClientSyncsLocks { name: "unbekannt".into() }).is_empty());
+
+        s.handle(ServerEvent::ClientDisconnected { name: "laptop".into() });
+        s.handle(ServerEvent::ClientConnected { name: "laptop".into(), screen: LAPTOP });
+        let enter = s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert!(!enter.iter().any(|a| matches!(a, Action::SyncLocks { .. })), "neue Verbindung, noch keine Meldung: {enter:?}");
+        assert_eq!(s.handle(key(CAPS, true)), to_laptop(vec![Input::Key { key: CAPS, down: true }]));
+    }
+
+    #[test]
+    fn switching_between_clients_syncs_the_next_one() {
+        let layout = Layout::from_links(&[
+            LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() },
+            LinkConfig { from: "laptop".into(), edge: Edge::Right, to: "tablet".into() },
+        ])
+        .unwrap();
+        let mut s = ServerState::new("pc", layout, PC);
+        s.handle(ServerEvent::LocalLocks(ALL_OFF));
+        for name in ["laptop", "tablet"] {
+            s.handle(ServerEvent::ClientConnected { name: name.into(), screen: LAPTOP });
+        }
+        s.handle(ServerEvent::ClientSyncsLocks { name: "tablet".into() });
+        s.handle(switch_to("laptop"));
+        assert_eq!(
+            s.handle(switch_to("tablet")),
+            vec![
+                Action::Send { to: "laptop".into(), input: Input::Leave },
+                Action::Send { to: "tablet".into(), input: Input::Enter { epoch: 2, x: 640, y: 400 } },
+                Action::SyncLocks { to: "tablet".into() },
+                Action::SyncClipboard { to: "tablet".into() },
+            ]
+        );
+        let on = LockState { num: Some(false), ..ALL_OFF };
+        assert_eq!(s.handle(locks(on)), vec![Action::Send { to: "tablet".into(), input: Input::Locks(on) }]);
+        assert!(!s.handle(switch_to("laptop")).iter().any(|a| matches!(a, Action::SyncLocks { .. })));
     }
 
     #[test]

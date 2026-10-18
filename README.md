@@ -72,6 +72,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Gezogene Dateien **ablegen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | Client: in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
 | Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | Fang-Taste nur, solange der Cursor auf einem Client ist | ✔¹ ² |
 | Zeichen statt Tastenposition je Rechner: anderes Tastaturlayout, tote Tasten, AltGr | ✔ | ✔ | – (bleibt Tastenposition) | ✔¹ |
+| Feststelltaste, Num und Rollen auf allen Rechnern gleich (Stand des Servers) | ✔ alle drei | ✔ Feststelltaste, Num | Client: per Tastendruck, so gut der Compositor seinen Stand meldet; Server: – | ✔ Feststelltaste¹ |
 | Mehrere Monitore je Rechner: Skizze im Layout, Cursor nur auf Monitorflächen | ✔ | ✔ | ✔ in logischen Pixeln | ✔¹ |
 | Verbindungsqualität: Latenz, Jitter, Verlust, Durchsatz | ✔ | ✔ | ✔ | ✔¹ |
 | Spielemodus: bei Vollbild festhalten, relative Mausbewegung für Spiele | ✔ Vollbild, eingefangener Zeiger | ✔ Vollbild | – | ✔ Vollbild¹ |
@@ -108,13 +109,17 @@ systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autost
   (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, kopierte
   Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, Fortschritt und Abbrechen von Sender und
   Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Spielemodus samt Gegenstellen aus 0.5,
-  Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Rechte je Rechner für jede
+  Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Abgleich von Feststelltaste,
+  Num und Rollen samt Gegenstellen aus 0.7, Rechte je Rechner für jede
   Art und Richtung samt sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene
   vertrauliche Inhalte, Ablehnung unbekannter Clients, LAN-Suche).
 - Windows-Tastaturlayouts: echter Test mit dem deutschen und dem US-Layout (AltGr, tote Tasten, Kürzel), soweit
   sie auf dem Rechner eingerichtet sind.
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
   die der Explorer anschließend selbst einfügt, und mit den Formaten, mit denen Passwortmanager markieren.
+- Feststelltaste und Num unter Windows: echt umgeschaltet und zurückgestellt (`SendInput`, `GetKeyState`),
+  solange der Rechner nicht gesperrt ist. Unter X11 setzt und liest der X11-Test sie. macOS
+  (`IOHIDSetModifierLockState`) ist nur übersetzt, nicht auf einem echten Mac geprüft.
 - Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
 - Wayland: Einspeisen über libei gegen eine EIS-Gegenstelle im Test und gegen mutter ohne Bildschirm
   (eigener CI-Job, noch experimentell). Portal, Freigabe-Dialog und Erfassen sind nur übersetzt, nicht
@@ -148,6 +153,12 @@ systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autost
   tippst, auch bei anderem Layout (z. B. Server Deutsch, Mac US): Y und Z, Umlaute, @, €, Klammern, ^ und ´.
   Kürzel wie Strg+Z gehen nach dem Zeichen, Pfeile, F-Tasten und Co. bleiben Tasten. Für Spiele die
   Tastenposition lassen. Clients mit älterem Qross oder unter Wayland bekommen weiter Tastenpositionen.
+- **Feststelltaste, Num und Rollen** stehen auf allen Rechnern gleich, wie bei Synergy. Betritt der Cursor einen
+  Client, übernimmt der den Stand des Servers. Drückst du die Taste, während der Cursor auf einem Client ist,
+  schalten Server und Client um, und die Leuchten der Tastatur stimmen. Die eigene Tastatur eines Clients
+  schaltet nur dort, bis der Cursor ihn das nächste Mal betritt. Am Mac gibt es nur die Feststelltaste; Num
+  und Rollen eines Clients bleiben dann, wie sie sind. Mit Qross bis 0.7 auf einer Seite geht die Taste wie
+  bisher nur an den Rechner mit dem Cursor.
 
 ## Download
 

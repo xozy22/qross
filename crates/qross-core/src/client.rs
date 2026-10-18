@@ -106,6 +106,8 @@ impl ClientState {
             // Dateiübertragung: übernimmt die Laufzeit; die Position kommt mit dem Drop.
             Input::DragStart { .. } => (Vec::new(), None),
             Input::Drop { x, y, .. } => (vec![Inject::MoveTo { x, y }], None),
+            // Stand der Sperrtasten des Servers übernehmen (beim Verlassen bleibt er, wie er ist)
+            Input::Locks(locks) => (vec![Inject::Locks(locks)], None),
         }
     }
 
@@ -181,6 +183,7 @@ impl ClientState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qross_proto::LockState;
 
     fn mv(epoch: u16, seq: u32, x: i32) -> MouseMove {
         MouseMove { epoch, seq, x, y: 0 }
@@ -290,6 +293,18 @@ mod tests {
         let mut c = ClientState::new();
         let (injects, _) = c.on_input(Input::Key { key: KeyCode::A, down: true });
         assert!(injects.is_empty());
+    }
+
+    #[test]
+    fn the_lock_state_of_the_server_is_taken_over_while_active() {
+        let locks = LockState { caps: Some(true), num: Some(true), scroll: None };
+        let mut c = ClientState::new();
+        assert!(c.on_input(Input::Locks(locks)).0.is_empty(), "nicht aktiv");
+        c.on_input(Input::Enter { epoch: 1, x: 0, y: 0 });
+        assert_eq!(c.on_input(Input::Locks(locks)), (vec![Inject::Locks(locks)], None));
+        // Beim Verlassen bleibt der Stand: Er ist ja der des Servers
+        let (injects, _) = c.on_input(Input::Leave);
+        assert!(injects.is_empty(), "{injects:?}");
     }
 
     fn delta(epoch: u16, seq: u32, dx: i32) -> MouseDelta {

@@ -10,6 +10,7 @@ mod drag;
 mod game;
 mod inject;
 mod layout;
+mod locks;
 mod media;
 mod pasteboard;
 mod permissions;

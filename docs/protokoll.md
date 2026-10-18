@@ -2,7 +2,8 @@
 
 Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischenablage, seit Qross 0.4 um
 Drag & Drop vom Client zum Server, seit Qross 0.5 um die einzelnen Monitore eines Clients, seit Qross 0.6
-um den Spielemodus und seit Qross 0.7 um Zeichen statt Tastenpositionen und Rechte je Rechner (siehe unten).
+um den Spielemodus, seit Qross 0.7 um Zeichen statt Tastenpositionen und Rechte je Rechner und seit Qross 0.8
+um den Abgleich von Feststelltaste, Num und Rollen (siehe unten).
 
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
@@ -21,9 +22,9 @@ Implementierung: `crates/qross-proto`.
 
 | Kanal | Richtung | Zuverlässig | Inhalt |
 |---|---|---|---|
-| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing` |
+| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing`, `SyncsLocks` |
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
-| Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel`, im Zeichenmodus `Text`, `Shortcut` |
+| Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel`, im Zeichenmodus `Text`, `Shortcut`, `Locks` |
 | Datagramm | Server → Client | **nein** | `MouseMove`, im Spielemodus `MouseDelta` |
 | Clipboard (je Übertragung ein eigener Stream, Priorität −10) | ⇄ | ja | `Clipboard::Data { text, html, png }`, `Clipboard::Files { transfer, entries, data }` |
 | Datei für Drag & Drop (je Datei ein eigener Stream, Priorität −10) | Server → Client | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
@@ -56,9 +57,12 @@ große Schwachpunkt von Synergy.
    Zeichen statt Tastenposition).
    Ab Version 7 schickt der Server gleich nach dem `Welcome` die Rechte des Clients (`Sharing`, siehe Rechte
    je Rechner).
+   Ab Version 8 meldet der Client mit `SyncsLocks` direkt nach dem `Welcome`, dass er Feststelltaste, Num und
+   Rollen setzen kann (siehe Feststelltaste, Num und Rollen).
 3. Der Server öffnet den Input-Stream.
-4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`. Danach folgen
-   `MouseMove`-Datagramme (im Spielemodus `MouseDelta`) mit dieser `epoch` und steigender `seq`.
+4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`, bei Clients mit
+   `SyncsLocks` gleich gefolgt von `Locks`. Danach folgen `MouseMove`-Datagramme (im Spielemodus `MouseDelta`)
+   mit dieser `epoch` und steigender `seq`.
 5. Verlässt der Cursor den Client: `Leave`. Der Client lässt alle Tasten los und schickt sein Clipboard,
    falls es sich geändert hat.
 
@@ -360,3 +364,33 @@ Die Stufe richtet sich nach dem schlechtesten der drei Werte (Grenzen jeweils au
 - Zwischenablage: RTF; virtuelle Dateien (z. B. Outlook-Anhänge) und Dateien erst beim Einfügen übertragen
 - Bildschirmschoner-Sync, Strg+Alt+Entf, Secure Desktop (UAC)
 - Wayland (libei/InputCapture-Portal)
+
+## Feststelltaste, Num und Rollen
+
+Seit Qross 0.8 stehen diese Tasten auf allen Rechnern gleich, wie bei Synergy. Maßgeblich ist der Server:
+An ihm hängt die Tastatur, und ihre Leuchten zeigen seinen Stand.
+
+- **Betreten:** Gleich nach `Enter` liest der Server seinen Stand und schickt
+  `Locks(LockState { caps, num, scroll })` (je `Option<bool>`). Der Client stellt seine Tasten genauso ein und
+  schaltet dabei nur um, was abweicht. `None` heißt: Diese Taste kann der Server nicht lesen (am Mac Num und
+  Rollen); der Client lässt seine, wie sie ist.
+- **Drücken auf dem Client:** Drückt man eine der Tasten, während der Cursor auf einem Client steht, schaltet
+  der Server mit und schickt den neuen Stand als `Locks`. Den Tastendruck selbst bekommt der Client nicht: Er
+  schaltete ihn ein zweites Mal um. Ist die Taste für diesen Client umbelegt oder kennt der Server ihren Stand
+  nicht, geht sie wie jede andere als `Key`.
+- **Zurück auf dem Server:** nichts zu tun, er hat den Stand schon. Beim Verlassen bleibt der Client, wie er
+  ist. Schaltet man am Client mit dessen eigener Tastatur, gilt das dort bis zum nächsten Betreten.
+- **Eine Einstellung gibt es nicht.** Wer die Fang-Taste auf Rollen legt (Standard), schaltet damit Rollen
+  nur, solange der Cursor auf dem Server ist; auf einem Client fängt Qross die Taste ab.
+
+| System | Lesen | Setzen | Wenn man auf dem Client drückt, schaltet der Server … |
+|---|---|---|---|
+| Windows | `GetKeyState(VK_CAPITAL / VK_NUMLOCK / VK_SCROLL) & 1` | Taste per `SendInput` drücken, nur wenn der Stand abweicht | mit, weil die Erfassung diese Tasten durchlässt |
+| macOS | `IOHIDGetModifierLockState(kIOHIDCapsLockState)`; Num und Rollen gibt es nicht | `IOHIDSetModifierLockState`; ein künstliches CGEvent schaltet nicht um. Eingespeiste Tasten tragen danach das Flag AlphaShift | selbst um, bevor der Event-Tap die Taste sieht; der Tap liest den Stand aus deren Flags |
+| X11 | eingerastete Modifier aus `XkbGetState`: Lock, Num auf dem Modifier mit dem Keysym `Num_Lock`; Rollen ist kein Modifier | `XkbLatchLockState` wie `numlockx`, für alle Tastaturen, Leuchten folgen | selbst um (XKB wertet die Taste vor dem Grab aus); die Erfassung liest danach den Stand |
+| Wayland | als Client aus `ei_keyboard.modifiers`, sofern der Compositor es meldet; als Server nicht | nur durch Drücken der Taste über libei | – (Server: Taste geht wie bisher an den Client) |
+
+**Kompatibilität:** Ein neuer Server meldet im `Welcome` die Version 8. Nur dann sendet der Client
+`SyncsLocks`; Server bis Qross 0.7 bekommen die Nachricht nie und schicken die Tasten wie bisher. `Locks`
+kann ein Client bis 0.7 nicht lesen (sein Input-Stream bräche ab). Er bekommt es nie, sondern weiter die
+Tasten selbst.

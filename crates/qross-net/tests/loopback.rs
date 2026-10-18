@@ -18,7 +18,8 @@ use qross_platform::dryrun::{CaptureCall, RecordingCapture, RecordingInjector, S
 use qross_platform::Clipboard;
 use qross_proto::{
     read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, DragMessage, Edge, FileEntry, GameState,
-    KeyCode, MouseButton, MouseMove, Platform, Rect, ScreenInfo, StreamKind, PROTOCOL_VERSION, SERVER_VERSION,
+    KeyCode, LockState, MouseButton, MouseMove, Platform, Rect, ScreenInfo, StreamKind, PROTOCOL_VERSION,
+    SERVER_VERSION,
 };
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -1845,6 +1846,197 @@ async fn an_older_client_set_to_characters_gets_keys_it_can_read() {
         "{log:?}"
     );
     assert!(matches!(log[0], Ok(Some(InputV06::Enter { .. }))), "{log:?}");
+    assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
+    reader.abort();
+    server_task.abort();
+}
+
+// --- Feststelltaste, Num und Rollen -------------------------------------------------------------
+
+/// Wie unter Windows: alle drei lesbar
+const SERVER_LOCKS: LockState = LockState { caps: Some(false), num: Some(true), scroll: Some(false) };
+
+/// Welche Stände der Client übernommen hat
+fn locks_injected(injected: &RecordingInjector) -> Vec<LockState> {
+    let log = injected.0.lock().unwrap();
+    log.iter().filter_map(|i| if let Inject::Locks(locks) = i { Some(*locks) } else { None }).collect()
+}
+
+fn caps_injected(injected: &RecordingInjector) -> bool {
+    injected.0.lock().unwrap().iter().any(|i| matches!(i, Inject::Key { key: KeyCode::CAPS_LOCK, .. }))
+}
+
+#[tokio::test]
+async fn clients_take_over_the_lock_state_of_the_server() {
+    let s = start_typing(KeyMode::Position, RecordingInjector::locking());
+    // Vor dem ersten `await`, denn der Server liest beim Start, welche Sperrtasten er kennt
+    *s.capture.3.lock().unwrap() = SERVER_LOCKS;
+    enter_laptop(&s).await;
+    let injected = s.injected.clone();
+    wait_for("Stand beim Betreten", || locks_injected(&injected) == [SERVER_LOCKS]).await;
+
+    // Feststelltaste, während der Cursor auf dem Client ist: Der Server schaltet mit (das meldet die
+    // Erfassung), der Client bekommt den neuen Stand statt der Taste.
+    let caps_on = LockState { caps: Some(true), ..SERVER_LOCKS };
+    *s.capture.3.lock().unwrap() = caps_on;
+    for event in [
+        CaptureEvent::Key { key: KeyCode::CAPS_LOCK, down: true },
+        CaptureEvent::Locks(caps_on),
+        CaptureEvent::Key { key: KeyCode::CAPS_LOCK, down: false },
+        CaptureEvent::Key { key: KeyCode::A, down: true },
+        CaptureEvent::Key { key: KeyCode::A, down: false },
+    ] {
+        s.events.send(event).unwrap();
+    }
+    wait_for("A beim Client", || injected.0.lock().unwrap().contains(&Inject::Key { key: KeyCode::A, down: false })).await;
+    assert_eq!(locks_injected(&s.injected), [SERVER_LOCKS, caps_on]);
+    assert!(!caps_injected(&s.injected), "die Taste selbst schaltete den Client ein zweites Mal um");
+
+    // Zurück auf dem Server wird dort Num ausgeschaltet; beim nächsten Besuch übernimmt der Client das.
+    s.events.send(CaptureEvent::MouseDelta { dx: -5000, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("Rückkehr zum Server", || released(&capture)).await;
+    let num_off = LockState { num: Some(false), ..caps_on };
+    *s.capture.3.lock().unwrap() = num_off;
+    s.capture.0.lock().unwrap().clear();
+    enter_laptop(&s).await;
+    wait_for("Stand beim zweiten Betreten", || locks_injected(&injected) == [SERVER_LOCKS, caps_on, num_off]).await;
+}
+
+#[tokio::test]
+async fn a_server_that_cannot_read_its_locks_keeps_sending_the_keys() {
+    // Wie unter Wayland: Der Server kennt seinen Stand nicht; die Taste geht wie früher als Taste.
+    let s = start_typing(KeyMode::Position, RecordingInjector::locking());
+    enter_laptop(&s).await;
+    s.events.send(CaptureEvent::Key { key: KeyCode::CAPS_LOCK, down: true }).unwrap();
+    s.events.send(CaptureEvent::Key { key: KeyCode::CAPS_LOCK, down: false }).unwrap();
+    let injected = s.injected.clone();
+    wait_for("Feststelltaste beim Client", || {
+        injected.0.lock().unwrap().contains(&Inject::Key { key: KeyCode::CAPS_LOCK, down: false })
+    })
+    .await;
+    assert!(locks_injected(&s.injected).is_empty());
+}
+
+/// So sah `Control` in Qross 0.7 aus.
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+enum ControlV07 {
+    Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+    Welcome { version: u16, server_name: String, platform: Platform },
+    Reject { reason: String },
+    ScreenChanged(ScreenInfo),
+    Monitors(Vec<Rect>),
+    Game(GameState),
+    TypesText,
+    Sharing(Sharing),
+}
+
+/// So sah `Input` in Qross 0.7 aus.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+enum InputV07 {
+    Enter { epoch: u16, x: i32, y: i32 },
+    Leave,
+    Key { key: KeyCode, down: bool },
+    Button { button: MouseButton, down: bool, x: i32, y: i32 },
+    Wheel { dx: i16, dy: i16 },
+    DragStart { transfer: u64, entries: Vec<qross_proto::FileEntry> },
+    Drop { transfer: u64, x: i32, y: i32 },
+    Text { key: KeyCode, text: String },
+    Shortcut { key: KeyCode, ch: char },
+}
+
+#[tokio::test]
+async fn the_client_offers_lock_sync_only_to_servers_that_know_it() {
+    // Qross 0.7 meldet Version 7 und trennte bei `SyncsLocks`: Er bekommt nur, was er lesen kann.
+    for frame in client_reports_with(7, RecordingInjector::locking()).await {
+        let msg = postcard::from_bytes::<ControlV07>(&frame);
+        assert!(msg.is_ok(), "ein Server aus 0.7 kann {msg:?} nicht lesen");
+    }
+    let frames = client_reports_with(SERVER_VERSION, RecordingInjector::locking()).await;
+    let messages: Vec<Control> = frames.iter().map(|f| postcard::from_bytes(f).unwrap()).collect();
+    assert_eq!(messages, vec![Control::SyncsLocks, Control::Game(FULLSCREEN)]);
+}
+
+#[tokio::test]
+async fn an_older_client_keeps_getting_lock_keys() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let server = Server::bind(config, &server_id, trust).unwrap();
+    let addr = server.local_addr().unwrap();
+    let capture = RecordingCapture::default();
+    *capture.3.lock().unwrap() = SERVER_LOCKS;
+    let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(capture.clone()),
+        events: events_rx,
+        clipboard: Box::new(SharedClipboard::default()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+    }));
+
+    // Ein Client wie Qross 0.7: Hello, Welcome, kein `SyncsLocks`
+    let (_endpoint, conn) = connect_raw(addr, &client_id).await;
+    let (mut control, mut control_rx) = conn.open_bi().await.unwrap();
+    let hello = Control::Hello { version: PROTOCOL_VERSION, name: "laptop".into(), screen: ScreenInfo { bounds: LAPTOP }, platform: Platform::Linux };
+    write_frame(&mut control, &hello).await.unwrap();
+    let welcome = read_frame::<_, ControlV07>(&mut control_rx).await.unwrap();
+    assert!(matches!(welcome, Some(ControlV07::Welcome { version: SERVER_VERSION, .. })), "{welcome:?}");
+
+    let inputs = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let (conn, inputs) = (conn.clone(), inputs.clone());
+        tokio::spawn(async move {
+            let mut stream = conn.accept_uni().await.unwrap();
+            let mut kind = [0u8; 1];
+            stream.read_exact(&mut kind).await.unwrap();
+            assert_eq!(kind[0], 1, "Input-Stream");
+            loop {
+                let input = read_frame::<_, InputV07>(&mut stream).await.map_err(|e| e.to_string());
+                let end = !matches!(input, Ok(Some(_)));
+                inputs.lock().unwrap().push(input);
+                if end {
+                    break;
+                }
+            }
+        })
+    };
+    let calls = capture.clone();
+    wait_for("Wechsel zum alten Client", || {
+        let _ = events.send(edge_hit());
+        calls.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    let caps_on = LockState { caps: Some(true), ..SERVER_LOCKS };
+    for event in [
+        CaptureEvent::Key { key: KeyCode::CAPS_LOCK, down: true },
+        CaptureEvent::Locks(caps_on),
+        CaptureEvent::Key { key: KeyCode::CAPS_LOCK, down: false },
+        CaptureEvent::Key { key: KeyCode::A, down: true },
+    ] {
+        events.send(event).unwrap();
+    }
+    let received = inputs.clone();
+    wait_for("Tasten beim alten Client", || received.lock().unwrap().len() >= 4).await;
+    let log = inputs.lock().unwrap().clone();
+    assert!(matches!(log[0], Ok(Some(InputV07::Enter { .. }))), "{log:?}");
+    assert_eq!(
+        log[1..],
+        [
+            Ok(Some(InputV07::Key { key: KeyCode::CAPS_LOCK, down: true })),
+            Ok(Some(InputV07::Key { key: KeyCode::CAPS_LOCK, down: false })),
+            Ok(Some(InputV07::Key { key: KeyCode::A, down: true })),
+        ],
+        "Feststelltaste wie bisher, kein Stand, den er nicht lesen könnte: {log:?}"
+    );
     assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
     reader.abort();
     server_task.abort();

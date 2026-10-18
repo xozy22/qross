@@ -45,7 +45,7 @@ use std::sync::Arc;
 
 use qross_core::keys::KeyOptions;
 use qross_core::{CaptureEvent, Inject};
-use qross_proto::{ClipboardData, GameState, Rect};
+use qross_proto::{ClipboardData, GameState, LockState, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Steuerung der Eingabe-Erfassung auf dem Server.
@@ -68,6 +68,12 @@ pub trait Capture: Send + Sync {
     fn drop_folder(&self, _x: i32, _y: i32) -> Option<PathBuf> {
         None
     }
+    /// Stand von Feststelltaste, Num und Rollen auf diesem Rechner; `None` je Taste: gibt es hier
+    /// nicht bzw. nicht lesbar. Schaltet der Nutzer eine davon um, während der Cursor auf einem
+    /// Client steht, schaltet der Server mit und die Erfassung meldet `CaptureEvent::Locks`.
+    fn locks(&self) -> LockState {
+        LockState::default()
+    }
 }
 
 pub trait Injector: Send {
@@ -76,6 +82,12 @@ pub trait Injector: Send {
     /// `Inject::Shortcut`)? Nur dann meldet der Client das dem Server, und der schickt ihm im
     /// Zeichenmodus Zeichen statt Tastenpositionen. Unter Wayland (libei) geht das nicht.
     fn types_text(&self) -> bool {
+        false
+    }
+    /// Kann dieser Rechner Feststelltaste, Num bzw. Rollen auf einen vorgegebenen Stand bringen
+    /// (`Inject::Locks`)? Nur dann meldet der Client das dem Server; der schickt ihm dann seinen Stand
+    /// statt der Tastendrücke.
+    fn syncs_locks(&self) -> bool {
         false
     }
     /// Ordner, in dem an (x, y) abgelegte Dateien landen sollen – z. B. das Explorer-Fenster oder

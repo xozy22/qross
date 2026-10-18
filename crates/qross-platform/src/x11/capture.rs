@@ -11,6 +11,9 @@
 //!
 //! Im Remote-Modus meldet die Erfassung zu jeder Zeichentaste, was sie in der Belegung des
 //! X-Servers ergibt (`CaptureEvent::Typed`, für Clients im Zeichenmodus).
+//!
+//! Feststelltaste und Num schaltet der X-Server auch während des Grabs um; nach jedem Druck liest
+//! die Erfassung den Stand und meldet Änderungen (`CaptureEvent::Locks`).
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +25,7 @@ use anyhow::{Context, Result};
 use qross_core::chars::is_typing_key;
 use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions, Mods};
 use qross_core::CaptureEvent;
-use qross_proto::{Edge, KeyCode, MouseButton};
+use qross_proto::{Edge, KeyCode, Lock, LockState, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
 use x11rb::connection::Connection;
 use x11rb::protocol::xkb::{self, ConnectionExt as _};
@@ -32,6 +35,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::{CURRENT_TIME, NONE};
 
 use super::keymap::Keymap;
+use super::locks::LockMasks;
 use crate::keymap_linux::{evdev_from_hid, hid_from_evdev, X11_OFFSET};
 use crate::Capture;
 
@@ -55,6 +59,8 @@ struct Shared {
     grabbed: Mutex<Vec<(u8, ModMask)>>,
     /// Dateien vom Client warten: das nächste Loslassen meldet `LocalDrop`
     await_drop: AtomicBool,
+    /// Feststelltaste und Num (ohne XKB: `None`)
+    locks: Option<LockMasks>,
 }
 
 /// Feststell- und Num-Taste sollen die Kürzel nicht verhindern.
@@ -87,6 +93,11 @@ impl Shared {
         let _ = self.conn.ungrab_pointer(CURRENT_TIME);
         let _ = self.conn.ungrab_keyboard(CURRENT_TIME);
     }
+
+    fn read_locks(&self) -> LockState {
+        let read = self.locks.map(|masks| masks.read(&self.conn));
+        read.and_then(|r| r.map_err(|e| tracing::debug!("Sperrtasten nicht lesbar: {e:#}")).ok()).unwrap_or_default()
+    }
 }
 
 pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> {
@@ -100,6 +111,9 @@ pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> 
         let none = xkb::BoolCtrl::from(0u32);
         let _ = conn.xkb_per_client_flags(device, flag, flag, none, none, none);
     }
+    let locks = xkb_ok.then(|| LockMasks::fetch(&conn)).and_then(|masks| {
+        masks.map_err(|e| tracing::warn!("Feststelltaste und Num nicht lesbar: {e:#}")).ok()
+    });
     let shared = Arc::new(Shared {
         conn,
         root,
@@ -109,6 +123,7 @@ pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> 
         keys: Mutex::new(KeyOptions::default()),
         grabbed: Mutex::new(Vec::new()),
         await_drop: AtomicBool::new(false),
+        locks,
     });
     X11Capture(shared.clone()).set_key_options(KeyOptions::default());
     let worker = shared.clone();
@@ -172,6 +187,10 @@ impl Capture for X11Capture {
         self.0.await_drop.store(true, Ordering::Release);
     }
 
+    fn locks(&self) -> LockState {
+        self.0.read_locks()
+    }
+
     fn capture_remote(&self) {
         let s = &self.0;
         let mask = EventMask::POINTER_MOTION | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE;
@@ -220,6 +239,8 @@ fn run(s: &Shared) -> Result<()> {
     let mut size_checked = Instant::now();
     let mut hotkey = HotkeyTracker::new();
     let mut was_remote = false;
+    // Zuletzt gemeldeter Stand der Sperrtasten (Remote-Modus)
+    let mut locks = LockState::default();
     // Belegung für den Zeichenmodus; ohne sie bleibt es bei Tastenpositionen
     let mut keymap = Keymap::fetch(&s.conn).map_err(|e| tracing::warn!("Tastaturbelegung nicht lesbar: {e:#}")).ok();
 
@@ -228,6 +249,7 @@ fn run(s: &Shared) -> Result<()> {
         if remote && !was_remote {
             // Was lokal an Zusatztasten passierte, hat die Erfassung nicht gesehen.
             sync_modifiers(&s.conn, &mut hotkey)?;
+            locks = s.read_locks();
         } else if !remote && was_remote {
             // Das Loslassen gedrückter Kürzel-Tasten geht jetzt an andere Programme.
             hotkey.forget_keys();
@@ -280,6 +302,8 @@ fn run(s: &Shared) -> Result<()> {
             continue;
         };
         let (cx, cy) = s.center();
+        // Feststelltaste oder Num gedrückt bzw. losgelassen: danach den Stand lesen
+        let mut lock_key = false;
         let report = match event {
             Event::MotionNotify(e) => {
                 let (dx, dy) = (i32::from(e.root_x) - i32::from(cx), i32::from(e.root_y) - i32::from(cy));
@@ -308,6 +332,7 @@ fn run(s: &Shared) -> Result<()> {
                     pressed.clear();
                     Some(CaptureEvent::PanicReturn)
                 } else if let Some(key) = hid_from_evdev(code) {
+                    lock_key = Lock::of_key(key).is_some();
                     let options = s.keys.lock().unwrap_or_else(|e| e.into_inner());
                     match hotkey.on_key(key, down, &options) {
                         HotkeyEvent::Triggered { event, .. } => Some(event),
@@ -329,6 +354,14 @@ fn run(s: &Shared) -> Result<()> {
         };
         if let Some(event) = report {
             let _ = s.events.send(event);
+        }
+        if lock_key {
+            // Einrasten beim Drücken, Lösen erst beim Loslassen (XKB `LockMods`)
+            let now = s.read_locks();
+            if now != locks {
+                locks = now;
+                let _ = s.events.send(CaptureEvent::Locks(now));
+            }
         }
     }
 }
