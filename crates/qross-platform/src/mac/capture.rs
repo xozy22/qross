@@ -51,7 +51,7 @@ struct TapState {
     /// Vor dem Wechsel lokal gedrückte Tasten – ihr Loslassen geht lokal durch
     local_keys: HashSet<u16>,
     local_buttons: [bool; 5],
-    /// Erkennt die Fang-Taste
+    /// Erkennt Fang-Taste und Wechsel-Kürzel
     hotkey: HotkeyTracker,
 }
 
@@ -161,19 +161,20 @@ fn handle(s: &Shared, state: &RefCell<TapState>, kind: CGEventType, event: &CGEv
         } else {
             st.pressed.remove(&code);
         }
-        // Fang-Taste: hält den Cursor auf dem aktuellen Bildschirm fest bzw. gibt ihn frei
-        let options = *s.keys.lock().unwrap_or_else(|e| e.into_inner());
-        if let (Some(key), Some(lock)) = (hid_from_mac(code), options.lock.as_ref()) {
-            let result = st.hotkey.on_key(key, down, Some(lock));
+        // Fang-Taste (hält den Cursor fest bzw. gibt ihn frei) und Wechsel-Kürzel
+        if let Some(key) = hid_from_mac(code) {
+            let options = s.keys.lock().unwrap_or_else(|e| e.into_inner());
+            let hotkey = st.hotkey.on_key(key, down, &options);
             if code == KVK_CAPS_LOCK {
                 // Caps Lock meldet nur das Drücken
-                st.hotkey.on_key(key, false, Some(lock));
+                st.hotkey.on_key(key, false, &options);
             }
-            if result == HotkeyEvent::Triggered {
-                send(CaptureEvent::ToggleLock);
-            }
-            if result != HotkeyEvent::None {
-                return if remote || lock.swallow_locally() { CallbackResult::Drop } else { CallbackResult::Keep };
+            if hotkey != HotkeyEvent::None {
+                let swallow = hotkey.swallow(remote);
+                if let HotkeyEvent::Triggered { event, .. } = hotkey {
+                    send(event);
+                }
+                return if swallow { CallbackResult::Drop } else { CallbackResult::Keep };
             }
         }
     }

@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use qross_proto::{Edge, KeyCode, MouseButton};
 
+use crate::keys::SwitchTarget;
+
 /// Was die Eingabe-Erfassung des Servers meldet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureEvent {
@@ -16,6 +18,8 @@ pub enum CaptureEvent {
     PanicReturn,
     /// Rollen-Taste: Cursor auf dem aktuellen Bildschirm festhalten bzw. wieder freigeben.
     ToggleLock,
+    /// Wechsel-Kürzel: zu einem Rechner bzw. zum Nachbarn in einer Richtung wechseln
+    SwitchTo(SwitchTarget),
     /// Antwort auf `Action::ProbeDrag`: die gezogenen Dateien, leer wenn kein Datei-Drag lief.
     DragProbeResult { files: Vec<PathBuf> },
     /// Nach `Action::AwaitLocalDrop`: Maustaste hier losgelassen – Dateien vom Client ablegen.

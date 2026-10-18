@@ -58,7 +58,7 @@ pub struct Server {
     discovery: bool,
     /// Kopierte Dateien bis zu dieser Gesamtgröße mitgeben (0 = nie)
     clipboard_file_limit: u64,
-    /// Fang-Taste, Medientasten, Umbelegung je Rechner
+    /// Fang-Taste, Wechsel-Kürzel, Medientasten, Umbelegung je Rechner
     keys: KeyConfig,
     /// Bei Vollbild bzw. eingefangenem Zeiger festhalten und relative Bewegungen schicken
     game_mode: bool,
@@ -180,7 +180,7 @@ impl Server {
     }
 
     /// Fang-Taste, Medientasten und Umbelegung je Rechner (Standard: Rollen-Taste,
-    /// Medientasten an den aktiven Rechner, keine Umbelegung).
+    /// Medientasten an den aktiven Rechner, keine Umbelegung) sowie Wechsel-Kürzel (Standard: keine).
     pub fn with_keys(mut self, keys: KeyConfig) -> Self {
         self.keys = keys;
         self
@@ -273,7 +273,14 @@ impl Server {
         state.set_switch_options(self.switching);
         state.set_game_mode(self.game_mode);
         state.set_key_maps(self.keys.remap.clone());
-        capture.set_key_options(self.keys.options);
+        for (hotkey, target) in &self.keys.options.switch {
+            if let qross_core::keys::SwitchTarget::Screen(name) = target {
+                if *name != self.config.name && !self.config.layout.contains(name) {
+                    warn!("Kürzel „{hotkey}“ führt zu „{name}“, der nicht im Layout steht");
+                }
+            }
+        }
+        capture.set_key_options(self.keys.options.clone());
         let _discovery = self.discovery.then(|| {
             let port = self.local_addr().map(|a| a.port()).unwrap_or_default();
             AbortOnDrop(tokio::spawn(discovery::respond(self.config.name.clone(), port, self.fingerprint.to_string())))
@@ -312,11 +319,11 @@ impl Server {
                         }
                         let mut actions = state.handle(ServerEvent::Capture(CaptureEvent::MouseDelta { dx, dy }));
                         if let Some(event) = next {
-                            actions.extend(state.handle(ServerEvent::Capture(event)));
+                            actions.extend(self.on_capture(&mut state, event));
                         }
                         actions
                     }
-                    Some(event) => state.handle(ServerEvent::Capture(event)),
+                    Some(event) => self.on_capture(&mut state, event),
                     None => bail!("Eingabe-Erfassung wurde beendet"),
                 },
                 Some(event) = net_rx.recv() => match event {
@@ -498,6 +505,24 @@ impl Server {
             }
             self.notify(ServerNotice::GameHold { screen, game });
         }
+    }
+
+    /// Erfassung an den Kern geben und Wechsel per Tastenkürzel ins Protokoll schreiben
+    /// (ob und warum der Cursor festgehalten wird, meldet `report_hold`).
+    fn on_capture(&self, state: &mut ServerState, event: CaptureEvent) -> Vec<Action> {
+        let switch = match &event {
+            CaptureEvent::SwitchTo(target) => Some(target.label()),
+            _ => None,
+        };
+        let actions = state.handle(ServerEvent::Capture(event));
+        if let Some(target) = switch {
+            if actions.is_empty() {
+                info!("Kürzel {target}: kein Wechsel (Ziel nicht verbunden, Cursor festgehalten oder schon dort)");
+            } else {
+                info!("Kürzel {target}: Cursor jetzt auf „{}“", state.active_screen());
+            }
+        }
+        actions
     }
 
     fn admit(&mut self, name: &str, fingerprint: &Fingerprint, clients: &HashMap<String, ClientHandle>) -> Result<(), String> {

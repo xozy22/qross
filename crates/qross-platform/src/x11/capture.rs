@@ -1,7 +1,8 @@
 //! Eingabe-Erfassung unter X11.
 //!
-//! Lokaler Modus: Zeigerposition alle 4 ms abfragen und Kanten melden. Gegriffen wird nur die
-//! Fang-Taste (passiver Tastengriff), sonst verhält sich das System völlig normal.
+//! Lokaler Modus: Zeigerposition alle 4 ms abfragen und Kanten melden. Gegriffen werden nur die
+//! Kürzel (Fang-Taste, Wechsel-Kürzel; passiver Tastengriff), sonst verhält sich das System
+//! völlig normal.
 //! Remote-Modus: Zeiger und Tastatur auf dem Root-Fenster grabben, Cursor durch einen leeren
 //! ersetzen und nach jeder Bewegung in die Mitte zurücksetzen.
 //!
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions, Mods};
 use qross_core::CaptureEvent;
-use qross_proto::{Edge, MouseButton};
+use qross_proto::{Edge, KeyCode, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
 use x11rb::connection::Connection;
 use x11rb::protocol::xkb::{self, ConnectionExt as _};
@@ -45,13 +46,13 @@ struct Shared {
     remote: AtomicBool,
     events: UnboundedSender<CaptureEvent>,
     keys: Mutex<KeyOptions>,
-    /// Passiv gegriffene Fang-Taste (X11-Keycode, Zusatztasten)
-    grabbed: Mutex<Option<(u8, ModMask)>>,
+    /// Passiv gegriffene Kürzel (X11-Keycode, Zusatztasten)
+    grabbed: Mutex<Vec<(u8, ModMask)>>,
     /// Dateien vom Client warten: das nächste Loslassen meldet `LocalDrop`
     await_drop: AtomicBool,
 }
 
-/// Feststell- und Num-Taste sollen die Fang-Taste nicht verhindern.
+/// Feststell- und Num-Taste sollen die Kürzel nicht verhindern.
 fn lock_variants() -> [ModMask; 4] {
     [ModMask::from(0u16), ModMask::LOCK, ModMask::M2, ModMask::LOCK | ModMask::M2]
 }
@@ -101,7 +102,7 @@ pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> 
         remote: AtomicBool::new(false),
         events,
         keys: Mutex::new(KeyOptions::default()),
-        grabbed: Mutex::new(None),
+        grabbed: Mutex::new(Vec::new()),
         await_drop: AtomicBool::new(false),
     });
     X11Capture(shared.clone()).set_key_options(KeyOptions::default());
@@ -129,20 +130,36 @@ struct X11Capture(Arc<Shared>);
 impl Capture for X11Capture {
     fn set_key_options(&self, options: KeyOptions) {
         let s = &self.0;
-        *s.keys.lock().unwrap_or_else(|e| e.into_inner()) = options;
         let mut grabbed = s.grabbed.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((code, mods)) = grabbed.take() {
+        for (code, mods) in grabbed.drain(..) {
             for extra in lock_variants() {
                 let _ = s.conn.ungrab_key(code, s.root, mods | extra);
             }
         }
-        let target = options.lock.and_then(|h| Some((evdev_from_hid(h.key)? + X11_OFFSET, mod_mask(h.mods))));
-        if let Some((code, mods)) = target.and_then(|(code, mods)| Some((u8::try_from(code).ok()?, mods))) {
-            for extra in lock_variants() {
-                let _ = s.conn.grab_key(true, s.root, mods | extra, code, GrabMode::ASYNC, GrabMode::ASYNC);
+        for hotkey in options.hotkeys() {
+            let Some(code) = evdev_from_hid(hotkey.key).and_then(|code| u8::try_from(code + X11_OFFSET).ok()) else {
+                tracing::warn!("Kürzel „{hotkey}“: Diese Taste gibt es unter X11 nicht");
+                continue;
+            };
+            let mods = mod_mask(hotkey.mods);
+            if grabbed.contains(&(code, mods)) {
+                continue;
             }
-            *grabbed = Some((code, mods));
+            // Erst alle Varianten greifen, dann prüfen, ob ein anderes Programm schneller war
+            let cookies: Vec<_> = lock_variants()
+                .into_iter()
+                .filter_map(|extra| s.conn.grab_key(true, s.root, mods | extra, code, GrabMode::ASYNC, GrabMode::ASYNC).ok())
+                .collect();
+            let taken = cookies.into_iter().any(|cookie| cookie.check().is_err());
+            if taken {
+                tracing::warn!(
+                    "Kürzel „{hotkey}“ ist schon von einem anderen Programm belegt; es wirkt nur, solange der Cursor \
+                     auf einem anderen Rechner ist"
+                );
+            }
+            grabbed.push((code, mods));
         }
+        *s.keys.lock().unwrap_or_else(|e| e.into_inner()) = options;
         let _ = s.conn.flush();
     }
 
@@ -198,14 +215,15 @@ fn run(s: &Shared) -> Result<()> {
     let mut size_checked = Instant::now();
     let mut hotkey = HotkeyTracker::new();
     let mut was_remote = false;
-    // Lokal gedrückte Fang-Taste (gegen Auto-Repeat)
-    let mut local_hotkey_held = false;
 
     loop {
         let remote = s.remote.load(Ordering::Acquire);
         if remote && !was_remote {
             // Was lokal an Zusatztasten passierte, hat die Erfassung nicht gesehen.
-            hotkey = HotkeyTracker::new();
+            sync_modifiers(&s.conn, &mut hotkey)?;
+        } else if !remote && was_remote {
+            // Das Loslassen gedrückter Kürzel-Tasten geht jetzt an andere Programme.
+            hotkey.forget_keys();
         }
         was_remote = remote;
         if !remote {
@@ -224,17 +242,20 @@ fn run(s: &Shared) -> Result<()> {
                 let buttons_down = buttons;
                 let _ = s.events.send(CaptureEvent::EdgeHit { edge, x, y, buttons_down });
             }
-            // Lokal kommt nur die passiv gegriffene Fang-Taste an; Reste der Remote-Phase verwerfen.
-            let grabbed = s.grabbed.lock().unwrap_or_else(|e| e.into_inner()).map(|(code, _)| code);
+            // Lokal kommen nur die passiv gegriffenen Kürzel an; Reste der Remote-Phase verwerfen.
             while let Some(event) = s.conn.poll_for_event()? {
-                match event {
-                    Event::KeyPress(e) if Some(e.detail) == grabbed => {
-                        if !std::mem::replace(&mut local_hotkey_held, true) {
-                            let _ = s.events.send(CaptureEvent::ToggleLock);
-                        }
-                    }
-                    Event::KeyRelease(e) if Some(e.detail) == grabbed => local_hotkey_held = false,
-                    _ => {}
+                let (Event::KeyPress(e) | Event::KeyRelease(e)) = &event else { continue };
+                let down = matches!(event, Event::KeyPress(_));
+                let grabbed = s.grabbed.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&(code, _)| code == e.detail);
+                let Some(key) = hid_from_evdev(u16::from(e.detail).wrapping_sub(X11_OFFSET)).filter(|_| grabbed) else {
+                    continue;
+                };
+                if down {
+                    sync_modifiers(&s.conn, &mut hotkey)?;
+                }
+                let options = s.keys.lock().unwrap_or_else(|e| e.into_inner());
+                if let HotkeyEvent::Triggered { event, .. } = hotkey.on_key(key, down, &options) {
+                    let _ = s.events.send(event);
                 }
             }
             thread::sleep(POLL);
@@ -274,10 +295,10 @@ fn run(s: &Shared) -> Result<()> {
                     pressed.clear();
                     Some(CaptureEvent::PanicReturn)
                 } else if let Some(key) = hid_from_evdev(code) {
-                    let options = *s.keys.lock().unwrap_or_else(|e| e.into_inner());
-                    match hotkey.on_key(key, down, options.lock.as_ref()) {
-                        HotkeyEvent::Triggered => Some(CaptureEvent::ToggleLock),
-                        HotkeyEvent::Consumed => None,
+                    let options = s.keys.lock().unwrap_or_else(|e| e.into_inner());
+                    match hotkey.on_key(key, down, &options) {
+                        HotkeyEvent::Triggered { event, .. } => Some(event),
+                        HotkeyEvent::Consumed { .. } => None,
                         HotkeyEvent::None => Some(CaptureEvent::Key { key, down }),
                     }
                 } else {
@@ -290,6 +311,17 @@ fn run(s: &Shared) -> Result<()> {
             let _ = s.events.send(event);
         }
     }
+}
+
+/// Gerade gedrückte Zusatztasten vom X-Server übernehmen: Im lokalen Modus sieht die Erfassung
+/// nur die gegriffenen Kürzel, nicht Strg, Alt und Co.
+fn sync_modifiers(conn: &RustConnection, hotkey: &mut HotkeyTracker) -> Result<()> {
+    let keys = conn.query_keymap()?.reply()?.keys;
+    hotkey.sync_modifiers(|key: KeyCode| {
+        let Some(code) = evdev_from_hid(key).map(|code| usize::from(code + X11_OFFSET)) else { return false };
+        keys.get(code / 8).is_some_and(|byte| byte & (1 << (code % 8)) != 0)
+    });
+    Ok(())
 }
 
 fn button_event(detail: u8, down: bool) -> Option<CaptureEvent> {

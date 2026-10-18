@@ -150,6 +150,9 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
     let capture = qross_platform::start_capture(events)?;
     info!("Notausgang: Strg+Alt+Shift+Esc holt Maus und Tastatur sofort zurück");
+    for (hotkey, target) in file.keys.config()?.options.switch {
+        info!("Kürzel: {} wechselt {}", hotkey.label(cfg!(target_os = "macos")), target.label());
+    }
     if let Some(lock) = file.keys.config()?.options.lock {
         info!("Fang-Taste: {} hält den Cursor auf dem aktuellen Bildschirm fest", lock.label(cfg!(target_os = "macos")));
     }

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use qross_proto::{Edge, GameState, Input, MouseButton, MouseDelta, MouseMove, Rect};
 
 use crate::input::CaptureEvent;
-use crate::keys::KeyMap;
+use crate::keys::{KeyMap, SwitchTarget};
 use crate::layout::Layout;
 use crate::screen::{beyond, Screen};
 
@@ -428,6 +428,7 @@ impl ServerState {
                 }
             }
             CaptureEvent::Wheel { dx, dy } => self.send_remote(Input::Wheel { dx, dy }, out),
+            CaptureEvent::SwitchTo(target) => self.switch_to(target, out),
             CaptureEvent::Key { key, down } => {
                 if let Active::Remote { name, .. } = &self.active {
                     let key = self.key_maps.get(name).and_then(|map| map.get(&key)).copied().unwrap_or(key);
@@ -456,6 +457,49 @@ impl ServerState {
                     out.push(Action::DropIncoming { transfer, x, y });
                 }
             }
+        }
+    }
+
+    /// Wechsel per Kürzel: zu einem Rechner (Eintritt in der Mitte) oder zum Nachbarn in einer
+    /// Richtung (Eintritt an der gegenüberliegenden Kante, auf Höhe des Cursors; vom Server aus,
+    /// dessen Cursorposition der Kern nicht kennt, in der Mitte der Kante). Ist der Cursor
+    /// festgehalten oder das Ziel nicht verbunden, passiert nichts.
+    fn switch_to(&mut self, target: SwitchTarget, out: &mut Vec<Action>) {
+        if self.locked {
+            return;
+        }
+        let (from, rect, x, y) = match &self.active {
+            Active::Local => {
+                let (x, y) = self.local.center();
+                (self.me.clone(), self.local.hull(), x, y)
+            }
+            Active::Remote { name, x, y } => {
+                let Some(screen) = self.clients.get(name) else { return };
+                (name.clone(), screen.hull(), *x, *y)
+            }
+        };
+        let (name, edge) = match target {
+            SwitchTarget::Screen(name) => (name, None),
+            SwitchTarget::Direction(edge) => match self.layout.neighbor(&from, edge) {
+                Some(name) => (name.to_owned(), Some(edge)),
+                None => return,
+            },
+        };
+        if name == from {
+            return;
+        }
+        let Some(screen) = (if name == self.me { Some(&self.local) } else { self.clients.get(&name) }) else {
+            return;
+        };
+        let (tx, ty) = match edge {
+            Some(edge) => enter_point(rect, edge, x, y, screen),
+            None => screen.center(),
+        };
+        if name == self.me {
+            self.send_remote(Input::Leave, out);
+            self.go_local((tx, ty), out);
+        } else {
+            self.enter(name, tx, ty, out);
         }
     }
 
@@ -889,6 +933,92 @@ mod tests {
         assert!(!s.is_locked());
     }
 
+    fn switch_to(target: &str) -> ServerEvent {
+        ServerEvent::Capture(CaptureEvent::SwitchTo(target.parse().unwrap()))
+    }
+
+    #[test]
+    fn hotkeys_jump_to_the_middle_of_a_screen_and_back() {
+        let mut s = state();
+        assert_eq!(
+            s.handle(switch_to("laptop")),
+            vec![
+                Action::CaptureRemote,
+                Action::Send { to: "laptop".into(), input: Input::Enter { epoch: 1, x: 640, y: 400 } },
+                Action::SyncClipboard { to: "laptop".into() },
+            ]
+        );
+        assert_eq!(s.active_screen(), "laptop");
+        assert!(s.handle(switch_to("laptop")).is_empty(), "schon dort");
+        assert_eq!(
+            s.handle(switch_to("pc")),
+            vec![Action::Send { to: "laptop".into(), input: Input::Leave }, Action::ReleaseCapture { x: 960, y: 540 }]
+        );
+        assert_eq!(s.active_screen(), "pc");
+    }
+
+    #[test]
+    fn direction_hotkeys_enter_at_the_opposite_edge() {
+        let mut s = state();
+        // Vom Server aus: Mitte der Kante
+        assert!(s.handle(switch_to("right")).contains(&Action::Send {
+            to: "laptop".into(),
+            input: Input::Enter { epoch: 1, x: 1, y: 399 }
+        }));
+        // Vom Client aus: auf Höhe des Cursors
+        s.handle(delta(100, -299));
+        assert!(s.handle(switch_to("up")).is_empty(), "oben ist niemand");
+        assert_eq!(
+            s.handle(switch_to("left")),
+            vec![Action::Send { to: "laptop".into(), input: Input::Leave }, Action::ReleaseCapture { x: 1918, y: 135 }]
+        );
+        assert!(s.handle(switch_to("left")).is_empty(), "links vom Server ist niemand");
+    }
+
+    #[test]
+    fn hotkeys_do_nothing_for_absent_screens_or_a_held_cursor() {
+        let mut s = state();
+        assert!(s.handle(switch_to("tablet")).is_empty(), "nicht im Layout");
+        assert!(s.handle(switch_to("pc")).is_empty(), "schon auf dem Server");
+        s.handle(ServerEvent::Capture(CaptureEvent::ToggleLock));
+        assert!(s.handle(switch_to("laptop")).is_empty(), "Fang-Taste geht vor");
+        assert!(s.handle(switch_to("right")).is_empty());
+        s.handle(ServerEvent::Capture(CaptureEvent::ToggleLock));
+        s.handle(switch_to("laptop"));
+        s.handle(ServerEvent::Capture(CaptureEvent::ToggleLock));
+        assert!(s.handle(switch_to("pc")).is_empty(), "auch auf dem Client festgehalten");
+        assert_eq!(s.active_screen(), "laptop");
+
+        s.handle(ServerEvent::Capture(CaptureEvent::ToggleLock));
+        s.handle(switch_to("pc"));
+        s.handle(ServerEvent::ClientDisconnected { name: "laptop".into() });
+        assert!(s.handle(switch_to("laptop")).is_empty(), "nicht verbunden");
+        assert!(s.handle(switch_to("right")).is_empty());
+    }
+
+    #[test]
+    fn hotkeys_switch_between_clients() {
+        let layout = Layout::from_links(&[
+            LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() },
+            LinkConfig { from: "tablet".into(), edge: Edge::Right, to: "pc".into() },
+        ])
+        .unwrap();
+        let mut s = ServerState::new("pc", layout, PC);
+        s.handle(ServerEvent::ClientConnected { name: "laptop".into(), screen: LAPTOP });
+        s.handle(ServerEvent::ClientConnected { name: "tablet".into(), screen: Rect::new(0, 0, 800, 600) });
+        s.handle(switch_to("laptop"));
+        assert_eq!(
+            s.handle(switch_to("tablet")),
+            vec![
+                Action::Send { to: "laptop".into(), input: Input::Leave },
+                Action::Send { to: "tablet".into(), input: Input::Enter { epoch: 2, x: 400, y: 300 } },
+                Action::SyncClipboard { to: "tablet".into() },
+            ]
+        );
+        // Rechts vom Tablet liegt der Server, nicht der Laptop
+        assert!(s.handle(switch_to("right")).contains(&Action::ReleaseCapture { x: 1, y: 540 }));
+    }
+
     #[test]
     fn corners_do_not_switch() {
         let mut s = state();
@@ -1166,6 +1296,16 @@ mod tests {
         let actions = s.handle(ServerEvent::Capture(CaptureEvent::PanicReturn));
         assert!(actions.contains(&Action::ReleaseCapture { x: 960, y: 540 }), "{actions:?}");
         assert_eq!((s.active_screen(), s.hold()), ("pc", Hold::Free));
+    }
+
+    #[test]
+    fn hotkeys_land_on_a_monitor() {
+        let mut s = mac_state();
+        // Neben der Mitte des PCs liegt das MacBook
+        assert!(s.handle(switch_to("right")).contains(&enter_mac(1, 1, 500)));
+        s.handle(switch_to("pc"));
+        // Die Mitte der Gesamtfläche liegt auf dem externen Monitor
+        assert!(s.handle(switch_to("mac")).contains(&enter_mac(2, 2628, 500)));
     }
 
     #[test]

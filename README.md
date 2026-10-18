@@ -110,6 +110,11 @@ einer X11-Sitzung. Details, Grenzen und Testanleitung: [Wayland](docs/wayland.md
   einer echten Maus, auch wenn sie den Zeiger einfangen. Die Fang-Taste gibt den Cursor frei; abschaltbar in
   den Einstellungen bzw. mit `[game] enabled = false`.
 - **Strg+Alt+Shift+Esc** holt Maus und Tastatur sofort zurück (macOS: Strg+Option+Shift+Esc).
+- **Kürzel zum Wechseln** (frei belegbar, Einstellungen → Tastatur bzw. `[keys.switch]`): zu einem bestimmten
+  Rechner, der Cursor landet in dessen Mitte, oder zum Nachbarn links, rechts, oben oder unten, dann an der
+  gegenüberliegenden Kante. Sie wirken auf jedem Rechner und erreichen keine Programme; hält die Fang-Taste den
+  Cursor fest, wechselt er nicht. Unter X11 wirkt ein Kürzel, das der Desktop schon belegt (etwa Strg+Alt+Pfeil
+  für Arbeitsflächen), nur, solange der Cursor auf einem anderen Rechner ist.
 
 ## Download
 
@@ -210,7 +215,9 @@ Hinweise:
 - `qross discover` listet alle Qross-Server im LAN, `qross client <adresse>` verbindet gezielt.
 - `[switching]` in `qross.toml`: `corner_size` (Ecken-Totzone in Pixeln, Standard 8) und `delay_ms`
   (so lange gegen die Kante drücken, bevor gewechselt wird, Standard 0).
-- `[keys]` in `qross.toml`: `lock` (Fang-Taste, z. B. `"Ctrl+Alt+KeyL"`, leer = aus), `media` (`"active"` oder
+- `[keys]` in `qross.toml`: `lock` (Fang-Taste, z. B. `"Ctrl+Alt+KeyL"`, leer = aus), `[keys.switch]` (Kürzel
+  zum Wechseln: `"Ctrl+Alt+Digit2" = "laptop"` springt in die Mitte des Laptops, `"Ctrl+Alt+ArrowLeft" = "left"`
+  zum linken Nachbarn; Richtungen `left`, `right`, `up`, `down`), `media` (`"active"` oder
   `"local"`) und `[keys.remap.<rechner>]` zum Umbelegen. Tastennamen wie `KeyboardEvent.code` im Browser.
 - `[game] enabled` in `qross.toml` (Standard `true`) schaltet den Spielemodus; `qross client --no-game-mode`
   meldet dem Server nie, dass auf dem Client etwas im Vollbild läuft.

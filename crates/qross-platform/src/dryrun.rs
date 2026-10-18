@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use qross_core::keys::KeyOptions;
 use qross_core::Inject;
 use qross_proto::ClipboardData;
 
@@ -113,9 +114,13 @@ pub enum CaptureCall {
 }
 
 /// Merkt sich Aufrufe der Erfassungs-Steuerung (für Tests); `1` ist der Ablageordner für Dateien
-/// vom Client.
+/// vom Client, `2` die zuletzt eingestellten Tasten-Optionen.
 #[derive(Clone, Default)]
-pub struct RecordingCapture(pub Arc<Mutex<Vec<CaptureCall>>>, pub Arc<Mutex<Option<PathBuf>>>);
+pub struct RecordingCapture(
+    pub Arc<Mutex<Vec<CaptureCall>>>,
+    pub Arc<Mutex<Option<PathBuf>>>,
+    pub Arc<Mutex<Option<KeyOptions>>>,
+);
 
 impl Capture for RecordingCapture {
     fn capture_remote(&self) {
@@ -140,5 +145,9 @@ impl Capture for RecordingCapture {
 
     fn drop_folder(&self, _x: i32, _y: i32) -> Option<PathBuf> {
         self.1.lock().unwrap().clone()
+    }
+
+    fn set_key_options(&self, options: KeyOptions) {
+        *self.2.lock().unwrap() = Some(options);
     }
 }

@@ -1,9 +1,11 @@
 //! Ende-zu-Ende über echtes QUIC auf Loopback, mit Test-Doubles statt Betriebssystem.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use qross_core::keys::{parse_switch_keys, HotkeyEvent, HotkeyTracker, KeyConfig, KeyOptions};
 use qross_core::{CaptureEvent, Inject, Layout, LinkConfig};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::clipfiles;
@@ -99,6 +101,7 @@ fn start_client_screen(
     let server = Server::bind(config, &server_id, trust)
         .unwrap()
         .with_clipboard_file_limit(file_limit)
+        .with_keys(switch_keys())
         .with_notices(notice_tx);
     let addr = server.local_addr().unwrap();
 
@@ -221,6 +224,80 @@ async fn cursor_travels_to_client_and_back() {
         .await;
     let server_clip = s.server_clip.clone();
     wait_for("Clipboard beim Server", || server_clip.clone().text().as_deref() == Some("vom Laptop")).await;
+}
+
+/// Wechsel-Kürzel aller Tests, wie in `qross.toml`
+fn switch_keys() -> KeyConfig {
+    let entries = HashMap::from([
+        ("Ctrl+Alt+Digit1".to_owned(), "pc".to_owned()),
+        ("Ctrl+Alt+Digit2".to_owned(), "laptop".to_owned()),
+        ("Ctrl+Alt+ArrowLeft".to_owned(), "left".to_owned()),
+    ]);
+    let options = KeyOptions { switch: parse_switch_keys(&entries).unwrap(), ..KeyOptions::default() };
+    KeyConfig { options, ..KeyConfig::default() }
+}
+
+const CTRL: KeyCode = KeyCode(0xE0);
+const ALT: KeyCode = KeyCode(0xE2);
+const DIGIT2: KeyCode = KeyCode(0x1F);
+const ARROW_LEFT: KeyCode = KeyCode(0x50);
+
+/// Wie eine echte Erfassung: Die Tasten nacheinander drücken und in umgekehrter Reihenfolge
+/// loslassen, ausgewertet mit den Kürzeln, die der Server der Erfassung gegeben hat.
+fn press(s: &Setup, tracker: &mut HotkeyTracker, keys: &[KeyCode]) {
+    let options = s.capture.2.lock().unwrap().clone().expect("der Server stellt die Kürzel ein");
+    let strokes = keys.iter().map(|&key| (key, true)).chain(keys.iter().rev().map(|&key| (key, false)));
+    for (key, down) in strokes {
+        let event = match tracker.on_key(key, down, &options) {
+            HotkeyEvent::Triggered { event, .. } => event,
+            HotkeyEvent::Consumed { .. } => continue,
+            HotkeyEvent::None => CaptureEvent::Key { key, down },
+        };
+        s.events.send(event).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn hotkeys_switch_to_the_client_and_back() {
+    let s = start(true, None);
+    let notices = s.notices.clone();
+    wait_for("Client verbunden", || {
+        notices.lock().unwrap().iter().any(|n| matches!(n, ServerNotice::ClientConnected { name, .. } if name == "laptop"))
+    })
+    .await;
+    let mut tracker = HotkeyTracker::new();
+
+    // Strg+Alt+2: in die Mitte des Laptops
+    press(&s, &mut tracker, &[CTRL, ALT, DIGIT2]);
+    let (capture, injected) = (s.capture.clone(), s.injected.clone());
+    wait_for("Wechsel per Kürzel", || capture.0.lock().unwrap().contains(&CaptureCall::Remote)).await;
+    wait_for("Cursor in der Mitte", || injected.0.lock().unwrap().contains(&Inject::MoveTo { x: 640, y: 400 })).await;
+
+    s.events.send(CaptureEvent::MouseDelta { dx: 10, dy: 10 }).unwrap();
+    wait_for("Bewegung beim Client", || injected.0.lock().unwrap().contains(&Inject::MoveTo { x: 650, y: 410 })).await;
+
+    // Strg+Alt+Pfeil links: zurück an die rechte Kante des Servers, auf Höhe des Cursors
+    press(&s, &mut tracker, &[CTRL, ALT, ARROW_LEFT]);
+    wait_for("Rückkehr per Kürzel", || capture.0.lock().unwrap().contains(&CaptureCall::Release { x: 1918, y: 553 })).await;
+    let notices = s.notices.lock().unwrap().clone();
+    let cursor: Vec<&str> =
+        notices.iter().filter_map(|n| if let ServerNotice::CursorOn { screen } = n { Some(screen.as_str()) } else { None }).collect();
+    assert_eq!(cursor, ["laptop", "pc"]);
+
+    // Die Kürzel selbst erreichen den Client nie; was er an Zusatztasten bekam, ist wieder losgelassen.
+    let last = |log: &[Inject], key: KeyCode| {
+        log.iter().rev().find_map(|i| match *i {
+            Inject::Key { key: k, down } if k == key => Some(down),
+            _ => None,
+        })
+    };
+    wait_for("Zusatztasten beim Client losgelassen", || {
+        let log = injected.0.lock().unwrap();
+        log.contains(&Inject::Key { key: ALT, down: true }) && [CTRL, ALT].iter().all(|&k| last(&log, k) == Some(false))
+    })
+    .await;
+    let log = injected.0.lock().unwrap().clone();
+    assert!(!log.iter().any(|i| matches!(i, Inject::Key { key, .. } if *key == DIGIT2 || *key == ARROW_LEFT)), "{log:?}");
 }
 
 #[tokio::test]

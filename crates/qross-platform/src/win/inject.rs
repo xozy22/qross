@@ -115,6 +115,24 @@ pub(crate) fn tap_escape() {
     send(&[key(false), key(true)]);
 }
 
+/// Unbelegte Taste (VK 0xE8) drücken und loslassen, markiert für den eigenen Hook. Lässt man
+/// danach Alt oder die Windows-Taste los, öffnet Windows weder Menüleiste noch Startmenü.
+pub(crate) fn tap_menu_mask() {
+    let key = |up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: 0xE8,
+                wScan: 0,
+                dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                time: 0,
+                dwExtraInfo: INJECT_MAGIC,
+            },
+        },
+    };
+    send(&[key(false), key(true)]);
+}
+
 fn key_event(key: KeyCode, down: bool) {
     let Some(win) = windows_from_hid(key) else {
         tracing::debug!(?key, "Taste ohne Windows-Zuordnung");

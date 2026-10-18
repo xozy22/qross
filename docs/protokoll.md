@@ -194,8 +194,9 @@ Ein älterer Client antwortet nie auf die Nachfrage. Mit gedrückter Taste bleib
 - Medientasten der HID-Consumer-Page (Wiedergabe/Pause, Weiter, Zurück, Stopp) werden als `0xC000 | Usage`
   übertragen. Ältere Gegenstellen kennen sie nicht und ignorieren sie. Ein Mac-Client erzeugt daraus und aus
   Lautstärke und Stumm Systemereignisse (`NX_SYSDEFINED`), denn nur auf diese reagiert macOS.
-- Fang-Taste, Medientasten-Ziel und Umbelegung je Rechner wertet nur der Server aus; das Protokoll ändert sich
-  dadurch nicht.
+- Fang-Taste, Wechsel-Kürzel, Medientasten-Ziel und Umbelegung je Rechner wertet nur der Server aus; das
+  Protokoll ändert sich dadurch nicht. Ein Wechsel per Kürzel sieht für den Client aus wie ein Wechsel über die
+  Kante (`Leave`, `Enter` mit neuer `epoch`); die Taste des Kürzels selbst bekommt er nie.
 
 ## Regeln für Robustheit
 

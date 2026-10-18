@@ -43,6 +43,15 @@ lock = "ScrollLock"
 # "local" = immer auf diesem Rechner (z. B. weil hier die Lautsprecher hängen)
 media = "active"
 
+# Kürzel zum Wechseln (optional): zu einem Rechner – der Cursor landet in dessen Mitte – oder zum
+# Nachbarn in einer Richtung ("left", "right", "up", "down"), dann an der gegenüberliegenden Kante.
+# Sie wirken auf jedem Rechner und erreichen keine Programme. Die Fang-Taste geht vor.
+[keys.switch]
+"Ctrl+Alt+Digit1" = "pc"
+"Ctrl+Alt+Digit2" = "laptop"
+"Ctrl+Alt+ArrowLeft" = "left"
+"Ctrl+Alt+ArrowRight" = "right"
+
 # Tasten je Rechner umbelegen: gedrückte Taste = gesendete Taste
 # Beispiel: Am Mac Alt und Windows-Taste tauschen, damit Cmd dort liegt, wo am Mac Cmd ist
 [keys.remap.laptop]
