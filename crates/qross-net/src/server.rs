@@ -85,7 +85,7 @@ pub enum ServerNotice {
     /// Kopierte Dateien in der Zwischenablage (senden, empfangen, einfügbar, zu groß)
     ClipboardFiles(FilesNotice),
     /// Bildschirm eines verbundenen Clients: Gesamtfläche und einzelne Monitore (leer bei Clients
-    /// vor Qross 0.4). Kommt nach `ClientConnected`, sobald er Monitore meldet, und bei Änderungen.
+    /// vor Qross 0.5). Kommt nach `ClientConnected`, sobald er Monitore meldet, und bei Änderungen.
     ClientScreenChanged { name: String, screen: Rect, monitors: Vec<Rect> },
     /// Bildschirm des Servers selbst, nach `Listening` und bei Änderungen
     LocalScreenChanged { screen: Rect, monitors: Vec<Rect> },

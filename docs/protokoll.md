@@ -1,7 +1,7 @@
 # Qross-Protokoll, Version 3
 
 Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischenablage, seit Qross 0.4 um
-die einzelnen Monitore eines Clients (beides siehe unten).
+Drag & Drop vom Client zum Server und seit Qross 0.5 um die einzelnen Monitore eines Clients (siehe unten).
 
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
@@ -58,7 +58,7 @@ große Schwachpunkt von Synergy.
 
 ## Mehrere Monitore
 
-`Hello` und `ScreenChanged` beschreiben nur das umschließende Rechteck aller Monitore. Seit Qross 0.4
+`Hello` und `ScreenChanged` beschreiben nur das umschließende Rechteck aller Monitore. Seit Qross 0.5
 meldet der Client zusätzlich die einzelnen Monitore als `Monitors(Vec<Rect>)`, in denselben Koordinaten
 (Windows und Linux: physische Pixel, macOS: Punkte wie beim Einspeisen). Er schickt die Liste direkt
 nach dem `Welcome` und erneut, sobald sich die Anordnung ändert, nach einem eventuellen `ScreenChanged`.

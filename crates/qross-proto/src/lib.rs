@@ -24,7 +24,7 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// Version im `Welcome`: welche Erweiterungen von Protokoll 3 der Server versteht. Clients bis
 /// Qross 0.3 werten das Feld nicht aus.
 /// - 3: Qross 0.2 und 0.3
-/// - 4: `Control::Monitors` (seit Qross 0.4)
+/// - 4: `Control::Monitors` (seit Qross 0.5)
 pub const SERVER_VERSION: u16 = 4;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
 /// die Verbindung bei unbekannten Control-Nachrichten.
@@ -83,7 +83,7 @@ pub enum Control {
     Reject { reason: String },
     /// Client → Server: Auflösung oder Monitor-Anordnung hat sich geändert
     ScreenChanged(ScreenInfo),
-    /// Client → Server (seit Qross 0.4, nur ab `MONITORS_SINCE`): die einzelnen Monitore in denselben
+    /// Client → Server (seit Qross 0.5, nur ab `MONITORS_SINCE`): die einzelnen Monitore in denselben
     /// Koordinaten wie `ScreenInfo::bounds`. Folgt direkt auf das `Welcome` und nach jeder Änderung.
     /// Der Server hält den Cursor dann auf den Monitorflächen und wechselt nur an Kantenstücken,
     /// an denen ein Monitor an der äußeren Kante liegt.

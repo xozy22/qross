@@ -46,7 +46,7 @@ pub struct ClientInfo {
     pub addr: String,
     pub width: u32,
     pub height: u32,
-    /// Einzelne Monitore (leer: Client vor Qross 0.4 oder noch nicht gemeldet)
+    /// Einzelne Monitore (leer: Client vor Qross 0.5 oder noch nicht gemeldet)
     pub monitors: Vec<Rect>,
 }
 

@@ -8,6 +8,27 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.5.0] - 2026-10-18
+
+### Neu
+
+- **Mehrere Monitore je Rechner:** Qross kennt jetzt jeden Monitor eines Rechners einzeln. Der Layout-Editor
+  zeigt sie maßstäblich im Kasten des Rechners, mit den Auflösungen im Tooltip.
+- **Verbindungsqualität:** Für jede Verbindung zeigt Qross Latenz, Jitter, Paketverlust und Durchsatz, dazu eine
+  Stufe von „Sehr gut“ bis „Schlecht“ und einen Verlauf der letzten Minute. Beim Server steht das je Client
+  unter „Verbundene Rechner“, beim Client im Status. Gemessen wird ohne zusätzlichen Netzverkehr.
+
+### Verbessert
+
+- Bei unterschiedlich großen oder versetzten Monitoren bleibt der Cursor auf echten Bildschirmflächen, statt in
+  toten Ecken des umschließenden Rechtecks zu hängen. Gewechselt wird nur dort, wo wirklich ein Monitor an der
+  Kante liegt, und der Cursor kommt auf dem nächstgelegenen Monitor an.
+
+### Wichtig
+
+- Die einzelnen Monitore meldet ein Client nur an einen Server ab 0.5.0. Mit älteren Servern bleibt es beim
+  umschließenden Rechteck, die Verbindung funktioniert weiter.
+
 ## [0.4.0] - 2026-10-18
 
 ### Neu
@@ -140,6 +161,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.5.0]: https://github.com/xozy22/qross/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/xozy22/qross/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/xozy22/qross/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/xozy22/qross/compare/v0.2.1...v0.3.0

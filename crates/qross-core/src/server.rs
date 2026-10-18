@@ -16,7 +16,7 @@ pub enum ServerEvent {
     Capture(CaptureEvent),
     ClientConnected { name: String, screen: Rect },
     ClientScreenChanged { name: String, screen: Rect },
-    /// Die einzelnen Monitore eines Clients (seit Qross 0.4). Ohne diese Meldung gilt seine
+    /// Die einzelnen Monitore eines Clients (seit Qross 0.5). Ohne diese Meldung gilt seine
     /// Fläche als ein einziger Monitor.
     ClientMonitors { name: String, monitors: Vec<Rect> },
     ClientDisconnected { name: String },

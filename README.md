@@ -31,6 +31,9 @@ anderen Rechner einfach **einfügen** (Strg+C hier, Strg+V dort).
     <td align="center"><img src="docs/assets/screenshots/einstellungen.png" alt="Einstellungen mit Autostart, Fang-Taste, Medientasten und Tastenumbelegung"><br><sub>Einstellungen: Autostart, Updates, Fang-Taste, Medientasten, Tasten je Rechner</sub></td>
     <td align="center"><img src="docs/assets/screenshots/neuigkeiten.png" alt="Neuigkeiten mit allen Versionen und ihren Änderungen"><br><sub>Neuigkeiten: Klick auf die Version in der Kopfzeile zeigt, was sich geändert hat</sub></td>
   </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="docs/assets/screenshots/verbindungsqualitaet.png" width="620" alt="Verbindungsqualität eines Clients mit Latenz, Jitter, Verlust und Verlauf"><br><sub>Verbindungsqualität je Rechner: Latenz, Jitter, Verlust, Durchsatz und Verlauf der letzten Minute</sub></td>
+  </tr>
 </table>
 
 <sub>Die Screenshots zeigen Demo-Daten.</sub>
@@ -67,6 +70,8 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Drag & Drop **vom Client** zum Server ziehen | ✔ Explorer | – | ✔ Finder¹ |
 | Gezogene Dateien **ablegen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
 | Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | ✔¹ ² |
+| Mehrere Monitore je Rechner: Skizze im Layout, Cursor nur auf Monitorflächen | ✔ | ✔ | ✔¹ |
+| Verbindungsqualität: Latenz, Jitter, Verlust, Durchsatz | ✔ | ✔ | ✔¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔² |
 
 ¹ macOS wird in der CI auf Apple Silicon gebaut und getestet, auch mit der echten Zwischenablage. Erfassung und
@@ -79,7 +84,8 @@ Servers ohnehin dort, unter X11 gehen sie immer an den aktiven Rechner.
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
   (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, kopierte
-  Dateien und Ordner in beide Richtungen, Ablehnung unbekannter Clients, LAN-Suche).
+  Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, mehrere Monitore je Client, Messwerte der
+  Verbindungsqualität, Ablehnung unbekannter Clients, LAN-Suche).
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
   die der Explorer anschließend selbst einfügt.
 - Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
