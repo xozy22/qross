@@ -159,6 +159,7 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
         events: events_rx,
         clipboard: qross_platform::clipboard(),
         screen: Box::new(qross_platform::screen_bounds),
+        monitors: Box::new(qross_platform::monitors),
     };
     tokio::select! {
         result = server.run(platform) => result,
@@ -183,12 +184,14 @@ async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool) -> Res
             injector: Box::new(LogInjector),
             clipboard: Box::new(MemoryClipboard::default()),
             screen: Box::new(|| Rect::new(0, 0, 1920, 1080)),
+            monitors: Box::new(Vec::new),
         }
     } else {
         ClientPlatform {
             injector: qross_platform::injector()?,
             clipboard: qross_platform::clipboard(),
             screen: Box::new(qross_platform::screen_bounds),
+            monitors: Box::new(qross_platform::monitors),
         }
     };
     tokio::select! {

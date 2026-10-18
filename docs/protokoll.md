@@ -1,6 +1,7 @@
 # Qross-Protokoll, Version 3
 
-Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischenablage (siehe unten).
+Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischenablage, seit Qross 0.4 um
+die einzelnen Monitore eines Clients (beides siehe unten).
 
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
@@ -19,7 +20,7 @@ Implementierung: `crates/qross-proto`.
 
 | Kanal | Richtung | Zuverlässig | Inhalt |
 |---|---|---|---|
-| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged` |
+| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors` |
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel` |
 | Datagramm | Server → Client | **nein** | `MouseMove` |
@@ -46,13 +47,39 @@ große Schwachpunkt von Synergy.
    ist nur ein Vorschlag; vertraut wird erst beim Verbinden über den Fingerprint.
 1. Client öffnet den Control-Stream und sendet `Hello { version, name, screen, platform }`.
 2. Server prüft Version, Namen (muss im Layout stehen und darf nicht bereits verbunden sein) und Fingerprint und
-   antwortet mit `Welcome { …, platform }` oder `Reject { reason }`. Ist genau eine Seite ein Mac, tauscht
-   der Client Strg und Cmd, damit etwa Strg+C auf dem Mac weiterhin kopiert.
+   antwortet mit `Welcome { version, …, platform }` oder `Reject { reason }`. Ist genau eine Seite ein Mac,
+   tauscht der Client Strg und Cmd, damit etwa Strg+C auf dem Mac weiterhin kopiert.
+   Meldet das `Welcome` mindestens Version 4, schickt der Client gleich danach `Monitors` (siehe unten).
 3. Der Server öffnet den Input-Stream.
 4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`. Danach folgen
    `MouseMove`-Datagramme mit dieser `epoch` und steigender `seq`.
 5. Verlässt der Cursor den Client: `Leave`. Der Client lässt alle Tasten los und schickt sein Clipboard,
    falls es sich geändert hat.
+
+## Mehrere Monitore
+
+`Hello` und `ScreenChanged` beschreiben nur das umschließende Rechteck aller Monitore. Seit Qross 0.4
+meldet der Client zusätzlich die einzelnen Monitore als `Monitors(Vec<Rect>)`, in denselben Koordinaten
+(Windows und Linux: physische Pixel, macOS: Punkte wie beim Einspeisen). Er schickt die Liste direkt
+nach dem `Welcome` und erneut, sobald sich die Anordnung ändert, nach einem eventuellen `ScreenChanged`.
+Der Server übernimmt höchstens 16 Monitore und schneidet sie auf das umschließende Rechteck zu.
+
+Mit der Liste gilt auf dem Client:
+
+- Der Cursor bewegt sich nur auf Monitorflächen. Liegt das Ziel einer Bewegung neben allen Monitoren,
+  bleibt er am Rand des aktuellen Monitors stehen. Zwischen sich berührenden Monitoren wechselt er frei.
+- Zu einem Nachbarn wird nur an Kantenstücken gewechselt, an denen ein Monitor an der äußeren Kante des
+  Rechtecks liegt. Die Ecken-Totzone gilt für die Ecken dieses Monitors.
+- Beim Betreten wird die Position wie bisher anteilig entlang der Kante umgerechnet und dann auf den
+  nächstgelegenen Monitor an der Eintrittskante gelegt.
+
+Dieselben Regeln wendet der Server auf seine eigenen Monitore an. Ohne Liste (ältere Clients) gilt das
+Rechteck als ein einziger Monitor, also das bisherige Verhalten.
+
+**Kompatibilität:** `Hello.version` bleibt 3, denn Server bis Qross 0.3 lehnen andere Versionen ab. Eine
+unbekannte Control-Nachricht kann ein solcher Server nicht lesen und trennt die Verbindung. Deshalb meldet
+ein neuer Server im `Welcome` die Version 4, die ältere Clients nicht auswerten. Nur dann sendet der Client
+`Monitors`. Ältere Server melden 3 und bekommen die Nachricht nie.
 
 ## Zwischenablage
 
@@ -130,7 +157,8 @@ Ein älterer Client antwortet nie auf die Nachfrage. Mit gedrückter Taste bleib
 
 ## Regeln für Robustheit
 
-- **Mausposition absolut**, in Client-Koordinaten (physische Pixel, virtueller Desktop). Ein verlorenes
+- **Mausposition absolut**, in Client-Koordinaten (physische Pixel, virtueller Desktop), immer auf einem
+  Monitor des Clients. Ein verlorenes
   Datagramm wird vom nächsten überholt, Fehler summieren sich nicht auf.
 - Der Client verwirft Datagramme mit falscher `epoch` (Nachzügler eines früheren Besuchs) und mit nicht
   neuerer `seq` (Umsortierung im Netz). Der Vergleich ist wrap-around-sicher.

@@ -5,6 +5,7 @@ pub mod client;
 pub mod input;
 pub mod keys;
 pub mod layout;
+mod screen;
 pub mod server;
 
 pub use input::{CaptureEvent, Inject};

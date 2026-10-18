@@ -13,6 +13,10 @@ pub fn screen_bounds() -> Rect {
     Rect::new(0, 0, 1920, 1080)
 }
 
+pub fn monitors() -> Vec<Rect> {
+    Vec::new()
+}
+
 pub fn start_capture(_events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Arc<dyn Capture>> {
     bail!("Eingabe-Erfassung ist auf dieser Plattform noch nicht implementiert")
 }

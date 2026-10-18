@@ -37,6 +37,12 @@ fn x11_capture_and_injection() {
     let root = conn.setup().roots[screen].root;
     let bounds = qross_platform::screen_bounds();
     assert!(bounds.width >= 640 && bounds.height >= 480, "{bounds:?}");
+    // RandR-Monitore liegen im selben Koordinatensystem wie die Gesamtfläche (ohne RandR 1.5: keine).
+    let monitors = qross_platform::monitors();
+    assert!(
+        monitors.iter().all(|m| bounds.contains(m.x, m.y) && bounds.contains(m.right(), m.bottom())),
+        "{monitors:?} außerhalb von {bounds:?}"
+    );
 
     // --- Einspeisen ---------------------------------------------------------------------
     let mut injector = qross_platform::injector().unwrap();

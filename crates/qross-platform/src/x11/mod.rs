@@ -11,6 +11,7 @@ use qross_core::CaptureEvent;
 use qross_proto::Rect;
 use tokio::sync::mpsc::UnboundedSender;
 use x11rb::connection::Connection;
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, Window};
 use x11rb::rust_connection::RustConnection;
 
@@ -41,6 +42,23 @@ pub fn screen_bounds() -> Rect {
         Some((width, height)) => Rect::new(0, 0, width.into(), height.into()),
         None => Rect::new(0, 0, 1920, 1080),
     }
+}
+
+/// RandR-Monitore (ab RandR 1.5) in Root-Koordinaten wie `screen_bounds()`; ohne RandR leer.
+pub fn monitors() -> Vec<Rect> {
+    let slot = QUERY.get_or_init(|| Mutex::new(connect().ok()));
+    let guard = slot.lock().unwrap();
+    let Some((conn, root)) = guard.as_ref() else { return Vec::new() };
+    randr_monitors(conn, *root).unwrap_or_default()
+}
+
+fn randr_monitors(conn: &RustConnection, root: Window) -> Result<Vec<Rect>> {
+    let version = conn.randr_query_version(1, 5)?.reply()?;
+    if (version.major_version, version.minor_version) < (1, 5) {
+        return Ok(Vec::new());
+    }
+    let reply = conn.randr_get_monitors(root, true)?.reply()?;
+    Ok(reply.monitors.iter().map(|m| Rect::new(m.x.into(), m.y.into(), m.width.into(), m.height.into())).collect())
 }
 
 pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> {

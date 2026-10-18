@@ -114,6 +114,19 @@ pub fn screen_bounds() -> Rect {
     imp::screen_bounds()
 }
 
+/// Die einzelnen Monitore in denselben Koordinaten wie `screen_bounds()`. Leer, wenn das System sie
+/// nicht nennt; dann gilt das umschließende Rechteck als ein einziger Monitor.
+pub fn monitors() -> Vec<Rect> {
+    let mut monitors = Vec::new();
+    for m in imp::monitors() {
+        // Gespiegelte Bildschirme melden dieselbe Fläche mehrfach.
+        if m.width > 0 && m.height > 0 && !monitors.contains(&m) {
+            monitors.push(m);
+        }
+    }
+    monitors
+}
+
 /// Startet die Erfassung. Ereignisse landen in `events`.
 pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Arc<dyn Capture>> {
     imp::start_capture(events)
@@ -136,4 +149,25 @@ pub fn folder_at(x: i32, y: i32) -> Option<PathBuf> {
 #[cfg(windows)]
 pub fn explorer_folder(hwnd: isize) -> Option<PathBuf> {
     win::folder_of_window(hwnd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitors_span_the_screen_bounds() {
+        init_process();
+        let monitors = monitors();
+        if monitors.is_empty() {
+            eprintln!("System nennt keine Monitore – übersprungen");
+            return;
+        }
+        let left = monitors.iter().map(|m| m.x).min().unwrap();
+        let top = monitors.iter().map(|m| m.y).min().unwrap();
+        let right = monitors.iter().map(|m| m.right()).max().unwrap();
+        let bottom = monitors.iter().map(|m| m.bottom()).max().unwrap();
+        let hull = Rect::new(left, top, (right - left + 1) as u32, (bottom - top + 1) as u32);
+        assert_eq!(hull, screen_bounds(), "Monitore: {monitors:?}");
+    }
 }

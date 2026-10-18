@@ -317,6 +317,21 @@ main { overflow: auto; overflow-x: hidden; min-height: 0; }
   border-radius: 999px;
   margin-bottom: 2px;
 }
+/* Mehrere Monitore: maßstäbliche Skizze hinter der Beschriftung (der Kasten bildet den Stapelkontext).
+   Nur Flächen, keine Umrisse, damit keine Linien durch die Schrift laufen. */
+.screen .monitors {
+  position: absolute;
+  z-index: -1;
+  top: 8px;
+  left: 8px;
+  width: calc(100% - 16px);
+  height: calc(100% - 16px);
+  pointer-events: none;
+  color: var(--muted);
+}
+.screen .monitors rect { fill: currentColor; fill-opacity: .2; }
+.screen.server .monitors { color: var(--indigo); }
+.screen.online .monitors { color: var(--teal); }
 .screen .marker { position: absolute; top: 7px; right: 8px; width: 15px; height: 15px; color: var(--teal); }
 .screen .marker svg { width: 100%; height: 100%; display: block; }
 .screen.locked .marker { color: var(--amber); }
