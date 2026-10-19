@@ -8,6 +8,17 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.10.0] - 2026-10-19
+
+### Neu
+
+- **Drag-Vorschau am Cursor:** Ziehst du Dateien über die Kante auf einen anderen Rechner, hängt dort ein
+  Kärtchen am Cursor wie beim Ziehen auf dem eigenen: Symbol, Name der Datei (bei mehreren „3 Dateien“) und
+  Gesamtgröße. Es folgt dem Cursor, bis du loslässt, ohne Ablegen zurückgehst oder die Übertragung abgebrochen
+  wird; abgelegt wird wie bisher im Ordner unter dem Cursor. Funktioniert in beide Richtungen unter Windows,
+  macOS (in der App) und X11 mit Compositor, nicht über Programmen im Vollbild. Unter Wayland lassen sich keine
+  Fenster über andere Programme legen, dort bleibt es ohne Vorschau.
+
 ## [0.9.0] - 2026-10-19
 
 ### Verbessert
@@ -432,6 +443,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.10.0]: https://github.com/xozy22/qross/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/xozy22/qross/compare/v0.8.3...v0.9.0
 [0.8.3]: https://github.com/xozy22/qross/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/xozy22/qross/compare/v0.8.1...v0.8.2
