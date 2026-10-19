@@ -1,12 +1,14 @@
 //! Ersatz-Implementierungen ohne Betriebssystem-Zugriff: für `--dry-run` und Tests.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use qross_core::keys::KeyOptions;
 use qross_core::Inject;
 use qross_proto::{ClipboardData, CursorFinder, LockState};
 
+use crate::screensaver::Outcome;
 use crate::{Capture, Clipboard, FinderOverlay, Injector};
 
 /// Protokolliert eingespeiste Ereignisse, statt sie auszuführen.
@@ -27,12 +29,25 @@ impl Injector for LogInjector {
     fn syncs_locks(&self) -> bool {
         true
     }
+    fn follows_screen_saver(&self) -> bool {
+        true
+    }
+
+    fn screen_saver(&mut self, active: bool, lock: bool) -> Outcome {
+        let what = match (active, lock) {
+            (true, true) => "den Rechner sperren",
+            (true, false) => "den Bildschirmschoner starten",
+            (false, _) => "den Bildschirmschoner beenden",
+        };
+        tracing::info!("würde {what}");
+        Outcome::Unchanged
+    }
 }
 
 /// Merkt sich alle Ereignisse (für Tests); `1` ist der Ablageordner für Drag & Drop, `2` die
 /// Dateien, die hier gerade gezogen werden (Drag & Drop zum Server), `3`: kann Zeichen eingeben
 /// (Zeichenmodus, siehe [`RecordingInjector::typing`]), `4`: kann die Sperrtasten setzen (siehe
-/// [`RecordingInjector::locking`]).
+/// [`RecordingInjector::locking`]), `5`: Aufträge an den Bildschirmschoner als (`active`, `lock`).
 #[derive(Clone, Default)]
 pub struct RecordingInjector(
     pub Arc<Mutex<Vec<Inject>>>,
@@ -40,6 +55,7 @@ pub struct RecordingInjector(
     pub Arc<Mutex<Vec<PathBuf>>>,
     pub bool,
     pub bool,
+    pub Arc<Mutex<Vec<(bool, bool)>>>,
 );
 
 impl RecordingInjector {
@@ -73,6 +89,19 @@ impl Injector for RecordingInjector {
 
     fn take_dragged_files(&mut self, _x: i32, _y: i32) -> Vec<PathBuf> {
         std::mem::take(&mut *self.2.lock().unwrap())
+    }
+
+    fn follows_screen_saver(&self) -> bool {
+        true
+    }
+
+    fn screen_saver(&mut self, active: bool, lock: bool) -> Outcome {
+        self.5.lock().unwrap().push((active, lock));
+        match (active, lock) {
+            (true, true) => Outcome::Locked,
+            (true, false) => Outcome::Started,
+            (false, _) => Outcome::Stopped,
+        }
     }
 }
 
@@ -162,17 +191,19 @@ pub enum CaptureCall {
     ProbeDrag { x: i32, y: i32 },
     CancelLocalDrag,
     AwaitLocalDrop,
+    StopScreenSaver,
 }
 
 /// Merkt sich Aufrufe der Erfassungs-Steuerung (für Tests); `1` ist der Ablageordner für Dateien
 /// vom Client, `2` die zuletzt eingestellten Tasten-Optionen, `3` der Stand der Sperrtasten
-/// (Standard: unbekannt, wie unter Wayland).
+/// (Standard: unbekannt, wie unter Wayland), `4`: läuft der Bildschirmschoner?
 #[derive(Clone, Default)]
 pub struct RecordingCapture(
     pub Arc<Mutex<Vec<CaptureCall>>>,
     pub Arc<Mutex<Option<PathBuf>>>,
     pub Arc<Mutex<Option<KeyOptions>>>,
     pub Arc<Mutex<LockState>>,
+    pub Arc<AtomicBool>,
 );
 
 impl Capture for RecordingCapture {
@@ -206,6 +237,14 @@ impl Capture for RecordingCapture {
 
     fn locks(&self) -> LockState {
         *self.3.lock().unwrap()
+    }
+
+    fn screen_saver_active(&self) -> bool {
+        self.4.load(Ordering::Relaxed)
+    }
+
+    fn stop_screen_saver(&self) {
+        self.0.lock().unwrap().push(CaptureCall::StopScreenSaver);
     }
 }
 

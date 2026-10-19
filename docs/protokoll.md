@@ -30,7 +30,7 @@ Implementierung: `crates/qross-proto`.
 
 | Kanal | Richtung | Zuverlässig | Inhalt |
 |---|---|---|---|
-| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing`, `SyncsLocks`, `CursorFinder` |
+| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing`, `SyncsLocks`, `CursorFinder`, `FollowsScreenSaver`, `ScreenSaver` |
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel`, im Zeichenmodus `Text`, `Shortcut`, `Locks` |
 | Datagramm | Server → Client | **nein** | `MouseMove`, im Spielemodus `MouseDelta` |
@@ -71,6 +71,8 @@ große Schwachpunkt von Synergy.
    Ab Version 8 meldet der Client mit `SyncsLocks` direkt nach dem `Welcome`, dass er Feststelltaste, Num und
    Rollen setzen kann (siehe Feststelltaste, Num und Rollen). Ab Version 9 schickt der Server danach den
    Cursor-Finder (`CursorFinder`, sofern eingeschaltet).
+   Ab Version 10 meldet der Client mit `FollowsScreenSaver` direkt nach dem `Welcome`, dass er dem
+   Bildschirmschoner des Servers folgen kann (siehe Bildschirmschoner).
 3. Der Server öffnet den Input-Stream.
 4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`, bei Clients mit
    `SyncsLocks` gleich gefolgt von `Locks`. Danach folgen `MouseMove`-Datagramme (im Spielemodus `MouseDelta`)
@@ -264,6 +266,45 @@ Rechte nicht und senden wie bisher; der Server weist Verbotenes ab, sie bleiben 
 liest den Control-Stream nur bei Version 7 und mehr und überspringt Nachrichten, die er nicht kennt. Ältere
 Server schicken nichts; dann ist alles erlaubt.
 
+## Bildschirmschoner
+
+Seit Qross 0.8, wie `screenSaverSync` bei Synergy: Startet auf dem Server der Bildschirmschoner, starten ihn
+die Clients auch; endet er dort (Maus, Taste), beenden sie ihn. Einstellbar nur am Server (`[screensaver]`
+in `qross.toml`, Einstellungen → Bildschirmschoner), Standard an.
+
+- **Erkennen (Server):** Windows `SPI_GETSCREENSAVERRUNNING`, macOS die verteilten Benachrichtigungen
+  `com.apple.screensaver.didstart`/`didstop`, Linux `GetActive` des Bildschirmschoner-Dienstes auf dem
+  Session-Bus (`org.gnome.ScreenSaver`, `org.cinnamon.ScreenSaver`, `org.mate.ScreenSaver`,
+  `org.freedesktop.ScreenSaver`), in einer X11-Sitzung ohne Dienst die Erweiterung MIT-SCREEN-SAVER. Abgefragt
+  wird alle 500 ms in einem eigenen Thread.
+- **Nachricht:** `ScreenSaver { active, lock }` auf dem Control-Stream, bei Beginn (`active: true`) und Ende,
+  nur an Clients, die `FollowsScreenSaver` gemeldet haben. Wer sich erst während des Bildschirmschoners
+  verbindet, bekommt nur das Ende.
+- **Cursor:** bleibt, wo er ist; ihn zu bewegen würde den Bildschirmschoner sofort beenden. Steht er auf
+  einem Client, fängt der Server die Eingaben ab, und sie erreichen seinen Bildschirmschoner nicht. Die erste
+  davon beendet ihn deshalb ausdrücklich (Windows: kleine Mausbewegung, als Eingabe von Qross markiert, damit
+  die eigene Erfassung sie durchlässt; macOS: `ScreenSaverEngine` beenden; Linux: `SetActive(false)` bzw.
+  X-Server zurücksetzen); die Eingabe selbst geht an den Client. Das Ende meldet der Server wie sonst.
+- **Client:** startet seinen eigenen Bildschirmschoner so, wie es das System nach Ablauf der Wartezeit täte,
+  und beendet ihn wie eine Mausbewegung. Ist keiner eingerichtet (Windows „(Kein)“, macOS „Nie“, GNOME
+  „Bildschirm abschalten: Nie“, KDE ohne automatische Sperre, X11 `xset s off`) oder hält ein Programm den
+  Bildschirm wach (Windows `ES_DISPLAY_REQUIRED`, macOS `PreventUserIdleDisplaySleep`), passiert nichts. In
+  einer Remotedesktop-Sitzung startet Windows keinen; dort versucht es der Client nicht.
+- **Sperren:** Mit `lock` (Einstellung „Clients mitsperren“, `lock_clients = true`) sperrt sich der Client beim
+  Beginn, statt nur den Bildschirmschoner zu starten: Windows `LockWorkStation`, macOS die Sperrfunktion des
+  Systems (`SACLockScreenImmediate`, wie Ctrl+Cmd+Q), Linux `loginctl lock-session`. Fehlt das, startet er nur
+  den Bildschirmschoner.
+
+Verlangt ein Client nach seinem Bildschirmschoner ein Passwort (Windows „Anmeldeseite bei Reaktivierung“,
+macOS „Passwort erforderlich“, GNOME automatische Sperre, KDE immer), ist er danach gesperrt, genau wie nach
+Ablauf seiner eigenen Wartezeit. Entsperrt wird an seiner eigenen Tastatur: Eingaben von Qross erreichen den
+Sperrbildschirm nicht.
+
+**Kompatibilität:** Ein neuer Server meldet im `Welcome` die Version 10. Nur dann sendet der Client
+`FollowsScreenSaver`; ein Server aus 0.7 und älter würde bei der unbekannten Nachricht trennen und bekommt sie
+nie. `ScreenSaver` schickt der Server nur an Clients, die sich gemeldet haben; Clients bis 0.7 laufen
+unverändert weiter.
+
 ## Tasten
 
 - Medientasten der HID-Consumer-Page (Wiedergabe/Pause, Weiter, Zurück, Stopp) werden als `0xC000 | Usage`
@@ -404,7 +445,7 @@ Die Stufe richtet sich nach dem schlechtesten der drei Werte (Grenzen jeweils au
 - Spielemodus: eingefangenen Zeiger unter macOS und Linux erkennen; Rohdaten der Maus am Server
   (Raw Input) statt Cursor-Deltas, damit Zeigerbeschleunigung des Servers nicht mitwandert
 - Zwischenablage: RTF; virtuelle Dateien (z. B. Outlook-Anhänge) und Dateien erst beim Einfügen übertragen
-- Bildschirmschoner-Sync, Strg+Alt+Entf, Secure Desktop (UAC)
+- Strg+Alt+Entf, Secure Desktop (UAC)
 - Wayland (libei/InputCapture-Portal)
 
 ## Feststelltaste, Num und Rollen

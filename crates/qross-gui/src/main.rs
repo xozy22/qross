@@ -313,9 +313,12 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
     let limit_changed = settings.clipboard_files_mb != old.clipboard_files_mb
         || settings.clipboard_share_concealed != old.clipboard_share_concealed
         || settings.game_mode != old.game_mode;
+    // Den Bildschirmschoner gleicht nur der Server ab
+    let saver_changed = settings.screensaver_sync != old.screensaver_sync
+        || settings.screensaver_lock_clients != old.screensaver_lock_clients;
     match status.role {
         Some(role) if role != settings.role => rt.stop().await,
-        Some(Role::Server) if (server_changed || limit_changed) && settings.server.validate().is_ok() => {
+        Some(Role::Server) if (server_changed || limit_changed || saver_changed) && settings.server.validate().is_ok() => {
             info!("Einstellungen geändert – Server startet neu");
             rt.start().await.map_err(|e| format!("{e:#}"))?;
         }

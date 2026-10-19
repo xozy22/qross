@@ -18,7 +18,8 @@ use qross_platform::{Clipboard, FinderOverlay, Injector};
 use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
     DragMessage, FileEntry, FrameError, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, Sharing,
-    StreamKind, DEFAULT_PORT, GAME_MODE_SINCE, LOCKS_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SHARING_SINCE, TEXT_SINCE,
+    StreamKind, DEFAULT_PORT, GAME_MODE_SINCE, LOCKS_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SCREEN_SAVER_SINCE,
+    SHARING_SINCE, TEXT_SINCE,
 };
 use quinn::{Connection, ConnectionError, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -31,6 +32,7 @@ use crate::game::{self, Detector};
 use crate::progress::{Progress, Transfers};
 use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
+use crate::screensaver;
 use crate::streams::{read_kind, send_drag_message};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::wake::{self, Backoff, SystemEvent};
@@ -81,6 +83,8 @@ struct ScreenQuery {
     syncs_locks: bool,
     /// Cursor-Finder dieses Rechners
     finder: Option<Arc<dyn FinderOverlay>>,
+    /// Das Einspeisen kann den Bildschirmschoner starten und beenden
+    follows_saver: bool,
 }
 
 /// Fehler, bei denen eine Wiederverbindung sinnlos ist.
@@ -163,6 +167,8 @@ enum FromServer {
     Sharing(Sharing),
     /// Was der Cursor-Finder hier zeigt (seit Qross 0.8)
     CursorFinder(CursorFinder),
+    /// Bildschirmschoner des Servers begonnen bzw. beendet (seit Qross 0.8)
+    ScreenSaver { active: bool, lock: bool },
 }
 
 /// Zwischenablage dieses Clients: Zugriff, ankommende kopierte Dateien, Meldungen dazu.
@@ -181,6 +187,8 @@ enum ToInjector {
     DropFolder { x: i32, y: i32, reply: oneshot::Sender<Option<PathBuf>> },
     /// Gezogene Dateien übernehmen (der lokale Drag wird dabei abgebrochen)
     TakeDragged { x: i32, y: i32, reply: oneshot::Sender<Vec<PathBuf>> },
+    /// Dem Bildschirmschoner des Servers folgen
+    ScreenSaver { active: bool, lock: bool },
 }
 
 fn inject_all(inject: &Sender<ToInjector>, events: impl IntoIterator<Item = Inject>) {
@@ -293,8 +301,10 @@ async fn run_inner(
     events: Option<Events>,
 ) -> Result<()> {
     let ClientPlatform { mut injector, clipboard, screen, monitors, game, finder } = platform;
-    let (types_text, syncs_locks) = (injector.types_text(), injector.syncs_locks());
-    let screen = ScreenQuery { bounds: screen, monitors, game: game::watch(game), types_text, syncs_locks, finder };
+    let (types_text, syncs_locks, follows_saver) =
+        (injector.types_text(), injector.syncs_locks(), injector.follows_screen_saver());
+    let screen =
+        ScreenQuery { bounds: screen, monitors, game: game::watch(game), types_text, syncs_locks, follows_saver, finder };
     let _progress = {
         let notices = notices.cloned();
         transfers.spawn_reporter(move |progress| {
@@ -341,6 +351,9 @@ async fn run_inner(
                 }
                 ToInjector::TakeDragged { x, y, reply } => {
                     let _ = reply.send(injector.take_dragged_files(x, y));
+                }
+                ToInjector::ScreenSaver { active, lock } => {
+                    screensaver::report(active, &injector.screen_saver(active, lock));
                 }
             }
         }
@@ -491,6 +504,10 @@ async fn session(
     // Den Stand der Sperrtasten schickt nur ein Server, der ihn kennt; sonst bleibt es bei den Tasten.
     if server_version >= LOCKS_SINCE && screen.syncs_locks {
         write_frame(&mut control, &Control::SyncsLocks).await?;
+    }
+    // Ebenso den Bildschirmschoner: Nur wer sich meldet, bekommt `Control::ScreenSaver`.
+    if server_version >= SCREEN_SAVER_SINCE && screen.follows_saver {
+        write_frame(&mut control, &Control::FollowsScreenSaver).await?;
     }
     // Die einzelnen Monitore nur an Server, die sie kennen: ältere trennen bei unbekannten Nachrichten.
     let report_monitors = server_version >= MONITORS_SINCE;
@@ -680,6 +697,10 @@ async fn session(
                         finder_style = now;
                         notify(notices, ClientNotice::CursorFinder(now));
                     }
+                    // Im Einspeise-Thread: Start und Ende dürfen dort kurz warten.
+                    FromServer::ScreenSaver { active, lock } => {
+                        let _ = inject.send(ToInjector::ScreenSaver { active, lock });
+                    }
                 },
                 _ = screen_poll.tick() => {
                     let now = (screen.bounds)();
@@ -835,7 +856,7 @@ async fn resolve(server: &str) -> Result<SocketAddr> {
 }
 
 /// Was der Server nach dem `Welcome` auf dem Control-Stream schickt (seit Qross 0.7: die Rechte,
-/// seit 0.8 den Cursor-Finder).
+/// seit 0.8 den Cursor-Finder und den Bildschirmschoner).
 async fn receive_control(mut control: RecvStream, tx: mpsc::UnboundedSender<FromServer>) {
     loop {
         match read_frame::<_, Control>(&mut control).await {
@@ -844,6 +865,9 @@ async fn receive_control(mut control: RecvStream, tx: mpsc::UnboundedSender<From
             }
             Ok(Some(Control::CursorFinder(finder))) => {
                 let _ = tx.send(FromServer::CursorFinder(finder));
+            }
+            Ok(Some(Control::ScreenSaver { active, lock })) => {
+                let _ = tx.send(FromServer::ScreenSaver { active, lock });
             }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht vom Server"),
             // Von einer neueren Version: überspringen, der Frame ist gelesen

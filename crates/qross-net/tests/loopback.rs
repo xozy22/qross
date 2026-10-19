@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1111,7 +1112,7 @@ async fn the_client_reports_fullscreen_only_to_servers_that_know_it() {
     // Ein neuer Server erfährt vom Vollbild
     let frames = client_reports_to(SERVER_VERSION).await;
     let messages: Vec<Control> = frames.iter().map(|f| postcard::from_bytes(f).unwrap()).collect();
-    assert_eq!(messages, vec![Control::Game(FULLSCREEN)]);
+    assert_eq!(messages, vec![Control::FollowsScreenSaver, Control::Game(FULLSCREEN)]);
 }
 
 /// So groß, dass die Übertragung auch im Release-Build lange genug läuft, um sie abzubrechen
@@ -1799,7 +1800,7 @@ async fn the_client_announces_typing_only_to_servers_that_know_it() {
     }
     let frames = client_reports_with(SERVER_VERSION, RecordingInjector::typing()).await;
     let messages: Vec<Control> = frames.iter().map(|f| postcard::from_bytes(f).unwrap()).collect();
-    assert_eq!(messages, vec![Control::TypesText, Control::Game(FULLSCREEN)]);
+    assert_eq!(messages, vec![Control::TypesText, Control::FollowsScreenSaver, Control::Game(FULLSCREEN)]);
 }
 
 #[tokio::test]
@@ -2009,6 +2010,161 @@ async fn the_cursor_finder_stays_off_by_default() {
     assert_eq!(client_cursor_finder(&s), None, "ausgeschaltet schickt der Server nichts");
 }
 
+/// Wartet, bis der Client diese Aufträge an den Bildschirmschoner bekommen hat, als (`active`, `lock`)
+async fn wait_for_saver(s: &Setup, expected: &[(bool, bool)]) {
+    let calls = s.injected.5.clone();
+    wait_for("Bildschirmschoner beim Client", || calls.lock().unwrap().as_slice() == expected).await;
+}
+
+#[tokio::test]
+async fn the_screen_saver_of_the_server_reaches_the_client() {
+    // Der Client meldet sich direkt nach dem Welcome für den Bildschirmschoner, vor seinen
+    // Monitoren: Kennt der Server die Monitore, weiß er auch das.
+    let s = start_client_screen(true, None, clipfiles::DEFAULT_LIMIT, MAC, vec![MAC_BUILTIN, MAC_EXTERNAL]);
+    wait_for_monitors(&s, MAC, &[MAC_BUILTIN, MAC_EXTERNAL]).await;
+    s.capture.4.store(true, Ordering::Relaxed);
+    wait_for_saver(&s, &[(true, false)]).await;
+    s.capture.4.store(false, Ordering::Relaxed);
+    wait_for_saver(&s, &[(true, false), (false, false)]).await;
+    assert!(!s.capture.0.lock().unwrap().contains(&CaptureCall::Remote), "der Cursor blieb auf dem Server");
+}
+
+#[tokio::test]
+async fn input_for_a_client_ends_the_screen_saver_of_the_server() {
+    let s = start_client_screen(true, None, clipfiles::DEFAULT_LIMIT, MAC, vec![MAC_BUILTIN, MAC_EXTERNAL]);
+    wait_for_monitors(&s, MAC, &[MAC_BUILTIN, MAC_EXTERNAL]).await;
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Wechsel zum Client", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+
+    // Der Cursor bleibt auf dem Client, während der Bildschirmschoner des Servers läuft.
+    s.capture.4.store(true, Ordering::Relaxed);
+    wait_for_saver(&s, &[(true, false)]).await;
+
+    // Zurück am Server: Die Bewegung geht an den Client, und der Server beendet seinen
+    // Bildschirmschoner selbst, denn die abgefangene Eingabe erreicht ihn nicht.
+    s.events.send(CaptureEvent::MouseDelta { dx: 5, dy: 0 }).unwrap();
+    wait_for("Bildschirmschoner des Servers beendet", || {
+        capture.0.lock().unwrap().contains(&CaptureCall::StopScreenSaver)
+    })
+    .await;
+    s.capture.4.store(false, Ordering::Relaxed);
+    wait_for_saver(&s, &[(true, false), (false, false)]).await;
+    assert!(!released(&capture), "der Cursor blieb auf dem Client");
+}
+
+/// Server mit Bildschirmschoner-Abgleich (`sync`, `lock`) und ein Client ohne Qross-Laufzeit, der
+/// sich dafür meldet (`follows`, ab Qross 0.8) oder nicht (wie Qross 0.7). Der Bildschirmschoner
+/// des Servers beginnt und endet; geliefert wird alles, was der Client dabei auf dem Control-Stream
+/// bekommt (als Rohdaten).
+async fn screen_saver_seen_by(sync: bool, lock: bool, follows: bool) -> Vec<Vec<u8>> {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let client_id = Identity::generate().unwrap();
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
+    let notices = collect(notice_rx);
+    let server =
+        Server::bind(config, &server_id, trust).unwrap().with_screen_saver(sync, lock).with_notices(notice_tx);
+    let addr = server.local_addr().unwrap();
+    let capture = RecordingCapture::default();
+    let (_events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(capture.clone()),
+        events: events_rx,
+        clipboard: Box::new(SharedClipboard::default()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+        finder: None,
+    }));
+
+    let (_endpoint, conn) = connect_raw(addr, &client_id).await;
+    let (mut control, mut control_rx) = conn.open_bi().await.unwrap();
+    let hello = Control::Hello { version: PROTOCOL_VERSION, name: "laptop".into(), screen: ScreenInfo { bounds: LAPTOP }, platform: Platform::MacOs };
+    write_frame(&mut control, &hello).await.unwrap();
+    let welcome = read_frame::<_, Control>(&mut control_rx).await.unwrap();
+    assert!(matches!(welcome, Some(Control::Welcome { version: SERVER_VERSION, .. })), "{welcome:?}");
+    if follows {
+        write_frame(&mut control, &Control::FollowsScreenSaver).await.unwrap();
+    }
+    // Die Monitore danach zeigen an, dass der Server die Meldung davor gelesen hat.
+    write_frame(&mut control, &Control::Monitors(vec![LAPTOP])).await.unwrap();
+    wait_for("Monitore beim Server", || {
+        notices.lock().unwrap().iter().any(|n| matches!(n, ServerNotice::ClientScreenChanged { monitors, .. } if !monitors.is_empty()))
+    })
+    .await;
+
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let frames = frames.clone();
+        tokio::spawn(async move {
+            loop {
+                let mut len = [0u8; 4];
+                if control_rx.read_exact(&mut len).await.is_err() {
+                    return;
+                }
+                let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+                if control_rx.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                frames.lock().unwrap().push(body);
+            }
+        })
+    };
+    // Zwei Abfragerunden je Zustand
+    let rounds = qross_net::screensaver::POLL * 3;
+    capture.4.store(true, Ordering::Relaxed);
+    tokio::time::sleep(rounds).await;
+    capture.4.store(false, Ordering::Relaxed);
+    tokio::time::sleep(rounds).await;
+    assert!(conn.close_reason().is_none(), "der Client bleibt verbunden");
+    reader.abort();
+    server_task.abort();
+    let frames = frames.lock().unwrap().clone();
+    frames
+}
+
+fn decode(frames: &[Vec<u8>]) -> Vec<Control> {
+    frames.iter().map(|f| postcard::from_bytes(f).unwrap()).collect()
+}
+
+#[tokio::test]
+async fn a_client_that_follows_gets_start_and_end() {
+    assert_eq!(
+        decode(&screen_saver_seen_by(true, false, true).await),
+        [
+            Control::Sharing(Sharing::ALL),
+            Control::ScreenSaver { active: true, lock: false },
+            Control::ScreenSaver { active: false, lock: false },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn clients_lock_themselves_only_when_asked_to() {
+    assert_eq!(
+        decode(&screen_saver_seen_by(true, true, true).await),
+        [
+            Control::Sharing(Sharing::ALL),
+            Control::ScreenSaver { active: true, lock: true },
+            Control::ScreenSaver { active: false, lock: false },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn without_sync_the_server_does_not_tell() {
+    assert_eq!(decode(&screen_saver_seen_by(false, true, true).await), [Control::Sharing(Sharing::ALL)]);
+}
+
 /// So sah `Control` in Qross 0.7 aus.
 #[derive(Deserialize, Debug, PartialEq)]
 #[allow(dead_code)]
@@ -2047,7 +2203,8 @@ async fn the_client_offers_lock_sync_only_to_servers_that_know_it() {
     }
     let frames = client_reports_with(SERVER_VERSION, RecordingInjector::locking()).await;
     let messages: Vec<Control> = frames.iter().map(|f| postcard::from_bytes(f).unwrap()).collect();
-    assert_eq!(messages, vec![Control::SyncsLocks, Control::Game(FULLSCREEN)]);
+    // Das Einspeisen der Tests folgt auch dem Bildschirmschoner
+    assert_eq!(messages, vec![Control::SyncsLocks, Control::FollowsScreenSaver, Control::Game(FULLSCREEN)]);
 }
 
 #[tokio::test]
@@ -2198,4 +2355,20 @@ async fn a_client_from_0_7_skips_the_cursor_finder_and_stays_connected() {
     wait_for("Name auf dem Server", || shown.shown() == [show(NAME_ONLY, "pc")]).await;
     assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
     server_task.abort();
+}
+
+#[tokio::test]
+async fn a_client_from_0_7_gets_nothing_it_cannot_read() {
+    let frames = screen_saver_seen_by(true, false, false).await;
+    let messages: Vec<ControlV07> = frames.iter().map(|f| postcard::from_bytes(f).unwrap()).collect();
+    assert_eq!(messages, [ControlV07::Sharing(Sharing::ALL)]);
+}
+
+#[tokio::test]
+async fn the_client_follows_only_servers_that_know_it() {
+    // Qross 0.7 meldet Version 7 und trennte bei `FollowsScreenSaver`: Er bekommt nur, was er lesen kann.
+    for frame in client_reports_to(7).await {
+        let msg = postcard::from_bytes::<ControlV07>(&frame);
+        assert!(msg.is_ok(), "ein Server aus 0.7 kann {msg:?} nicht lesen");
+    }
 }

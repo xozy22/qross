@@ -194,6 +194,14 @@ impl Drop for X11Injector {
 }
 
 impl Injector for X11Injector {
+    fn follows_screen_saver(&self) -> bool {
+        true
+    }
+
+    fn screen_saver(&mut self, active: bool, lock: bool) -> crate::screensaver::Outcome {
+        crate::screensaver::follow(active, lock)
+    }
+
     fn types_text(&self) -> bool {
         true
     }

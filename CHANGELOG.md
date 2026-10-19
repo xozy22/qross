@@ -37,6 +37,13 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
   hindurch, nimmt keinen Fokus und bleibt aus, wenn dort ein Programm im Vollbild läuft. „Ausprobieren“ zeigt
   sie sofort. Clients ab Qross 0.8; ältere zeigen nichts. Unter Wayland lässt sich nichts über andere Fenster
   legen, dort gibt es ihn nicht; unter macOS nur in der App, nicht mit `qross` auf der Kommandozeile.
+- **Bildschirmschoner abgleichen, wie bei Synergy:** Startet auf dem Server der Bildschirmschoner, starten ihn
+  auch die verbundenen Clients; bewegst du am Server die Maus oder drückst eine Taste, enden alle, auch wenn
+  der Cursor gerade auf einem Client steht. Er bleibt dabei, wo er ist. Clients ohne eingerichteten
+  Bildschirmschoner oder mit laufendem Video bleiben, wie sie sind. Standard an, einstellbar
+  unter Einstellungen → Bildschirmschoner bzw. mit `[screensaver]` in `qross.toml`.
+- **Clients mitsperren** (Standard aus): Beginnt der Bildschirmschoner des Servers, sperren sich die Clients,
+  statt nur ihren eigenen zu starten.
 
 ### Verbessert
 
@@ -84,6 +91,13 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 - **macOS: Autostart aus dem DMG:** Startete Qross das erste Mal direkt aus dem DMG oder aus der
   Quarantäne-Kopie, zeigte der Autostart danach ins Leere. Jetzt trägt es sich erst ein, wenn es im Ordner
   „Programme“ läuft, und sagt in den Einstellungen, warum.
+
+### Wichtig
+
+- Verlangt ein Client nach seinem Bildschirmschoner ein Passwort, oder ist „Clients mitsperren“ an, ist er
+  danach gesperrt. Entsperren musst du ihn an seiner eigenen Tastatur: Qross kann nicht in den Sperrbildschirm
+  tippen. Unter KDE ist der Bildschirmschoner immer die Sperre.
+- Dem Bildschirmschoner folgen Clients ab dieser Version. Ältere Clients bleiben verbunden und unverändert.
 
 ## [0.7.0] - 2026-10-18
 

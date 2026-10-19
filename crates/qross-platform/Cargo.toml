@@ -19,9 +19,10 @@ tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# screensaver: läuft der Bildschirmschoner? (XScreenSaver-Erweiterung)
 # shape: Fenster des Cursor-Finders ohne Eingabebereich, Klicks gehen hindurch
 # xinput: Rohereignisse der Maus wecken die Erfassung (statt Abfragen im festen Takt)
-x11rb = { version = "0.14", features = ["randr", "shape", "xinput", "xkb", "xtest"] }
+x11rb = { version = "0.14", features = ["randr", "screensaver", "shape", "xinput", "xkb", "xtest"] }
 # wayland-data-control: Zwischenablage ohne Fenster unter KDE, Sway, Hyprland; sonst über XWayland
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 # Markierungen der Passwortmanager unter Wayland lesen (dieselbe Version, die arboard mitbringt)
@@ -64,7 +65,8 @@ if-addrs.workspace = true
 # IpHelper: Netzwerkkarten, Gateway und dessen MAC für Profile je Ort
 # Security, StationsAndDesktops, SystemInformation: Wächter für die Eingabe-Hooks
 # Power: Ruhezustand und Aufwachen melden (Systemereignisse)
-windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Power", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation"] }
+# Registry, Shutdown: Bildschirmschoner (eingerichtet? sperren)
+windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Shutdown", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation"] }
 # COM (Drag & Drop, Shell) – mit windows-sys nicht umsetzbar
 windows = { version = "0.62", features = [
     "Win32_Foundation",

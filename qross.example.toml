@@ -84,6 +84,18 @@ enabled = true
 ring = false
 name = false
 
+# Bildschirmschoner (optional)
+[screensaver]
+# Startet hier der Bildschirmschoner, starten ihn auch die verbundenen Clients (ab Qross 0.8);
+# endet er hier (Maus, Taste), beenden sie ihn. Hat ein Client keinen eingerichtet oder hält dort
+# ein Programm den Bildschirm wach (Video), passiert dort nichts. Verlangt ein Client nach dem
+# Bildschirmschoner ein Passwort, ist er danach gesperrt und wird an seiner eigenen Tastatur
+# entsperrt – Qross kann nicht in den Sperrbildschirm tippen. false = aus
+sync = true
+# true: Die Clients sperren sich, wenn er hier beginnt, statt nur ihren Bildschirmschoner zu
+# starten. Entsperren dann an ihrer eigenen Tastatur.
+lock_clients = false
+
 # Rechte je Rechner (optional): was zwischen diesem Server und einem Client wandern darf.
 # "both" = in beide Richtungen (Standard), "to-client" = nur zum Client, "from-client" = nur vom
 # Client, "off" = gar nicht. Was ein Client abgeben darf, landet auf dem Server und von dort bei

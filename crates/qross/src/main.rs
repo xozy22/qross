@@ -167,6 +167,11 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     if file.finder.style().is_on() && finder.is_none() {
         info!("Cursor-Finder: hier nicht möglich (Wayland), Clients zeigen ihn trotzdem");
     }
+    match (file.screensaver.sync, file.screensaver.lock_clients) {
+        (true, false) => info!("Bildschirmschoner: Clients starten und beenden ihren mit diesem"),
+        (true, true) => info!("Bildschirmschoner: Clients sperren sich, wenn er hier beginnt"),
+        (false, _) => {}
+    }
     let sharing = file.sharing.rules();
     if sharing.default != qross_core::sharing::Sharing::ALL {
         info!("Rechte für Rechner ohne eigenen Eintrag: {}", qross_core::sharing::describe(sharing.default));
@@ -179,6 +184,7 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
         .with_share_concealed(file.clipboard.share_concealed)
         .with_keys(file.keys.config()?)
         .with_game_mode(file.game.enabled)
+        .with_screen_saver(file.screensaver.sync, file.screensaver.lock_clients)
         .with_sharing(sharing)
         .with_cursor_finder(file.finder.style());
     // Hält ein Programm die sichere Tastatureingabe, bleibt der Cursor auf dem Mac (steht im Log)

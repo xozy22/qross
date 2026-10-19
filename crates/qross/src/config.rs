@@ -36,6 +36,8 @@ pub struct ServerFile {
     pub sharing: SharingSection,
     #[serde(default)]
     pub finder: FinderSection,
+    #[serde(default)]
+    pub screensaver: ScreenSaverSection,
 }
 
 /// Abschnitt `[finder]`: der Cursor-Finder (Standard: aus). Er gilt für alle Rechner; Clients ab
@@ -54,6 +56,24 @@ pub struct FinderSection {
 impl FinderSection {
     pub fn style(&self) -> CursorFinder {
         CursorFinder { ring: self.ring, name: self.name }
+    }
+}
+
+/// Abschnitt `[screensaver]`: den Bildschirmschoner mit den Clients abgleichen.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenSaverSection {
+    /// Beginnt er hier, starten die Clients ihren; endet er, beenden sie ihn.
+    #[serde(default = "yes")]
+    pub sync: bool,
+    /// Beim Beginn sperren sich die Clients stattdessen (entsperrt wird an ihrer eigenen Tastatur).
+    #[serde(default)]
+    pub lock_clients: bool,
+}
+
+impl Default for ScreenSaverSection {
+    fn default() -> Self {
+        Self { sync: true, lock_clients: false }
     }
 }
 
@@ -288,6 +308,17 @@ mod tests {
         let file: ServerFile = toml::from_str("[finder]\nring = true\nname = true").unwrap();
         assert_eq!(file.finder.style(), CursorFinder { ring: true, name: true });
         assert!(toml::from_str::<ServerFile>("[finder]\nnamen = true").is_err(), "Tippfehler fallen auf");
+    }
+
+    #[test]
+    fn screen_saver_is_synced_without_locking_unless_configured() {
+        let file: ServerFile = toml::from_str("").unwrap();
+        assert!(file.screensaver.sync && !file.screensaver.lock_clients);
+        let file: ServerFile = toml::from_str("[screensaver]\nlock_clients = true").unwrap();
+        assert!(file.screensaver.sync && file.screensaver.lock_clients);
+        let file: ServerFile = toml::from_str("[screensaver]\nsync = false").unwrap();
+        assert!(!file.screensaver.sync);
+        assert!(toml::from_str::<ServerFile>("[screensaver]\nlock = true").is_err(), "Tippfehler fallen auf");
     }
 
     #[test]

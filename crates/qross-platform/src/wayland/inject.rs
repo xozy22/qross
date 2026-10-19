@@ -35,6 +35,14 @@ pub struct WaylandInjector {
 }
 
 impl Injector for WaylandInjector {
+    fn follows_screen_saver(&self) -> bool {
+        true
+    }
+
+    fn screen_saver(&mut self, active: bool, lock: bool) -> crate::screensaver::Outcome {
+        crate::screensaver::follow(active, lock)
+    }
+
     fn inject(&mut self, event: &Inject) {
         let _ = self.tx.send(*event);
     }

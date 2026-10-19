@@ -275,6 +275,7 @@
           <button type="button" role="tab" id="tab-profiles" data-section="set-profiles" aria-controls="set-profiles" aria-selected="false" tabindex="-1">Profile</button>
           <button type="button" role="tab" id="tab-keys" data-section="set-keys" aria-controls="set-keys" aria-selected="false" tabindex="-1">Tastatur</button>
           <button type="button" role="tab" id="tab-game" data-section="set-game" aria-controls="set-game" aria-selected="false" tabindex="-1">Spielemodus</button>
+          <button type="button" role="tab" id="tab-saver" data-section="set-saver" aria-controls="set-saver" aria-selected="false" tabindex="-1">Bildschirmschoner</button>
           <button type="button" role="tab" id="tab-updates" data-section="set-updates" aria-controls="set-updates" aria-selected="false" tabindex="-1">Updates</button>
           <button type="button" role="tab" id="tab-clipboard" data-section="set-clipboard" aria-controls="set-clipboard" aria-selected="false" tabindex="-1">Zwischenablage</button>
           <button type="button" role="tab" id="tab-about" data-section="set-about" aria-controls="set-about" aria-selected="false" tabindex="-1">Info</button>
@@ -448,6 +449,26 @@
               <span class="switch"><input type="checkbox" role="switch" id="prefGameMode"><span class="track"><span class="thumb"></span></span></span>
             </label>
             <p class="hint game-more">Spiele auf einem Client bekommen dabei relative Mausbewegungen statt Positionen, so wie von einer echten Maus. Das brauchen Spiele, die den Zeiger einfangen, etwa für die Kamera. Als Client meldet dieser Rechner dem Server nur bei eingeschaltetem Spielemodus, dass hier etwas im Vollbild läuft. Clients und Server ab Qross 0.6.</p>
+          </section>
+
+          <section class="settings-section" id="set-saver" role="tabpanel" aria-labelledby="setSaverTitle" hidden>
+            <h3 id="setSaverTitle">Bildschirmschoner</h3>
+            <p class="keys-note" id="saverClientNote" hidden>Wirkt auf dem Server: Dessen Bildschirmschoner geben die Clients weiter. Dieser Rechner ist gerade als Client eingestellt.</p>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">Mit den Clients abgleichen</span>
+                <span class="hint">Startet hier der Bildschirmschoner, starten ihn auch die verbundenen Clients; endet er (Maus, Taste), beenden sie ihn. Der Cursor bleibt dabei, wo er ist, auch auf einem Client. Hat ein Client keinen Bildschirmschoner eingerichtet oder läuft dort ein Video, bleibt er, wie er ist.</span>
+              </span>
+              <span class="switch"><input type="checkbox" role="switch" id="prefSaverSync"><span class="track"><span class="thumb"></span></span></span>
+            </label>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">Clients mitsperren</span>
+                <span class="hint">Beginnt hier der Bildschirmschoner, sperren sich die Clients, statt nur ihren eigenen zu starten.</span>
+              </span>
+              <span class="switch"><input type="checkbox" role="switch" id="prefSaverLock"><span class="track"><span class="thumb"></span></span></span>
+            </label>
+            <p class="hint saver-more"><strong>Entsperren am Client selbst:</strong> Verlangt ein Client nach seinem Bildschirmschoner ein Passwort oder ist „Clients mitsperren“ an, ist er danach gesperrt. Entsperren musst du ihn an seiner eigenen Tastatur, denn Qross kann nicht in den Sperrbildschirm tippen. Clients ab Qross 0.8.</p>
           </section>
 
           <section class="settings-section" id="set-updates" role="tabpanel" aria-labelledby="setUpdatesTitle" hidden>

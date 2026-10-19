@@ -16,6 +16,7 @@ mod identity;
 pub mod progress;
 pub mod quality;
 pub mod secure_input;
+pub mod screensaver;
 pub mod server;
 mod rights;
 mod streams;

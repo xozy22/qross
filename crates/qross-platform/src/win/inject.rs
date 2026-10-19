@@ -29,6 +29,14 @@ pub fn injector() -> anyhow::Result<Box<dyn Injector>> {
 struct WinInjector;
 
 impl Injector for WinInjector {
+    fn follows_screen_saver(&self) -> bool {
+        true
+    }
+
+    fn screen_saver(&mut self, active: bool, lock: bool) -> crate::screensaver::Outcome {
+        crate::screensaver::follow(active, lock)
+    }
+
     fn inject(&mut self, event: &Inject) {
         match *event {
             Inject::MoveTo { x, y } => {

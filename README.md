@@ -80,6 +80,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Rechte je Rechner: Zwischenablage, kopierte Dateien, Drag & Drop je Richtung erlauben oder sperren | ✔ | ✔ | ✔ | ✔¹ |
 | Server: [„Sichere Tastatureingabe“](#macos-sichere-tastatureingabe) erkennen, Hinweis, Cursor bleibt auf dem Mac | entfällt | entfällt | entfällt | ✔¹ |
 | Cursor-Finder: beim Wechsel Ring um den Cursor und Name des Rechners⁶ | ✔ | ✔ mit Compositor | – (keine Fenster über anderen Programmen möglich) | ✔ in der App¹ |
+| Bildschirmschoner abgleichen: startet und endet mit dem des Servers, auf Wunsch Clients mitsperren⁷ | ✔ | ✔ über den Dienst des Desktops, sonst den X-Server | ✔ über den Dienst des Desktops | ✔¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
 | Profile je Ort, automatisch nach Netzwerk (Gateway, ohne Zusatzrechte)⁴ | ✔ mit Netzwerkname | ✔, Name über NetworkManager | ✔ wie X11 | ✔ ohne WLAN-Namen¹ |
 | [Autostart](docs/autostart.md) bei der Anmeldung, unsichtbar im Tray⁵ | ✔ `HKCU\…\Run` | ✔ XDG-Autostart | ✔ XDG-Autostart | ✔ LaunchAgent¹ |
@@ -109,6 +110,19 @@ systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autost
 Vollbild. Unter Wayland lassen sich keine Fenster über andere Programme legen, dort zeigt der Rechner selbst
 nichts. Unter macOS braucht das Fenster die Ereignisschleife der App; `qross` auf der Kommandozeile zeigt dort
 nichts. Unter Windows echt geprüft, macOS und X11 nur gebaut und mit Clippy geprüft.
+⁷ Startet ein Client seinen Bildschirmschoner über Qross, gilt dort dasselbe wie nach Ablauf seiner eigenen
+Wartezeit: **Verlangt er danach ein Passwort, ist er gesperrt** – Windows mit „Anmeldeseite bei
+Reaktivierung“, macOS mit „Passwort erforderlich“ (bei „Sofort“ gleich, sonst nach der eingestellten Zeit),
+GNOME mit automatischer Bildschirmsperre, KDE immer (dort ist der Bildschirmschoner die Sperre). Entsperren
+musst du ihn dann **an seiner eigenen Tastatur**; Qross kann nicht in den Sperrbildschirm tippen. Das gilt
+erst recht mit „Clients mitsperren“. Ohne eingerichteten Bildschirmschoner (Windows „(Kein)“, macOS „Nie“,
+GNOME „Bildschirm abschalten: Nie“, KDE ohne automatische Sperre) oder während dort ein Video den Bildschirm
+wach hält, passiert auf dem Client nichts, auch keine Sperre. In einer Windows-Remotedesktop-Sitzung startet
+Windows keinen Bildschirmschoner, Qross versucht es dort nicht. Geprüft: Logik, Protokoll und ältere
+Gegenstellen im Test; unter Windows echt das Erkennen und „keiner eingerichtet“, Starten und Beenden nur bis zur
+Systemschnittstelle (der Testrechner lief per Remotedesktop). Ob ein Client sich sperrt, folgt aus dem
+Verhalten der Systeme, auf echter Hardware ist es noch nicht geprüft; macOS ist nur übersetzt, Linux nur gegen
+Xvfb getestet.
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
@@ -118,8 +132,9 @@ nichts. Unter Windows echt geprüft, macOS und X11 nur gebaut und mit Clippy gep
   Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Abgleich von Feststelltaste,
   Num und Rollen samt Gegenstellen aus 0.7, Rechte je Rechner für jede
   Art und Richtung samt sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene
-  vertrauliche Inhalte, Cursor-Finder samt sofortiger Änderung und Clients aus 0.7, Ablehnung unbekannter
-  Clients, LAN-Suche, Zurückholen und Halten des Cursors bei sicherer Tastatureingabe).
+  vertrauliche Inhalte, Cursor-Finder samt sofortiger Änderung und Clients aus 0.7, Bildschirmschoner samt Ende
+  durch Eingaben für einen Client, Sperren und Gegenstellen aus 0.7, Ablehnung unbekannter Clients, LAN-Suche,
+  Zurückholen und Halten des Cursors bei sicherer Tastatureingabe).
 - macOS, sichere Tastatureingabe: Die CI schaltet sie im Test selbst ein, erkennt sie samt Prozess und schaltet
   sie wieder aus. Mit einem echten Passwortfeld oder Terminal ist es noch nicht geprüft.
 - Windows-Tastaturlayouts: echter Test mit dem deutschen und dem US-Layout (AltGr, tote Tasten, Kürzel), soweit
@@ -172,6 +187,10 @@ nichts. Unter Windows echt geprüft, macOS und X11 nur gebaut und mit Clippy gep
   schaltet nur dort, bis der Cursor ihn das nächste Mal betritt. Am Mac gibt es nur die Feststelltaste; Num
   und Rollen eines Clients bleiben dann, wie sie sind. Mit Qross bis 0.7 auf einer Seite geht die Taste wie
   bisher nur an den Rechner mit dem Cursor.
+- **Bildschirmschoner** (Einstellungen → Bildschirmschoner bzw. `[screensaver]`, Standard an): Startet er auf
+  dem Server, starten ihn auch die Clients; bewegst du dort die Maus, enden alle. Der Cursor bleibt dabei, wo
+  er ist, auch auf einem Client. „Clients mitsperren“ (Standard aus) sperrt die Clients stattdessen. **Ein gesperrter Client wird an seiner eigenen Tastatur entsperrt**, siehe ⁶.
+  Clients ab Qross 0.8; ältere laufen unverändert weiter.
 
 ## Download
 

@@ -110,6 +110,14 @@ impl MacInjector {
 }
 
 impl Injector for MacInjector {
+    fn follows_screen_saver(&self) -> bool {
+        true
+    }
+
+    fn screen_saver(&mut self, active: bool, lock: bool) -> crate::screensaver::Outcome {
+        crate::screensaver::follow(active, lock)
+    }
+
     fn types_text(&self) -> bool {
         true
     }
