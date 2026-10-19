@@ -95,7 +95,9 @@ pub fn injector() -> Result<Box<dyn Injector>> {
              eingeschaltet, den Eintrag entfernen und neu hinzufügen."
         );
     }
-    Ok(Box::new(inject::MacInjector::new()?))
+    let injector = inject::MacInjector::new()?;
+    locks::warm_up();
+    Ok(Box::new(injector))
 }
 
 pub fn clipboard() -> Box<dyn Clipboard> {

@@ -4,6 +4,7 @@
 //! liegt zwar auf der Position von Num, schaltet aber nichts.
 
 use std::ffi::{c_char, c_void};
+use std::sync::Mutex;
 
 use qross_proto::LockState;
 
@@ -32,8 +33,12 @@ extern "C" {
     static mach_task_self_: MachPort;
 }
 
-/// Verbindung zu IOHIDSystem für die Dauer von `f`
-fn with_hid_system<T>(f: impl FnOnce(MachPort) -> Option<T>) -> Option<T> {
+/// Offene Verbindung zu IOHIDSystem (0 = noch keine). Einmal geöffnet und behalten: Den Dienst bei jedem
+/// Betreten des Clients neu zu suchen und zu öffnen kostet spürbar Zeit, und so lange warten im
+/// Einspeise-Thread alle folgenden Mausbewegungen – bei schnellem Wechsel hakte der Cursor.
+static CONNECTION: Mutex<MachPort> = Mutex::new(0);
+
+fn open() -> Option<MachPort> {
     unsafe {
         // Verbraucht von IOServiceGetMatchingService; 0 = Standard-Port
         let matching = IOServiceMatching(c"IOHIDSystem".as_ptr());
@@ -52,10 +57,29 @@ fn with_hid_system<T>(f: impl FnOnce(MachPort) -> Option<T>) -> Option<T> {
             tracing::debug!("IOHIDSystem nicht geöffnet (Fehler {opened:#x})");
             return None;
         }
-        let result = f(connect);
-        IOServiceClose(connect);
-        result
+        Some(connect)
     }
+}
+
+/// `f` mit der offenen Verbindung. Schlägt es fehl (etwa weil IOHIDSystem nach dem Ruhezustand neu
+/// angelegt wurde), einmal neu öffnen und wiederholen.
+fn with_hid_system<T>(f: impl Fn(MachPort) -> Option<T>) -> Option<T> {
+    let mut connection = CONNECTION.lock().unwrap_or_else(|e| e.into_inner());
+    if *connection == 0 {
+        *connection = open()?;
+    }
+    if let Some(result) = f(*connection) {
+        return Some(result);
+    }
+    unsafe { IOServiceClose(*connection) };
+    *connection = 0;
+    *connection = open()?;
+    f(*connection)
+}
+
+/// Verbindung schon beim Start öffnen, damit auch das erste Betreten nicht darauf wartet
+pub fn warm_up() {
+    let _ = caps_lock();
 }
 
 /// Ist die Feststelltaste an? `None`: nicht lesbar

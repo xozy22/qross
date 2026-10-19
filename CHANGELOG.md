@@ -12,10 +12,14 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 
 ### Behoben
 
-- **macOS: Verzögerung beim Wechsel auf den Mac:** Lief Qross am Mac nur im Tray oder als `qross client`, bremste
-  macOS es mit App Nap aus: Wechselte der Cursor vom Server auf den Mac, kam die Maus dort erst nach einem
-  spürbaren Moment an, der Rückweg blieb flüssig. Qross schaltet App Nap jetzt für seine Laufzeit ab, wie
-  Synergy. Bildschirmschoner, Display- und Systemschlaf des Macs bleiben erlaubt.
+- **Hängen beim schnellen Wechsel auf einen Mac:** Zog man den Cursor zügig vom Server auf einen Mac, blieb
+  er dort kurz stehen; langsam und auf dem Rückweg fiel nichts auf. Seit 0.8.0 übernimmt der Mac beim Betreten
+  den Stand der Feststelltaste, und dafür baute Qross jedes Mal neu eine Verbindung zum Eingabesystem auf. So
+  lange warteten alle folgenden Mausbewegungen. Die Verbindung bleibt jetzt offen, die Abfrage dauert nur noch
+  einen Augenblick.
+- **macOS: kein App Nap mehr:** Lief Qross am Mac nur im Tray oder als `qross client`, bremste macOS es zusätzlich
+  aus. Qross schaltet App Nap jetzt für seine Laufzeit ab, wie Synergy. Bildschirmschoner, Display- und
+  Systemschlaf des Macs bleiben erlaubt.
 
 ## [0.8.0] - 2026-10-19
 
