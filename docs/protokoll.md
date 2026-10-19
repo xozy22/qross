@@ -16,6 +16,14 @@ Implementierung: `crates/qross-proto`.
   - Der Client speichert den Server-Fingerprint beim ersten Kontakt (TOFU) oder prüft gegen `--server-fingerprint`.
 - Keepalive 1 s, Idle-Timeout 5 s. Bricht die Verbindung ab, holt der Server den Cursor zurück, und der
   Client lässt alle gedrückten Tasten los.
+- Ruhezustand und Netzwechsel (nach Qross 0.7, `qross_net::wake`, ohne neue Nachrichten): Vor dem Ruhezustand
+  schließt die Seite, die einschläft, die Verbindung mit dem QUIC-Anwendungsfehlercode **1**; ein Client
+  verbindet sich erst nach dem Aufwachen neu, einer, dessen Server schläft, wartet 1 s. Nach dem Aufwachen
+  und bei neuen eigenen Adressen wechselt der Client auf ein neues UDP-Socket (QUIC-Migration, danach ein
+  PING). Kommt binnen 1,5 s nichts zurück, baut er sofort neu auf; ein Stateless Reset des Servers heißt
+  ebenfalls: sofort neu. Der Server trennt nach dem eigenen Aufwachen jeden Client, von dem 2 s lang nichts
+  kommt. Ein Verbindungsaufbau gibt nach 2 s auf; der nächste Versuch folgt nach 0,25 s, verdoppelt bis 1 s,
+  nach einer Minute ohne Erfolg bis 3 s. Ältere Gegenstellen werten die Fehlercodes nicht aus.
 
 ## Kanäle
 
@@ -47,9 +55,12 @@ große Schwachpunkt von Synergy.
    IPv4-Schnittstelle. Jeder Server antwortet mit Name, Port, Fingerprint und Betriebssystem. Die Antwort
    ist nur ein Vorschlag; vertraut wird erst beim Verbinden über den Fingerprint.
 1. Client öffnet den Control-Stream und sendet `Hello { version, name, screen, platform }`.
-2. Server prüft Version, Namen (muss im Layout stehen und darf nicht bereits verbunden sein) und Fingerprint und
-   antwortet mit `Welcome { version, …, platform }` oder `Reject { reason }`. Ist genau eine Seite ein Mac,
-   tauscht der Client Strg und Cmd, damit etwa Strg+C auf dem Mac weiterhin kopiert.
+2. Server prüft Version, Namen (muss im Layout stehen) und Fingerprint und antwortet mit
+   `Welcome { version, …, platform }` oder `Reject { reason }`. Ist derselbe Client (Name und Fingerprint)
+   noch verbunden, ersetzt die neue Verbindung die alte; die alte schließt er mit dem Anwendungsfehlercode
+   **2**, und ein Client, der ihn noch empfängt, hört auf (nach Qross 0.7; bis dahin lehnte der Server ab).
+   Ist genau eine Seite ein Mac, tauscht der Client Strg und Cmd, damit etwa Strg+C auf dem Mac weiterhin
+   kopiert.
    Meldet das `Welcome` mindestens Version 4, schickt der Client gleich danach `Monitors` (siehe unten).
    Ab Version 5 meldet er außerdem mit `Game`, wenn bei ihm etwas im Vollbild läuft (siehe Spielemodus).
    Ab Version 6 meldet er mit `TypesText` direkt nach dem `Welcome`, dass er Zeichen eingeben kann (siehe

@@ -52,9 +52,19 @@ pub fn client_config(identity: &Identity) -> Result<quinn::ClientConfig> {
 
 fn transport() -> quinn::TransportConfig {
     let mut t = quinn::TransportConfig::default();
-    // Verbindungsabbrüche schnell erkennen, damit der Server die Eingaben zurückholt.
+    // Verbindungsabbrüche schnell erkennen, damit der Server die Eingaben zurückholt: Jede Seite meldet
+    // sich spätestens nach 1 s, nach 5 s Stille gilt die Verbindung als tot. Nicht kürzer: WLAN hakt
+    // (Kanalsuche, AirDrop, Energiesparen) gern 1–2 s, ohne dass etwas kaputt ist, und ein falscher
+    // Abbruch nimmt dem Nutzer den Cursor weg. Nach dem Aufwachen, vor dem Ruhezustand und bei einem
+    // Netzwechsel warten Client und Server ohnehin nicht darauf, sondern prüfen selbst (siehe `wake`).
     t.keep_alive_interval(Some(Duration::from_secs(1)));
     t.max_idle_timeout(Some(Duration::from_secs(5).try_into().expect("gültiges Timeout")));
+    // Laufzeit, bis die erste Messung da ist. Davon hängt ab, wann quinn ein verlorenes Paket des
+    // Verbindungsaufbaus wiederholt: mit den üblichen 333 ms erst nach 1 s, dann nach 3 s, mit 100 ms
+    // nach 0,3 s und 0,9 s. Gerade nach dem Aufwachen und einem Netzwechsel geht das erste Paket gern
+    // verloren. Im LAN liegt die Laufzeit weit darunter; über ein langsames VPN kostet zu frühes
+    // Wiederholen nur ein Paket.
+    t.initial_rtt(Duration::from_millis(100));
     t.datagram_receive_buffer_size(Some(1 << 20));
     t
 }

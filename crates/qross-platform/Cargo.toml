@@ -31,6 +31,8 @@ dirs.workspace = true
 futures-util = "0.3"
 # Monotone Uhr für die Zeitstempel von libei
 rustix = { version = "1", features = ["time"] }
+# Netlink-Socket: Netzwechsel melden (Systemereignisse)
+libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = { version = "0.14", features = ["xtest"] }
@@ -52,7 +54,8 @@ if-addrs.workspace = true
 [target.'cfg(windows)'.dependencies]
 # IpHelper: Netzwerkkarten, Gateway und dessen MAC für Profile je Ort
 # Security, StationsAndDesktops, SystemInformation: Wächter für die Eingabe-Hooks
-windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation"] }
+# Power: Ruhezustand und Aufwachen melden (Systemereignisse)
+windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Power", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation"] }
 # COM (Drag & Drop, Shell) – mit windows-sys nicht umsetzbar
 windows = { version = "0.62", features = [
     "Win32_Foundation",

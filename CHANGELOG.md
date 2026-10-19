@@ -29,6 +29,15 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
   dadurch bis zu 4 ms früher, und im Leerlauf schläft sie, statt rund 500-mal je Sekunde (Cursor auf einem
   Client: 940-mal) aufzuwachen. Wie unter Windows und macOS zählt für die Wechselverzögerung jetzt nur
   Drücken gegen die Kante, nicht schon das Stehenbleiben dort. Ohne XInput 2.1 bleibt es beim Takt.
+- **Schneller wieder da nach dem Ruhezustand und bei Netzwechseln:** Qross achtet jetzt auf Ruhezustand,
+  Aufwachen und Netzwechsel (WLAN gewechselt, Kabel ab oder an, VPN) und wartet nicht mehr auf eine
+  Zeitüberschreitung. Wacht der Laptop auf, prüft der Client die Verbindung sofort und baut sie, wenn nötig,
+  ohne Wartezeit neu auf – meist in Sekundenbruchteilen, sobald das Netz wieder da ist. Mit neuer Adresse zieht
+  die Verbindung einfach mit um, ohne Neuaufbau. Geht ein Rechner in den Ruhezustand, meldet er sich vorher
+  ab: Der Server holt den Cursor sofort zurück, statt ihn 5 s ins Leere zu schicken, und ein schlafender Server
+  sagt es seinen Clients. Wacht der Server auf, trennt er Clients, die nicht mehr antworten. Ist der Server
+  nicht erreichbar, versucht es der Client in der ersten Minute etwa jede Sekunde neu, danach seltener. Hängt
+  nach dem Aufwachen die Namensauflösung, nimmt er die zuletzt erreichte Adresse.
 
 ### Behoben
 
@@ -39,6 +48,11 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
   damit nichts hängen bleibt. Sperrbildschirm, UAC, Fenster mit Administratorrechten und der Ruhezustand lösen
   keinen Fehlalarm aus. Vorbeugend wartet der Hook selbst nie mehr: Ereignisse gehen über eine sperrfreie
   Warteschlange an den Server-Kern, und der Hook-Thread läuft mit höchster Priorität, auch im Hintergrund.
+- **„Ein Client namens … ist bereits verbunden“:** Meldete sich ein Rechner neu an, während der Server die alte
+  Verbindung noch hielt (nach dem Aufwachen, einem Netzwechsel oder einem Neustart von Qross), wies der Server
+  ihn ab, bis die alte nach einigen Sekunden auslief. Jetzt ersetzt die neue Verbindung die alte sofort, sofern
+  sie vom selben Rechner kommt (gleicher Schlüssel). Laufen versehentlich zwei Clients mit demselben Namen und
+  Schlüssel, gewinnt der neuere, und der ältere hört mit einer Meldung auf.
 - **macOS: Autostart aus dem DMG:** Startete Qross das erste Mal direkt aus dem DMG oder aus der
   Quarantäne-Kopie, zeigte der Autostart danach ins Leere. Jetzt trägt es sich erst ein, wenn es im Ordner
   „Programme“ läuft, und sagt in den Einstellungen, warum.

@@ -1,11 +1,13 @@
 //! Client-Laufzeit: verbindet sich (mit automatischer Wiederverbindung) und speist ein.
 
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use qross_core::client::{ClientState, Transition};
@@ -17,7 +19,7 @@ use qross_proto::{
     FileEntry, FrameError, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, Sharing, StreamKind,
     DEFAULT_PORT, GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SHARING_SINCE, TEXT_SINCE,
 };
-use quinn::{Connection, Endpoint, RecvStream};
+use quinn::{Connection, ConnectionError, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
@@ -30,14 +32,13 @@ use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
 use crate::streams::{read_kind, send_drag_message};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
+use crate::wake::{self, Backoff, SystemEvent};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
 
-/// Wiederverbindung: schnell beginnen (Server-Neustart dauert oft nur Sekundenbruchteile),
-/// dann bis zur Obergrenze verdoppeln.
-const RETRY_MIN: Duration = Duration::from_millis(250);
-const RETRY_MAX: Duration = Duration::from_secs(3);
-/// Eine Sitzung, die so lange lief, gilt als erfolgreich – danach wieder schnell versuchen.
-const STABLE_SESSION: Duration = Duration::from_secs(10);
+/// Nach einer Ablehnung (etwa: noch nicht freigegeben) so lange warten; schneller hilft da nicht.
+const AFTER_REJECT: Duration = Duration::from_secs(3);
+/// Höchstens so lange auf die Namensauflösung warten; nach dem Aufwachen hängt sie gern noch.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct ClientConfig {
     /// Name dieses Rechners im Layout des Servers
@@ -85,6 +86,59 @@ impl fmt::Display for Fatal {
 }
 
 impl std::error::Error for Fatal {}
+
+/// Warum eine Sitzung bzw. ein Verbindungsversuch endete, wenn das die nächste Wartezeit bestimmt
+#[derive(Debug)]
+enum Break {
+    /// Dieser Rechner geht in den Ruhezustand: getrennt, neu verbinden erst nach dem Aufwachen
+    Sleep,
+    /// Aufgewacht, anderes Netz oder die Verbindung antwortet danach nicht mehr: sofort neu
+    /// verbinden. Mit Grund, wenn eine Verbindung bestand.
+    Now(Option<String>),
+    /// Der Server geht in den Ruhezustand
+    ServerSleeps,
+    /// Der Server hat abgelehnt (etwa: noch nicht freigegeben)
+    Rejected(String),
+}
+
+impl fmt::Display for Break {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Break::Sleep => f.write_str("Ruhezustand – verbinde nach dem Aufwachen neu"),
+            Break::Now(Some(reason)) => f.write_str(reason),
+            Break::Now(None) => f.write_str("Verbindungsversuch unterbrochen"),
+            Break::ServerSleeps => f.write_str("Server geht in den Ruhezustand"),
+            Break::Rejected(reason) => write!(f, "Server hat die Verbindung abgelehnt: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for Break {}
+
+impl Break {
+    /// Ein Systemereignis unterbricht den Verbindungsaufbau.
+    fn interrupt(event: SystemEvent) -> anyhow::Error {
+        match event {
+            SystemEvent::Sleeping => Break::Sleep,
+            SystemEvent::Woke | SystemEvent::NetworkChanged => Break::Now(None),
+        }
+        .into()
+    }
+}
+
+/// Systemereignisse (vom Betriebssystem oder aus einem Test)
+type Events = mpsc::UnboundedReceiver<SystemEvent>;
+
+/// Was von einer Sitzung zur nächsten bleibt
+struct Reconnect {
+    tls: quinn::ClientConfig,
+    events: Events,
+    /// Zuletzt erreichte Adresse des Servers, falls die Namensauflösung einmal hängt
+    last_addr: Option<SocketAddr>,
+}
+
+/// Lebendprüfung nach dem Aufwachen oder einem Netzwechsel (siehe [`wake::answers`])
+type Probe = Pin<Box<dyn Future<Output = bool> + Send>>;
 
 enum FromServer {
     Move(MouseMove),
@@ -157,9 +211,10 @@ fn notify(notices: Notices<'_>, notice: ClientNotice) {
     }
 }
 
-/// Läuft, bis ein nicht behebbarer Fehler auftritt (z. B. falscher Server-Fingerprint).
+/// Läuft, bis ein nicht behebbarer Fehler auftritt (z. B. falscher Server-Fingerprint). Ruhezustand,
+/// Aufwachen und Netzwechsel meldet das Betriebssystem (siehe [`wake`]).
 pub async fn run(config: ClientConfig, identity: Identity, trust: TrustStore, platform: ClientPlatform) -> Result<()> {
-    run_inner(config, identity, trust, platform, None, Transfers::new()).await
+    run_inner(config, identity, trust, platform, None, Transfers::new(), None).await
 }
 
 /// Wie [`run`], meldet den Verbindungszustand zusätzlich über `notices`.
@@ -170,7 +225,7 @@ pub async fn run_with_notices(
     platform: ClientPlatform,
     notices: mpsc::UnboundedSender<ClientNotice>,
 ) -> Result<()> {
-    run_inner(config, identity, trust, platform, Some(&notices), Transfers::new()).await
+    run_inner(config, identity, trust, platform, Some(&notices), Transfers::new(), None).await
 }
 
 /// Wie [`run_with_notices`]; laufende Dateiübertragungen lassen sich über `transfers` abbrechen.
@@ -182,18 +237,28 @@ pub async fn run_with_transfers(
     notices: mpsc::UnboundedSender<ClientNotice>,
     transfers: Transfers,
 ) -> Result<()> {
-    run_inner(config, identity, trust, platform, Some(&notices), transfers).await
+    run_inner(config, identity, trust, platform, Some(&notices), transfers, None).await
+}
+
+/// Wie [`run_with_transfers`], aber Ruhezustand, Aufwachen und Netzwechsel kommen aus `events`
+/// statt vom Betriebssystem (für Tests).
+pub async fn run_with_system_events(
+    config: ClientConfig,
+    identity: Identity,
+    trust: TrustStore,
+    platform: ClientPlatform,
+    notices: mpsc::UnboundedSender<ClientNotice>,
+    transfers: Transfers,
+    events: mpsc::UnboundedReceiver<SystemEvent>,
+) -> Result<()> {
+    run_inner(config, identity, trust, platform, Some(&notices), transfers, Some(events)).await
 }
 
 /// Baut nur den TLS-Handshake auf und liefert den Fingerprint des Servers, ohne sich anzumelden
 /// (z. B. um ihn vor dem ersten Verbinden bestätigen zu lassen).
 pub async fn probe_fingerprint(server: &str, identity: &Identity) -> Result<(SocketAddr, Fingerprint)> {
     let addr = resolve(server).await?;
-    let bind: SocketAddr = match addr.ip() {
-        IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-        IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-    };
-    let mut endpoint = Endpoint::client(bind)?;
+    let mut endpoint = Endpoint::client(wake::unspecified(addr))?;
     endpoint.set_default_client_config(client_config(identity)?);
     let conn = endpoint
         .connect(addr, SERVER_NAME)?
@@ -212,6 +277,7 @@ async fn run_inner(
     platform: ClientPlatform,
     notices: Notices<'_>,
     transfers: Transfers,
+    events: Option<Events>,
 ) -> Result<()> {
     let ClientPlatform { mut injector, clipboard, screen, monitors, game } = platform;
     let types_text = injector.types_text();
@@ -267,12 +333,14 @@ async fn run_inner(
         }
     })?;
 
-    let tls = client_config(&identity)?;
-    let mut retry = RETRY_MIN;
+    let mut backoff = Backoff::new();
+    let events = events.unwrap_or_else(wake::system_events);
+    let mut reconnect = Reconnect { tls: client_config(&identity)?, events, last_addr: None };
     loop {
-        let started = std::time::Instant::now();
-        let result = session(&config, &tls, &mut trust, &inject_tx, &mut clipboard, &screen, notices).await;
-        retry = if started.elapsed() > STABLE_SESSION { RETRY_MIN } else { (retry * 2).min(RETRY_MAX) };
+        let started = Instant::now();
+        let result = session(&config, &mut trust, &inject_tx, &mut clipboard, &screen, notices, &mut reconnect).await;
+        let mut wait = backoff.after(started.elapsed(), Instant::now());
+        let mut asleep = false;
         match result {
             Ok(()) => {
                 info!("Verbindung zum Server beendet");
@@ -280,37 +348,107 @@ async fn run_inner(
             }
             Err(e) if e.downcast_ref::<Fatal>().is_some() => return Err(e),
             Err(e) => {
-                warn!("{e:#}");
+                // Ruhezustand ist kein Fehler
+                let mut expected = false;
+                match e.downcast_ref::<Break>() {
+                    Some(Break::Sleep) => (asleep, wait, expected) = (true, wake::SLEEP_PAUSE, true),
+                    Some(Break::Now(None)) => {
+                        // Nur ein Verbindungsversuch, der neu beginnt: nichts zu melden
+                        debug!("{e}");
+                        backoff.reset();
+                        continue;
+                    }
+                    Some(Break::Now(Some(_))) => {
+                        backoff.reset();
+                        wait = Duration::ZERO;
+                    }
+                    // Er schläft gleich: nicht vorher noch einmal anmelden
+                    Some(Break::ServerSleeps) => (wait, expected) = (Backoff::FAST_MAX, true),
+                    Some(Break::Rejected(_)) => wait = AFTER_REJECT,
+                    None => {}
+                }
+                if expected {
+                    info!("{e:#}");
+                } else {
+                    warn!("{e:#}");
+                }
                 notify(notices, ClientNotice::Disconnected { reason: format!("{e:#}") });
             }
         }
-        tokio::time::sleep(retry).await;
+        pause(wait, asleep, &mut reconnect.events, &mut backoff).await;
+    }
+}
+
+/// Wartet bis zum nächsten Verbindungsversuch. Aufwachen und Netzwechsel beenden das Warten sofort,
+/// im Ruhezustand (`asleep`) nur das Aufwachen.
+async fn pause(wait: Duration, mut asleep: bool, events: &mut Events, backoff: &mut Backoff) {
+    let mut until = tokio::time::Instant::now() + wait;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(until) => return,
+            Some(event) = events.recv() => match event {
+                SystemEvent::Sleeping => {
+                    asleep = true;
+                    until = tokio::time::Instant::now() + wake::SLEEP_PAUSE;
+                }
+                SystemEvent::Woke => {
+                    info!("aufgewacht – verbinde neu");
+                    backoff.reset();
+                    return;
+                }
+                SystemEvent::NetworkChanged if !asleep => {
+                    debug!("Netzwerk geändert – verbinde neu");
+                    backoff.reset();
+                    return;
+                }
+                SystemEvent::NetworkChanged => {}
+            },
+        }
     }
 }
 
 async fn session(
     config: &ClientConfig,
-    tls: &quinn::ClientConfig,
     trust: &mut TrustStore,
     inject: &Sender<ToInjector>,
     clip: &mut ClipboardSide,
     screen: &ScreenQuery,
     notices: Notices<'_>,
+    reconnect: &mut Reconnect,
 ) -> Result<()> {
-    let addr = resolve(&config.server).await?;
-    let bind: SocketAddr = match addr.ip() {
-        IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-        IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+    let addr = tokio::select! {
+        resolved = tokio::time::timeout(RESOLVE_TIMEOUT, resolve(&config.server)) => {
+            match (resolved, reconnect.last_addr) {
+                (Ok(Ok(addr)), _) => addr,
+                (Ok(Err(e)), Some(last)) => {
+                    debug!("{e:#} – versuche die zuletzt erreichte Adresse {last}");
+                    last
+                }
+                (Err(_), Some(last)) => {
+                    debug!("„{}“ nicht rechtzeitig aufgelöst – versuche {last}", config.server);
+                    last
+                }
+                (Ok(Err(e)), None) => return Err(e),
+                (Err(_), None) => bail!("„{}“ nicht rechtzeitig aufgelöst", config.server),
+            }
+        }
+        Some(event) = reconnect.events.recv() => return Err(Break::interrupt(event)),
     };
-    let mut endpoint = Endpoint::client(bind)?;
-    endpoint.set_default_client_config(tls.clone());
+    let mut endpoint = Endpoint::client(wake::unspecified(addr))?;
+    endpoint.set_default_client_config(reconnect.tls.clone());
 
     debug!("verbinde mit {addr}");
     notify(notices, ClientNotice::Connecting { addr });
-    let conn = endpoint
-        .connect(addr, SERVER_NAME)?
-        .await
-        .with_context(|| format!("keine Verbindung zu {addr}"))?;
+    let connecting = endpoint.connect(addr, SERVER_NAME)?;
+    // Aufwachen oder ein Netzwechsel unterbricht den Versuch: Der nächste beginnt sofort mit frischem
+    // Socket auf dem neuen Weg.
+    let conn = tokio::select! {
+        connected = tokio::time::timeout(wake::CONNECT_TIMEOUT, connecting) => match connected {
+            Ok(conn) => conn.with_context(|| format!("keine Verbindung zu {addr}"))?,
+            Err(_) => bail!("keine Verbindung zu {addr}: keine Antwort"),
+        },
+        Some(event) = reconnect.events.recv() => return Err(Break::interrupt(event)),
+    };
     verify_server(config, trust, &peer_fingerprint(&conn)?)?;
 
     let (mut control, mut control_rx) = conn.open_bi().await?;
@@ -328,9 +466,10 @@ async fn session(
             notify(notices, ClientNotice::Connected { server_name: server_name.clone(), addr });
             (server_name, platform, version)
         }
-        Some(Control::Reject { reason }) => bail!("Server hat die Verbindung abgelehnt: {reason}"),
+        Some(Control::Reject { reason }) => return Err(Break::Rejected(reason).into()),
         other => bail!("unerwartete Antwort vom Server: {other:?}"),
     };
+    reconnect.last_addr = Some(addr);
     // Zeichen statt Tastenpositionen kann nur ein Server schicken, der sie kennt; ältere trennen bei
     // unbekannten Nachrichten. Ohne diese Meldung bleibt es bei Tastenpositionen.
     if server_version >= TEXT_SINCE && screen.types_text {
@@ -386,6 +525,8 @@ async fn session(
     let mut screen_poll = tokio::time::interval(Duration::from_secs(2));
     // Was der Server mit diesem Rechner teilt; ältere Server melden nichts und erlauben alles.
     let mut sharing = Sharing::ALL;
+    // Läuft nach dem Aufwachen bzw. einem Netzwechsel
+    let mut probe: Option<Probe> = None;
 
     let outcome: Result<()> = async {
         loop {
@@ -530,7 +671,31 @@ async fn session(
                         write_frame(&mut control, &Control::Game(game)).await?;
                     }
                 }
-                reason = conn.closed() => return Err(anyhow!("Verbindung getrennt: {reason}")),
+                Some(event) = reconnect.events.recv() => match event {
+                    SystemEvent::Sleeping => {
+                        // Der Server gibt den Cursor gleich zurück, statt 5 s ins Leere zu schicken.
+                        conn.close(wake::CLOSE_SLEEPING, b"sleeping");
+                        return Err(Break::Sleep.into());
+                    }
+                    SystemEvent::Woke | SystemEvent::NetworkChanged => {
+                        // Auf neuem Socket weiter (siehe `wake::rebind`); lebt die Verbindung noch,
+                        // kommt die Antwort innerhalb einer Laufzeit.
+                        if let Err(e) = wake::rebind(&endpoint, addr) {
+                            debug!("kein neues Socket: {e}");
+                        }
+                        debug!(?event, "prüfe die Verbindung zum Server");
+                        probe = Some(Box::pin(wake::answers(conn.clone(), wake::CLIENT_PROBE)));
+                    }
+                },
+                alive = async { probe.as_mut().expect("nur mit laufender Prüfung").await }, if probe.is_some() => {
+                    probe = None;
+                    if !alive {
+                        conn.close(0u32.into(), b"no answer");
+                        return Err(Break::Now(Some("Server antwortet nicht mehr – verbinde neu".into())).into());
+                    }
+                    debug!("Verbindung zum Server lebt");
+                }
+                reason = conn.closed() => return Err(closed(reason)),
             }
         }
     }
@@ -542,6 +707,22 @@ async fn session(
     // Was noch ankam, wird nie vollständig.
     clip.transfers.abort_receiving(None, "Verbindung getrennt");
     outcome
+}
+
+/// Warum die Verbindung endete, mit den Fehlercodes aus [`wake`]
+fn closed(reason: ConnectionError) -> anyhow::Error {
+    match &reason {
+        ConnectionError::ApplicationClosed(close) if close.error_code == wake::CLOSE_SLEEPING => Break::ServerSleeps.into(),
+        ConnectionError::ApplicationClosed(close) if close.error_code == wake::CLOSE_REPLACED => Fatal(
+            "Ein anderes Qross mit demselben Namen und Schlüssel hat sich beim Server angemeldet; dieser Client hört auf"
+                .into(),
+        )
+        .into(),
+        // Stateless Reset: Der Server ist erreichbar, kennt die Verbindung aber nicht mehr (er hat sie
+        // im Ruhezustand dieses Rechners aufgegeben oder wurde neu gestartet). Gleich neu anmelden.
+        ConnectionError::Reset => Break::Now(Some("Server kennt die Verbindung nicht mehr – verbinde neu".into())).into(),
+        _ => anyhow!("Verbindung getrennt: {reason}"),
+    }
 }
 
 /// Fertig übertragene Dateien vom Server in die Zwischenablage legen.

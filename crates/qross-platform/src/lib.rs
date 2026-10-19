@@ -9,6 +9,7 @@ pub mod keymap_linux;
 pub mod keymap_mac;
 pub mod keymap_windows;
 pub mod network;
+pub mod sysevents;
 pub mod wayland_logic;
 
 #[cfg(windows)]
