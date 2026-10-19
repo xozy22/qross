@@ -1,10 +1,20 @@
-// Client-Ansicht
+// Client-Ansicht: Status, Verbindungsqualität, eingestellter Server, Serverwahl
 
-import { $, state } from "./core.js";
+import { $, PLATFORMS, state } from "./core.js";
+import { el } from "./util.js";
 import { renderClientSharing } from "./sharing.js";
 import { renderFinder } from "./discovery.js";
 import { renderClipLimit } from "./clipboard-files.js";
-import { qualityEntry } from "./quality.js";
+import { qualityEntry, updateQuality } from "./quality.js";
+
+/** Phase beim letzten Aufbau: Die Serverwahl klappt nur beim Wechsel auf oder zu, sonst bleibt sie, wie man sie lässt. */
+let lastPhase = null;
+
+export function clientPhase() {
+  const s = state.status;
+  if (s.role === "client") return s.phase === "connected" ? "connected" : "connecting";
+  return s.phase === "error" ? "error" : "stopped";
+}
 
 export function renderClient() {
   const c = state.settings.client;
@@ -16,45 +26,79 @@ export function renderClient() {
   $("#clientDryRun").checked = c.dry_run;
   renderClipLimit();
 
-  const isClient = s.role === "client";
-  let phase = "stopped";
-  if (isClient) phase = s.phase === "connected" ? "connected" : "connecting";
-  else if (s.phase === "error") phase = "error";
-
+  const phase = clientPhase();
+  const connected = phase === "connected";
   const visual = $("#linkVisual");
   visual.dataset.state = phase;
-  visual.dataset.cursor = isClient && s.cursor_here ? "here" : "away";
-  $("#visualServer").textContent = (isClient && s.server_name) || c.address || "Server";
+  visual.dataset.cursor = connected && s.cursor_here ? "here" : "away";
+  const found = state.found?.find((f) => f.address === c.address.trim());
+  $("#visualServer").textContent = (connected && s.server_name) || found?.name || c.address || "Server";
   $("#visualClient").textContent = c.name || state.hostname || "Dieser Rechner";
 
-  const hero = $(".client-hero");
-  hero.dataset.phase = phase;
-  const headline = {
-    stopped: "Nicht verbunden",
-    connecting: "Suche den Server …",
-    connected: `Verbunden mit „${s.server_name}“`,
-    error: "Verbindung fehlgeschlagen",
+  // Status: was gerade gilt; „Verbunden mit …“ steht schon in der Kopfzeile
+  $("#clientStatus").dataset.phase = phase;
+  const server = `„${s.server_name}“`;
+  const [headline, message] = {
+    stopped: ["Nicht verbunden", "Wähl unten einen gefundenen Server oder gib seine Adresse ein."],
+    connecting: ["Suche den Server …", s.message],
+    connected: s.cursor_here
+      ? ["Der Cursor ist hier", `Zurück zu ${server} geht es über den Bildschirmrand.`]
+      : [`Der Cursor ist auf ${server}`, "Schieb die Maus dort über den Bildschirmrand, um hierher zu wechseln."],
+    error: ["Verbindung fehlgeschlagen", s.message],
   }[phase];
   $("#clientHeadline").textContent = headline;
-
-  let message = "Wähl einen gefundenen Server oder gib seine Adresse ein.";
-  if (phase === "connecting") message = s.message;
-  if (phase === "connected") {
-    message = s.cursor_here
-      ? "Der Cursor ist gerade auf diesem Rechner."
-      : "Schieb die Maus am Server über den Bildschirmrand, um hierher zu wechseln.";
-  }
-  if (phase === "error") message = s.message;
   $("#clientMessage").textContent = message;
-  renderClientSharing(phase === "connected" ? s.sharing : null);
+  renderClientSharing(connected ? s.sharing : null);
 
-  const qualitySlot = $("#clientQuality");
-  qualitySlot.hidden = phase !== "connected";
-  if (phase === "connected") {
-    const quality = qualityEntry("server");
-    if (qualitySlot.firstElementChild !== quality.pill) qualitySlot.replaceChildren(quality.pill, quality.panel);
-  } else if (qualitySlot.firstElementChild) {
-    qualitySlot.replaceChildren();
+  // Latenz im Status, Verlauf und Messwerte in der Karte darunter
+  const quality = connected ? qualityEntry("server") : null;
+  const status = $("#clientStatus");
+  const pill = status.querySelector(":scope > .qpill");
+  if (quality && pill !== quality.pill) {
+    pill?.remove();
+    status.append(quality.pill);
+  } else if (!quality) {
+    pill?.remove();
+  }
+  $("#clientConn").hidden = !connected;
+  const slot = $("#clientQuality");
+  if (quality && slot.firstElementChild !== quality.panel) {
+    slot.replaceChildren(quality.panel);
+    updateQuality(quality);
+  } else if (!quality && slot.firstElementChild) {
+    slot.replaceChildren();
+  }
+
+  renderServerCard(phase);
+  const finder = $("#finderBox");
+  if (phase !== lastPhase) {
+    // Verbunden: Serverwahl einklappen; sonst ist sie das Wichtigste und steht offen.
+    if (connected) finder.open = false;
+    else if (lastPhase === null || lastPhase === "connected" || !c.address.trim()) finder.open = true;
+    lastPhase = phase;
   }
   renderFinder();
+}
+
+/** Der eingestellte Server: Name und System, soweit bekannt (aus der Suche bzw. der Verbindung) */
+function renderServerCard(phase) {
+  const c = state.settings.client;
+  const s = state.status;
+  const address = c.address.trim();
+  const card = $("#clientServer");
+  card.hidden = !address;
+  if (!address) return;
+  const found = state.found?.find((f) => f.address === address);
+  const name = (phase === "connected" && s.server_name) || found?.name || address;
+  const os = found ? PLATFORMS[found.platform] || PLATFORMS.other : null;
+  $("#serverCardOs").textContent = os ? os.short : "?";
+  $("#serverCardOs").title = os ? os.label : "System unbekannt";
+  $("#serverCardName").textContent = name;
+  const meta = [address !== name ? address : null, os?.label].filter(Boolean).join(" · ");
+  const extra = found?.trust === "mismatch"
+    ? el("span", { class: "warn", text: "Fingerprint weicht vom gespeicherten ab" })
+    : found?.swaps_modifiers
+      ? el("span", { class: "swap", text: "Strg und Cmd werden automatisch getauscht" })
+      : null;
+  $("#serverCardMeta").replaceChildren(meta || (phase === "connected" ? "verbunden" : "noch nicht verbunden"), extra ? " · " : "", extra ?? "");
 }

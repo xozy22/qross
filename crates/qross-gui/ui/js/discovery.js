@@ -19,7 +19,8 @@ export async function searchServers() {
     state.found = [];
   } finally {
     state.searching = false;
-    renderFinder();
+    // Auch die Karte des eingestellten Servers: Name und System kommen aus der Suche
+    renderClient();
   }
 }
 
@@ -27,6 +28,17 @@ export function renderFinder() {
   $(".finder").classList.toggle("searching", state.searching);
   $("#searchServers").disabled = state.searching;
   $("#searchServers span").textContent = state.searching ? "Suche läuft …" : "Erneut suchen";
+  const s = state.status;
+  const connected = s.role === "client" && s.phase === "connected";
+  $("#finderTitle").textContent = connected ? "Anderen Server wählen" : "Server im Netzwerk";
+  const count = state.found?.length ?? 0;
+  $("#finderCount").textContent = state.searching
+    ? "sucht …"
+    : state.found == null
+      ? ""
+      : count === 1
+        ? "1 gefunden"
+        : `${count} gefunden`;
   const list = $("#serverList");
   const found = state.found;
   if (found == null || (state.searching && !found.length)) {
@@ -43,7 +55,6 @@ export function renderFinder() {
     );
     return;
   }
-  const s = state.status;
   const current = s.role === "client" ? state.settings.client.address.trim() : null;
   list.replaceChildren(
     ...found.map((srv) => {
@@ -95,7 +106,11 @@ export async function serverConfirmDialog(probe) {
       el("div", { class: "fp-block" }, el("span", { class: "label", text: "Bisher gespeichert" }), fingerprintNode(probe.expected)),
     );
   } else {
-    body.push(el("p", { text: `Erster Kontakt mit ${probe.address} (${probe.addr}). Vergleiche den Fingerprint mit „Dieser Server“ in Qross auf dem Server.` }));
+    body.push(
+      el("p", {
+        text: `Erster Kontakt mit ${probe.address} (${probe.addr}). Vergleiche den Fingerprint mit der Anzeige in Qross auf dem Server: Klick dort in der Anordnung auf den Server oder öffne Einstellungen → Server.`,
+      }),
+    );
   }
   body.push(el("div", { class: "fp-block" }, el("span", { class: "label", text: "Fingerprint des Servers" }), fingerprintNode(probe.fingerprint, true)));
   const result = await showDialog({
@@ -115,6 +130,7 @@ export async function checkServer() {
   await saveSoon.flush();
   const address = state.settings.client.address.trim();
   if (!address) {
+    $("#finderBox").open = true;
     $("#clientAddress").focus();
     return toast("Gib zuerst die Adresse des Servers ein.", "error");
   }

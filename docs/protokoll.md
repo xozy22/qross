@@ -422,7 +422,7 @@ Nachricht nicht lesen. Beide zeigen nichts und bleiben verbunden. Ältere Server
 ## Verbindungsqualität
 
 Die Oberfläche zeigt je Verbindung Latenz, Jitter, Paketverlust und Durchsatz samt einer Stufe an (Server:
-je Client unter „Verbundene Rechner“, Client: im Status). Das braucht **keinen Protokollanteil und keinen
+in den Details des ausgewählten Rechners, Reiter „Verbindung“; Client: unter dem Status). Das braucht **keinen Protokollanteil und keinen
 zusätzlichen Verkehr**: Jede Seite liest nur die Zähler ihrer eigenen QUIC-Verbindung (`quinn::Connection::stats`),
 ältere Gegenstellen merken davon nichts. Weil beide Seiten jede Sekunde ein Keepalive senden, das bestätigt
 werden muss, entstehen auch ohne Eingaben laufend neue Messwerte. Implementierung: `crates/qross-net/src/quality.rs`.

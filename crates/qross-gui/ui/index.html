@@ -15,9 +15,6 @@
         <span id="versionText">v–</span>
         <span class="new-dot" aria-hidden="true"></span>
       </button>
-      <button type="button" id="settingsBtn" class="icon-btn header-icon" title="Einstellungen" aria-label="Einstellungen" aria-haspopup="dialog" aria-controls="settings">
-        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-      </button>
     </div>
     <!-- Profil je Ort; alles im Hauptfenster gehört zum aktiven Profil (siehe renderProfilePick) -->
     <label class="profile-pick" id="profilePick">
@@ -36,6 +33,9 @@
       <svg class="ico ico-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor" stroke="none"/></svg>
       <svg class="ico ico-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none"/></svg>
       <span id="toggleText">Starten</span>
+    </button>
+    <button type="button" id="settingsBtn" class="icon-btn header-icon" title="Einstellungen" aria-label="Einstellungen" aria-haspopup="dialog" aria-controls="settings">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
     </button>
   </header>
 
@@ -77,7 +77,7 @@
         <div class="desk-head">
           <div>
             <h1>Anordnung</h1>
-            <p class="lede">Stell die Bildschirme so, wie sie auf deinem Schreibtisch stehen. Bildschirme, die sich berühren, sind verbunden.</p>
+            <p class="lede">Wie die Bildschirme auf deinem Schreibtisch stehen. Was sich berührt, ist verbunden.</p>
           </div>
           <button type="button" id="addScreen" class="btn ghost">
             <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
@@ -87,128 +87,88 @@
         <p id="gameNote" class="note game-note" role="status" hidden></p>
         <div class="desk">
           <div id="grid" class="grid" aria-label="Bildschirm-Anordnung"></div>
+          <p class="keys">Klick zeigt Details, Ziehen oder Pfeiltasten verschieben, Doppelklick oder F2 benennt um, Entf entfernt.</p>
         </div>
-        <p class="keys">Verschieben mit der Maus oder den Pfeiltasten, umbenennen per Doppelklick oder F2, entfernen mit Entf.</p>
         <p id="layoutNote" class="note" hidden></p>
       </div>
 
-      <aside class="panel">
-        <section class="panel-section attention" id="pendingCard" hidden>
-          <h2>Möchte sich verbinden</h2>
-          <div id="pendingList" class="pending-list"></div>
+      <aside class="panel" aria-label="Rechner">
+        <!-- Anfragen als kurze Zeilen; „Prüfen“ öffnet den Dialog mit Fingerprint (siehe renderRequests) -->
+        <div id="pendingList" class="requests"></div>
+
+        <section class="panel-block" aria-labelledby="computersTitle">
+          <h2 id="computersTitle" class="panel-label">Rechner</h2>
+          <ul id="computerList" class="computer-list"></ul>
         </section>
 
-        <section class="panel-section">
-          <h2>Verbundene Rechner</h2>
-          <ul id="clientList" class="client-list"></ul>
-        </section>
+        <!-- Details des ausgewählten Rechners: Klick in der Liste oder in der Anordnung (siehe renderInspector) -->
+        <section id="inspector" class="inspector" aria-label="Details"></section>
 
-        <!-- Rechte je Rechner: je Client und für neue Rechner, siehe renderSharing -->
-        <section class="panel-section" aria-labelledby="sharingTitle">
-          <h2 id="sharingTitle">Rechte je Rechner</h2>
-          <p class="hint sharing-lede">Was jeder Rechner senden und empfangen darf. Gesendetes erreicht über den Server auch andere Rechner. Gilt sofort, auch bei bestehender Verbindung.</p>
-          <ul id="sharingList" class="sharing-list"></ul>
-        </section>
-
-        <section class="panel-section">
-          <h2>Dieser Server</h2>
-          <div class="address" id="addressBox">
-            <span class="address-label">Adresse für Clients</span>
-            <div class="address-values" id="addressValues"></div>
-          </div>
-          <div class="fields two">
-            <label>Name im Layout
-              <input id="serverName" type="text" spellcheck="false" autocomplete="off">
-            </label>
-            <label>UDP-Port
-              <input id="serverPort" type="number" min="1" max="65535" inputmode="numeric">
-            </label>
-          </div>
-          <details class="fp-details">
-            <summary>Fingerprint anzeigen</summary>
-            <code class="fingerprint" data-own-fingerprint></code>
-            <p class="hint">Clients zeigen beim ersten Verbinden diesen Wert zum Vergleich an.</p>
-          </details>
-        </section>
-
-        <section class="panel-section">
-          <h2>Wechsel zwischen Bildschirmen</h2>
-          <div class="fields two-equal">
-            <label>Ecken-Totzone
-              <span class="unit-input"><input id="cornerSize" type="number" min="0" max="400" step="1" inputmode="numeric"><span>px</span></span>
-            </label>
-            <label>Verzögerung
-              <span class="unit-input"><input id="switchDelay" type="number" min="0" max="3000" step="50" inputmode="numeric"><span>ms</span></span>
-            </label>
-          </div>
-          <p class="hint">In den Ecken wechselt der Cursor nicht, damit Startmenü und Schließen-Knöpfe erreichbar bleiben. Mit Verzögerung musst du kurz gegen den Rand drücken.</p>
-          <label class="switch">
-            <input id="discovery" type="checkbox" role="switch">
-            <span class="track"><span class="thumb"></span></span>
-            <span>Im Netzwerk auffindbar, damit Clients diesen Server ohne Adresse finden</span>
-          </label>
-        </section>
-
-        <details class="panel-section">
-          <summary>Konfiguration als Datei</summary>
-          <pre id="tomlPreview" class="toml"></pre>
-          <p class="hint">Liegt als <code>qross.toml</code> in <span data-data-dir></span> und funktioniert auch mit <code>qross server --config</code>.</p>
-        </details>
+        <div class="server-foot" id="addressBox">
+          <span class="address-label">Adresse für Clients</span>
+          <div class="address-values" id="addressValues"></div>
+        </div>
       </aside>
     </section>
 
     <!-- Client -->
     <section id="clientView" class="view client-view" hidden>
-      <div class="client-hero">
-        <div class="link-visual" id="linkVisual" data-state="stopped">
-          <div class="machine">
-            <div class="monitor"></div>
-            <span id="visualServer">Server</span>
-          </div>
-          <div class="wire"><span></span></div>
-          <div class="machine">
-            <div class="monitor here">
-              <svg class="cursor" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 7.5-6.2 1.7L10 19z"/></svg>
+      <div class="client-col">
+        <div class="card client-status" id="clientStatus">
+          <div class="link-visual" id="linkVisual" data-state="stopped">
+            <div class="machine">
+              <div class="monitor"></div>
+              <span id="visualServer">Server</span>
             </div>
-            <span id="visualClient">Dieser Rechner</span>
+            <div class="wire"><span></span></div>
+            <div class="machine">
+              <div class="monitor here">
+                <svg class="cursor" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3l14 7.5-6.2 1.7L10 19z"/></svg>
+              </div>
+              <span id="visualClient">Dieser Rechner</span>
+            </div>
+          </div>
+          <div class="client-headline">
+            <h1 id="clientHeadline">Nicht verbunden</h1>
+            <p id="clientMessage" class="lede"></p>
           </div>
         </div>
-        <h1 id="clientHeadline">Nicht verbunden</h1>
-        <p id="clientMessage" class="lede"></p>
         <p id="clientSharing" class="share-note" role="status" hidden></p>
-        <div id="clientQuality" class="client-quality" hidden></div>
-      </div>
 
-      <div class="client-form">
-        <section class="finder" aria-labelledby="finderTitle">
-          <div class="finder-head">
-            <h2 id="finderTitle">Server im Netzwerk</h2>
-            <button type="button" id="searchServers" class="btn ghost small">
-              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>
-              <span>Erneut suchen</span>
-            </button>
-          </div>
-          <ul id="serverList" class="server-list" aria-live="polite"></ul>
+        <!-- Verbunden: Verbindungsqualität wie beim Server im Detailbereich (siehe renderClient) -->
+        <section class="card client-conn" id="clientConn" aria-labelledby="clientConnTitle" hidden>
+          <h2 id="clientConnTitle" class="panel-label">Verbindung</h2>
+          <div id="clientQuality"></div>
         </section>
-        <label class="field-wide">Server-Adresse
-          <input id="clientAddress" type="text" placeholder="Rechnername oder IP, z. B. pc oder 192.168.1.10" spellcheck="false" autocomplete="off">
-        </label>
-        <label class="field-wide">Name dieses Rechners
-          <input id="clientName" type="text" spellcheck="false" autocomplete="off">
-          <span class="hint">So muss er im Layout des Servers heißen.</span>
-        </label>
-        <label class="switch">
-          <input id="clientDryRun" type="checkbox" role="switch">
-          <span class="track"><span class="thumb"></span></span>
-          <span>Testmodus: Eingaben nur protokollieren, nicht ausführen</span>
-        </label>
-        <div class="client-actions">
-          <button type="button" id="checkServer" class="btn ghost">Fingerprint des Servers prüfen</button>
-        </div>
-        <details class="fp-details">
-          <summary>Fingerprint dieses Rechners</summary>
-          <code class="fingerprint" data-own-fingerprint></code>
-          <p class="hint">Der Server zeigt ihn bei der Freigabe an. Beide Werte müssen übereinstimmen.</p>
+
+        <!-- Der eingestellte Server -->
+        <section class="card client-server" id="clientServer" aria-label="Server" hidden>
+          <span class="os" id="serverCardOs">?</span>
+          <span class="info">
+            <strong id="serverCardName"></strong>
+            <span id="serverCardMeta"></span>
+          </span>
+          <button type="button" id="checkServer" class="btn ghost small">Fingerprint prüfen</button>
+        </section>
+
+        <!-- Gefundene Server und Adresse von Hand; verbunden eingeklappt (siehe renderFinder) -->
+        <details class="card finder" id="finderBox">
+          <summary>
+            <span class="finder-title" id="finderTitle">Server im Netzwerk</span>
+            <span class="finder-count" id="finderCount"></span>
+          </summary>
+          <div class="finder-body">
+            <ul id="serverList" class="server-list" aria-live="polite"></ul>
+            <div class="finder-actions">
+              <button type="button" id="searchServers" class="btn ghost small">
+                <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>
+                <span>Erneut suchen</span>
+              </button>
+            </div>
+            <label class="field-wide">Adresse von Hand
+              <input id="clientAddress" type="text" placeholder="Rechnername oder IP, z. B. pc oder 192.168.1.10" spellcheck="false" autocomplete="off">
+            </label>
+          </div>
         </details>
       </div>
     </section>
@@ -263,26 +223,111 @@
       <div class="sheet-head">
         <div>
           <h2 id="settingsTitle">Einstellungen</h2>
-          <p class="hint">Gelten für diesen Rechner, in allen Profilen.</p>
+          <p class="hint" id="settingsScope">Server und Client gelten für das aktive Profil, alles darunter für alle Profile.</p>
         </div>
         <button type="button" id="settingsClose" class="icon-btn" aria-label="Einstellungen schließen">
           <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>
         </button>
       </div>
       <div class="settings-body">
+        <!-- Zwei Gruppen: oben das aktive Profil (Server, Client), darunter was für alle Profile gilt.
+             Die Überschriften sind nur Beschriftung; per Tastatur geht es von Bereich zu Bereich. -->
         <nav class="settings-nav" role="tablist" aria-orientation="vertical" aria-label="Bereiche der Einstellungen">
+          <span class="nav-group" id="navProfileGroup" aria-hidden="true">Profil</span>
+          <button type="button" role="tab" id="tab-server" data-section="set-server" aria-controls="set-server" aria-selected="false" tabindex="-1">Server</button>
+          <button type="button" role="tab" id="tab-client" data-section="set-client" aria-controls="set-client" aria-selected="false" tabindex="-1">Client</button>
+          <span class="nav-group" aria-hidden="true">Alle Profile</span>
           <button type="button" role="tab" id="tab-general" data-section="set-general" aria-controls="set-general" aria-selected="true">Allgemein</button>
           <button type="button" role="tab" id="tab-profiles" data-section="set-profiles" aria-controls="set-profiles" aria-selected="false" tabindex="-1">Profile</button>
           <button type="button" role="tab" id="tab-keys" data-section="set-keys" aria-controls="set-keys" aria-selected="false" tabindex="-1">Tastatur</button>
           <button type="button" role="tab" id="tab-game" data-section="set-game" aria-controls="set-game" aria-selected="false" tabindex="-1">Spielemodus</button>
           <button type="button" role="tab" id="tab-saver" data-section="set-saver" aria-controls="set-saver" aria-selected="false" tabindex="-1">Bildschirmschoner</button>
-          <button type="button" role="tab" id="tab-updates" data-section="set-updates" aria-controls="set-updates" aria-selected="false" tabindex="-1">Updates</button>
           <button type="button" role="tab" id="tab-clipboard" data-section="set-clipboard" aria-controls="set-clipboard" aria-selected="false" tabindex="-1">Zwischenablage</button>
+          <button type="button" role="tab" id="tab-updates" data-section="set-updates" aria-controls="set-updates" aria-selected="false" tabindex="-1">Updates</button>
           <button type="button" role="tab" id="tab-about" data-section="set-about" aria-controls="set-about" aria-selected="false" tabindex="-1">Info</button>
         </nav>
         <div class="settings-content" id="settingsContent">
           <!-- Neue Bereiche: <section class="settings-section" role="tabpanel" hidden> anhängen und in der Navigation
                als role="tab" mit data-section und aria-controls eintragen. Es ist immer nur ein Bereich zu sehen. -->
+          <section class="settings-section" id="set-server" role="tabpanel" aria-labelledby="setServerTitle" hidden>
+            <h3 id="setServerTitle">Server</h3>
+            <p class="keys-note" id="serverRoleNote" hidden>Gilt, wenn dieser Rechner in diesem Profil der Server ist. Gerade ist er als Client eingestellt.</p>
+            <div class="setting static">
+              <span class="setting-text">
+                <span class="setting-title">Name im Layout</span>
+                <span class="hint">So heißt dieser Rechner in der Anordnung.</span>
+              </span>
+              <input id="serverName" class="setting-input" type="text" spellcheck="false" autocomplete="off" aria-label="Name im Layout">
+            </div>
+            <div class="setting static">
+              <span class="setting-text">
+                <span class="setting-title">UDP-Port</span>
+                <span class="hint">Standard: 24900.</span>
+              </span>
+              <input id="serverPort" class="setting-input narrow" type="number" min="1" max="65535" inputmode="numeric" aria-label="UDP-Port">
+            </div>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">Im Netzwerk auffindbar</span>
+                <span class="hint">Clients finden diesen Server ohne Adresse.</span>
+              </span>
+              <span class="switch"><input id="discovery" type="checkbox" role="switch"><span class="track"><span class="thumb"></span></span></span>
+            </label>
+
+            <h4 class="setting-group">Wechsel zwischen Bildschirmen</h4>
+            <div class="setting static">
+              <span class="setting-text">
+                <span class="setting-title">Ecken-Totzone</span>
+                <span class="hint">In den Ecken wechselt der Cursor nicht, damit Startmenü und Schließen-Knöpfe erreichbar bleiben.</span>
+              </span>
+              <span class="unit-input"><input id="cornerSize" type="number" min="0" max="400" step="1" inputmode="numeric" aria-label="Ecken-Totzone in Pixeln"><span>px</span></span>
+            </div>
+            <div class="setting static">
+              <span class="setting-text">
+                <span class="setting-title">Verzögerung</span>
+                <span class="hint">So lange gegen den Rand drücken, bis gewechselt wird. 0 wechselt sofort.</span>
+              </span>
+              <span class="unit-input"><input id="switchDelay" type="number" min="0" max="3000" step="50" inputmode="numeric" aria-label="Verzögerung in Millisekunden"><span>ms</span></span>
+            </div>
+
+            <h4 class="setting-group">Rechte für neue Rechner</h4>
+            <p class="hint setting-lede">Vorgabe für Rechner, die neu in die Anordnung kommen. Die Rechte eines eingetragenen Rechners stehen in seinen Details in der Server-Ansicht.</p>
+            <div class="share-rows" id="shareDefault"></div>
+
+            <h4 class="setting-group">Fingerprint dieses Servers</h4>
+            <code class="fingerprint" data-own-fingerprint></code>
+            <p class="hint">Clients zeigen ihn beim ersten Verbinden zum Vergleich an.</p>
+
+            <details class="toml-details">
+              <summary>Konfiguration als Datei</summary>
+              <pre id="tomlPreview" class="toml"></pre>
+              <p class="hint">Liegt als <code>qross.toml</code> in <span data-data-dir></span> und funktioniert auch mit <code>qross server --config</code>.</p>
+            </details>
+          </section>
+
+          <section class="settings-section" id="set-client" role="tabpanel" aria-labelledby="setClientTitle" hidden>
+            <h3 id="setClientTitle">Client</h3>
+            <p class="keys-note" id="clientRoleNote" hidden>Gilt, wenn dieser Rechner in diesem Profil Client ist. Gerade ist er als Server eingestellt.</p>
+            <div class="setting static">
+              <span class="setting-text">
+                <span class="setting-title">Name dieses Rechners</span>
+                <span class="hint">So muss er im Layout des Servers heißen.</span>
+              </span>
+              <input id="clientName" class="setting-input" type="text" spellcheck="false" autocomplete="off" aria-label="Name dieses Rechners">
+            </div>
+            <label class="setting">
+              <span class="setting-text">
+                <span class="setting-title">Testmodus</span>
+                <span class="hint">Eingaben vom Server nur protokollieren, nicht ausführen.</span>
+              </span>
+              <span class="switch"><input id="clientDryRun" type="checkbox" role="switch"><span class="track"><span class="thumb"></span></span></span>
+            </label>
+
+            <h4 class="setting-group">Fingerprint dieses Rechners</h4>
+            <code class="fingerprint" data-own-fingerprint></code>
+            <p class="hint">Der Server zeigt ihn bei der Freigabe an. Beide Werte müssen übereinstimmen.</p>
+          </section>
+
           <section class="settings-section" id="set-general" role="tabpanel" aria-labelledby="setGeneralTitle">
             <h3 id="setGeneralTitle">Allgemein</h3>
             <label class="setting">
@@ -326,7 +371,7 @@
 
           <section class="settings-section" id="set-profiles" role="tabpanel" aria-labelledby="setProfilesTitle" hidden>
             <h3 id="setProfilesTitle">Profile</h3>
-            <p class="hint profiles-intro">Je Ort ein Profil, z. B. „Büro“ und „Zuhause“. Ein Profil umfasst alles aus dem Hauptfenster: Rolle, Anordnung der Bildschirme, Name und Port, Wechsel zwischen Bildschirmen und als Client die Server-Adresse. Bearbeitet wird immer das aktive Profil. Was hier in den Einstellungen steht, gilt für alle Profile.</p>
+            <p class="hint profiles-intro">Je Ort ein Profil, z. B. „Büro“ und „Zuhause“. Ein Profil umfasst die Rolle, die Anordnung samt Rechten, die Server-Adresse und die Bereiche „Server“ und „Client“ hier in den Einstellungen. Bearbeitet wird immer das aktive Profil.</p>
             <label class="setting">
               <span class="setting-text">
                 <span class="setting-title">Profil automatisch nach Netzwerk wählen</span>
@@ -365,17 +410,14 @@
                 <span class="hotkey">
                   <kbd class="keycap" id="lockLabel">Rollen</kbd>
                   <button type="button" id="lockChange" class="btn small ghost">Ändern</button>
+                  <button type="button" id="lockMenu" class="icon-btn small" title="Weitere Möglichkeiten" aria-label="Weitere Möglichkeiten für die Fang-Taste" aria-haspopup="menu"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="1.7" fill="currentColor" stroke="none"/></svg></button>
                 </span>
               </div>
-              <div class="hotkey-more">
-                <span class="hint record-hint" id="lockRecordHint" hidden>Drück die neue Taste oder Kombination. Eine einzelne Zusatztaste wie Strg rechts zählt beim Loslassen. Esc bricht ab.</span>
-                <button type="button" id="lockDefault" class="btn small ghost">Standard (Rollen)</button>
-                <button type="button" id="lockOff" class="btn small ghost">Aus</button>
-              </div>
+              <p class="hint record-hint" id="lockRecordHint" hidden>Drück die neue Taste oder Kombination. Eine einzelne Zusatztaste wie Strg rechts zählt beim Loslassen. Esc bricht ab.</p>
 
               <div class="switch-keys">
                 <span class="setting-text">
-                  <span class="setting-title">Kürzel zum Wechseln</span>
+                  <span class="setting-title">Kürzel zum Wechseln <span class="qinfo" id="switchInfo" tabindex="0" role="img">?</span></span>
                   <span class="hint" id="switchHint"></span>
                 </span>
                 <span class="hint record-hint" id="switchRecordHint" hidden>Drück die Kombination, z. B. Strg+Alt+1. Eine einzelne Zusatztaste wie Strg rechts zählt beim Loslassen. Esc bricht ab.</span>
@@ -404,7 +446,7 @@
 
               <div class="key-modes">
                 <span class="setting-text">
-                  <span class="setting-title">Tasten senden als</span>
+                  <span class="setting-title">Tasten senden als <span class="qinfo" id="modeInfo" tabindex="0" role="img">?</span></span>
                   <span class="hint" id="modeHint"></span>
                 </span>
                 <ul class="switch-list mode-list" id="modeList" aria-live="polite"></ul>
@@ -443,12 +485,11 @@
             <h3 id="setGameTitle">Spielemodus</h3>
             <label class="setting">
               <span class="setting-text">
-                <span class="setting-title">Bei Vollbild auf dem Bildschirm bleiben</span>
-                <span class="hint">Läuft auf dem Rechner mit dem Cursor ein Spiel, ein Video oder eine Präsentation im Vollbild, wechselt der Cursor nicht zu einem anderen Bildschirm. Die Fang-Taste gibt ihn frei.</span>
+                <span class="setting-title">Bei Vollbild auf dem Bildschirm bleiben <span class="qinfo" tabindex="0" role="img" title="Spiele auf einem Client bekommen dabei relative Mausbewegungen statt Positionen, so wie von einer echten Maus. Das brauchen Spiele, die den Zeiger einfangen, etwa für die Kamera. Als Client meldet dieser Rechner dem Server nur bei eingeschaltetem Spielemodus, dass hier etwas im Vollbild läuft. Clients und Server ab Qross 0.6." aria-label="Spiele auf einem Client bekommen dabei relative Mausbewegungen statt Positionen, so wie von einer echten Maus. Das brauchen Spiele, die den Zeiger einfangen, etwa für die Kamera. Als Client meldet dieser Rechner dem Server nur bei eingeschaltetem Spielemodus, dass hier etwas im Vollbild läuft. Clients und Server ab Qross 0.6.">?</span></span>
+                <span class="hint">Läuft auf dem Rechner mit dem Cursor ein Spiel, ein Video oder eine Präsentation im Vollbild, bleibt der Cursor dort. Die Fang-Taste gibt ihn frei.</span>
               </span>
               <span class="switch"><input type="checkbox" role="switch" id="prefGameMode"><span class="track"><span class="thumb"></span></span></span>
             </label>
-            <p class="hint game-more">Spiele auf einem Client bekommen dabei relative Mausbewegungen statt Positionen, so wie von einer echten Maus. Das brauchen Spiele, die den Zeiger einfangen, etwa für die Kamera. Als Client meldet dieser Rechner dem Server nur bei eingeschaltetem Spielemodus, dass hier etwas im Vollbild läuft. Clients und Server ab Qross 0.6.</p>
           </section>
 
           <section class="settings-section" id="set-saver" role="tabpanel" aria-labelledby="setSaverTitle" hidden>
@@ -456,8 +497,8 @@
             <p class="keys-note" id="saverClientNote" hidden>Wirkt auf dem Server: Dessen Bildschirmschoner geben die Clients weiter. Dieser Rechner ist gerade als Client eingestellt.</p>
             <label class="setting">
               <span class="setting-text">
-                <span class="setting-title">Mit den Clients abgleichen</span>
-                <span class="hint">Startet hier der Bildschirmschoner, starten ihn auch die verbundenen Clients; endet er (Maus, Taste), beenden sie ihn. Der Cursor bleibt dabei, wo er ist, auch auf einem Client. Hat ein Client keinen Bildschirmschoner eingerichtet oder läuft dort ein Video, bleibt er, wie er ist.</span>
+                <span class="setting-title">Mit den Clients abgleichen <span class="qinfo" tabindex="0" role="img" title="Der Cursor bleibt dabei, wo er ist, auch auf einem Client. Hat ein Client keinen Bildschirmschoner eingerichtet oder läuft dort ein Video, bleibt er, wie er ist." aria-label="Der Cursor bleibt dabei, wo er ist, auch auf einem Client. Hat ein Client keinen Bildschirmschoner eingerichtet oder läuft dort ein Video, bleibt er, wie er ist.">?</span></span>
+                <span class="hint">Startet hier der Bildschirmschoner, starten ihn auch die verbundenen Clients; endet er, beenden sie ihn.</span>
               </span>
               <span class="switch"><input type="checkbox" role="switch" id="prefSaverSync"><span class="track"><span class="thumb"></span></span></span>
             </label>

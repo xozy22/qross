@@ -19,6 +19,7 @@ export async function toggle() {
 export async function startFlow() {
   await saveSoon.flush();
   if (state.settings.role === "client" && !state.settings.client.address.trim()) {
+    $("#finderBox").open = true;
     $("#clientAddress").focus();
     toast("Gib zuerst die Adresse des Servers ein.", "error");
     return;

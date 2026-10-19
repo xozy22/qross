@@ -1,7 +1,7 @@
 // Tastatur
 
 import { $, $$, invoke, state } from "./core.js";
-import { el, icon, toast } from "./util.js";
+import { el, icon, openMenu, toast } from "./util.js";
 import { settingsChanged } from "./store.js";
 
 export const KEY_GROUPS = [
@@ -70,8 +70,6 @@ export function renderKeys() {
     lock.textContent = hotkeyLabel(keys.lock);
     lock.className = keys.lock ? "keycap" : "keycap off";
   }
-  $("#lockDefault").disabled = keys.lock === DEFAULT_LOCK;
-  $("#lockOff").disabled = !keys.lock;
   renderSwitchKeys();
   renderKeyModes();
 
@@ -192,19 +190,63 @@ export function renderSwitchKeys() {
   const problems = switchProblems(targets);
   const recordingId = state.recording?.kind === "switch" ? state.recording.target : null;
   const focused = document.activeElement?.closest?.(".switch-list li")?.dataset.target;
-  $("#switchHint").textContent =
-    "Springt in die Mitte eines Rechners oder zum Nachbarn, dort an die gegenüberliegende Kante. Wirkt auf jedem Rechner und erreicht keine Programme. Hält die Fang-Taste den Cursor fest, wechselt er nicht." +
+  $("#switchHint").textContent = "Springt zum Nachbarn oder in die Mitte eines Rechners. Wirkt auf jedem Rechner.";
+  const info =
+    "Beim Nachbarn kommt der Cursor an der gegenüberliegenden Kante an. Die Kürzel erreichen keine Programme. Hält die Fang-Taste den Cursor fest, wechselt er nicht." +
     (state.platform === "linux" ? " Belegt die Arbeitsfläche ein Kürzel schon (z. B. Strg+Alt+Pfeil), wirkt es unter X11 nur, solange der Cursor auf einem anderen Rechner ist." : "");
+  $("#switchInfo").title = info;
+  $("#switchInfo").setAttribute("aria-label", info);
 
+  // Je Ziel: Taste (oder „Belegen“), dahinter ein Menü mit Ändern und Entfernen
   const row = (t) => {
     const id = `${t.kind}:${t.id}`;
     const hotkey = all[t.kind][t.id] || "";
     const recording = recordingId === id;
     const problem = problems.get(t);
-    const label = recording ? "Taste drücken …" : hotkey ? hotkeyLabel(hotkey) : "Nicht belegt";
-    const capClass = ["keycap", recording ? "recording" : !hotkey && "off", problem?.error && "conflict"].filter(Boolean).join(" ");
+    const capClass = ["keycap", recording && "recording", problem?.error && "conflict"].filter(Boolean).join(" ");
     const arrow = t.kind === "directions" ? icon("arrow") : icon("screen");
     if (t.kind === "directions" && t.turn) arrow.style.transform = `rotate(${t.turn}deg)`;
+    let controls;
+    if (recording) {
+      controls = [
+        el("kbd", { class: capClass, text: "Taste drücken …" }),
+        el("button", { type: "button", class: "btn small ghost record-switch", text: "Abbrechen", "aria-label": `Aufnahme abbrechen: ${t.label}`, onclick: stopRecording }),
+      ];
+    } else if (hotkey) {
+      const menu = el(
+        "button",
+        {
+          type: "button",
+          class: "icon-btn small record-switch",
+          title: "Ändern oder entfernen",
+          "aria-label": `Kürzel ${t.label}: ändern oder entfernen`,
+          "aria-haspopup": "menu",
+          onclick: () =>
+            openMenu(menu, [
+              { label: "Ändern …", run: () => recordSwitch(t) },
+              {
+                label: "Entfernen",
+                danger: true,
+                run: () => {
+                  delete all[t.kind][t.id];
+                  keysChanged();
+                },
+              },
+            ]),
+        },
+        icon("dots"),
+      );
+      controls = [el("kbd", { class: capClass, text: hotkeyLabel(hotkey) }), menu];
+    } else {
+      controls = [
+        el(
+          "button",
+          { type: "button", class: "btn small ghost record-switch", "aria-label": `Kürzel belegen: ${t.label}`, onclick: () => recordSwitch(t) },
+          icon("plus"),
+          "Belegen",
+        ),
+      ];
+    }
     return el(
       "li",
       { "data-target": id, class: problem?.error ? "conflict" : "" },
@@ -215,34 +257,7 @@ export function renderSwitchKeys() {
         el("span", { class: "name", text: t.label, title: t.label }),
         t.isServer ? el("span", { class: "server-tag", text: "Server" }) : null,
       ),
-      el(
-        "span",
-        { class: "switch-key" },
-        el("kbd", { class: capClass, text: label }),
-        el("button", {
-          type: "button",
-          class: "btn small ghost record-switch",
-          text: recording ? "Abbrechen" : hotkey ? "Ändern" : "Aufnehmen",
-          "aria-label": `${recording ? "Aufnahme abbrechen" : "Kürzel aufnehmen"}: ${t.label}`,
-          onclick: () => (recording ? stopRecording() : recordSwitch(t)),
-        }),
-        hotkey && !recording
-          ? el(
-              "button",
-              {
-                type: "button",
-                class: "icon-btn small remove-key",
-                title: "Kürzel entfernen",
-                "aria-label": `Kürzel ${t.label} entfernen`,
-                onclick: () => {
-                  delete all[t.kind][t.id];
-                  keysChanged();
-                },
-              },
-              icon("x"),
-            )
-          : null,
-      ),
+      el("span", { class: "switch-key" }, ...controls),
       problem ? el("p", { class: `switch-problem${problem.error ? "" : " warn"}`, text: problem.text }) : null,
     );
   };
@@ -283,10 +298,13 @@ export function renderKeyModes() {
   const s = state.status;
   const clients = s?.role === "server" ? s.clients : [];
   const focused = document.activeElement?.closest?.("#modeList li")?.dataset.machine;
-  $("#modeHint").textContent =
+  $("#modeHint").textContent = "Je Rechner: Tastenposition wie eine angeschlossene Tastatur, oder Zeichen, damit drüben ankommt, was du hier tippst.";
+  const info =
     "„Tastenposition“: die Taste an derselben Stelle, dort bestimmt das eigene Tastaturlayout das Zeichen – wie eine angeschlossene Tastatur, nötig für Spiele. " +
     "„Zeichen“: Dort kommt an, was du hier tippst, auch bei anderem Layout (z. B. hier Deutsch, dort US). Kürzel wie Strg+Z gehen nach dem Zeichen, Pfeile, F-Tasten und Co. bleiben Tasten." +
     (state.desktop === "wayland" ? " Unter Wayland kann dieser Rechner sein Tastaturlayout nicht lesen und schickt als Server immer Tastenpositionen." : "");
+  $("#modeInfo").title = info;
+  $("#modeInfo").setAttribute("aria-label", info);
   const machines = machinesForRemap();
   $("#modeList").replaceChildren(
     ...(machines.length
@@ -465,13 +483,26 @@ export function recordInto(selectId, button) {
 
 export function setupKeys() {
   $("#lockChange").addEventListener("click", () => (state.recording?.kind === "lock" ? stopRecording() : recordLock()));
-  $("#lockDefault").addEventListener("click", () => {
-    state.settings.server.keys.lock = DEFAULT_LOCK;
-    keysChanged();
-  });
-  $("#lockOff").addEventListener("click", () => {
-    state.settings.server.keys.lock = "";
-    keysChanged();
+  $("#lockMenu").addEventListener("click", () => {
+    const keys = state.settings.server.keys;
+    openMenu($("#lockMenu"), [
+      {
+        label: `Auf Standard (${hotkeyLabel(DEFAULT_LOCK)})`,
+        disabled: keys.lock === DEFAULT_LOCK,
+        run: () => {
+          keys.lock = DEFAULT_LOCK;
+          keysChanged();
+        },
+      },
+      {
+        label: "Ausschalten",
+        disabled: !keys.lock,
+        run: () => {
+          keys.lock = "";
+          keysChanged();
+        },
+      },
+    ]);
   });
   $("#mediaMode").addEventListener("change", (e) => {
     state.settings.server.keys.media = e.target.value;

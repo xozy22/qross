@@ -21,6 +21,8 @@ export function renderTopbar() {
   if (s.role === "server" && s.phase === "listening" && s.clients.length) {
     text = s.clients.length === 1 ? "1 Rechner verbunden" : `${s.clients.length} Rechner verbunden`;
   }
+  // Als Client nur mit wem; die Adresse steht im Tooltip und in der Client-Ansicht
+  if (s.role === "client" && s.phase === "connected" && s.server_name) text = `Verbunden mit „${s.server_name}“`;
   if (s.role === "server" && s.locked) text += `, Cursor auf „${s.cursor_on}“ gesperrt`;
   else if (s.role === "server" && s.game_hold) text += `, Spielemodus hält den Cursor auf „${s.cursor_on}“`;
   $("#statusText").textContent = text;

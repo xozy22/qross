@@ -14,7 +14,7 @@ import { appendLogs, filterLogs, setLogOpen } from "./log.js";
 import { TOAST_KIND, setupClipboardFiles } from "./clipboard-files.js";
 import { clearTransfers, onClipboardFiles, onTransfer } from "./transfers.js";
 import { openNews, setupNews } from "./news.js";
-import { openSettings, renderCursorFinder, renderUpdateStatus, setupSettings } from "./settings.js";
+import { openSettings, renderCursorFinder, renderProfileScope, renderUpdateStatus, setupSettings } from "./settings.js";
 import { renderKeyModes } from "./keys.js";
 import { pickProfile, renderProfilePick, renderProfiles, setupProfiles } from "./profiles.js";
 import { onQuality, pruneQualities } from "./quality.js";
@@ -38,6 +38,7 @@ export function render() {
   if ($("#settings").open && state.settings) {
     renderKeyModes();
     renderCursorFinder();
+    renderProfileScope();
   }
 }
 
@@ -56,6 +57,7 @@ async function init() {
     state.profiles = e.payload;
     renderProfilePick();
     renderProfiles();
+    if ($("#settings").open) renderProfileScope();
   });
   const snap = await invoke("get_state");
   Object.assign(state, {
@@ -181,6 +183,10 @@ async function init() {
     $("#logLast").textContent = "";
   });
   $("#logToggle").addEventListener("click", () => setLogOpen($("#logPanel").dataset.open !== "true"));
+  // Das „?“ steht oft in einem <label>: Ein Klick darauf soll nur erklären, nicht den Schalter umlegen.
+  document.addEventListener("click", (e) => {
+    if (e.target.closest?.(".qinfo")) e.preventDefault();
+  });
 }
 
 init().catch((e) => {

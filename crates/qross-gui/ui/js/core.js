@@ -53,8 +53,11 @@ export const state = {
   profiles: null,
   /** Aktuelle Netzwerke, bevorzugtes zuerst (null = noch nicht abgefragt) */
   networks: null,
-  /** Aufgeklappte Einträge unter „Rechte je Rechner“ (Name; "" = Vorgabe für neue Rechner) */
-  sharingOpen: new Set(),
+  /** Rechner, dessen Details die Seitenleiste zeigt (Name in der Anordnung), und ob ihn jemand gewählt hat */
+  selected: null,
+  selectedByUser: false,
+  /** Reiter der Details: connection, rights oder info */
+  inspectorTab: "connection",
 };
 
 export const PLATFORMS = {

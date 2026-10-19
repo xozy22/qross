@@ -145,5 +145,5 @@ export function onLatency(latency) {
   if (!connected) return;
   const entry = qualityEntry(peer == null ? "server" : `client:${peer}`);
   entry.latency = latency;
-  if (!entry.panel.hidden) updateLatency(entry);
+  if (entry.panel.isConnected) updateLatency(entry);
 }

@@ -1,13 +1,13 @@
 // Einstellungen (Fenster mit den Bereichen)
 
 import { $, $$, invoke, state } from "./core.js";
-import { toast } from "./util.js";
+import { closeMenu, toast } from "./util.js";
 import { openSheet, setupSheet } from "./dialog.js";
 import { saveSoon, updatePreview } from "./store.js";
 import { renderClipLimit } from "./clipboard-files.js";
 import { openNews } from "./news.js";
 import { loadKeyNames, renderKeys, setupKeys } from "./keys.js";
-import { renderProfiles, watchNetworks } from "./profiles.js";
+import { activeProfile, renderProfiles, watchNetworks } from "./profiles.js";
 
 export async function refreshPrefs() {
   try {
@@ -63,9 +63,22 @@ export function onSettingsNavKey(e) {
   showSection(tabs[next].dataset.section);
 }
 
+/** Gruppe „Profil …“ in der Navigation und ob Server bzw. Client gerade gelten */
+export function renderProfileScope() {
+  const profile = activeProfile();
+  $("#navProfileGroup").textContent = profile ? `Profil „${profile.name}“` : "Profil";
+  for (const id of ["#tab-server", "#tab-client"]) {
+    $(id).setAttribute("aria-label", profile ? `${$(id).textContent} (Profil „${profile.name}“)` : $(id).textContent);
+  }
+  const role = state.settings.role;
+  $("#serverRoleNote").hidden = role !== "client";
+  $("#clientRoleNote").hidden = role !== "server";
+}
+
 export function renderSettings() {
   const prefs = state.prefs;
   if (!prefs) return;
+  renderProfileScope();
   renderKeys();
   const autostart = $("#prefAutostart");
   autostart.checked = prefs.autostart;
@@ -185,6 +198,7 @@ export function setupSettings() {
   setupKeys();
   $("#settingsBtn").addEventListener("click", () => openSettings());
   setupSheet($("#settings"), $("#settingsClose"));
+  $("#settings").addEventListener("close", () => closeMenu());
   for (const b of $$(".settings-nav button")) b.addEventListener("click", () => showSection(b.dataset.section));
   $(".settings-nav").addEventListener("keydown", onSettingsNavKey);
 

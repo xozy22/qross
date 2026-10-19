@@ -17,7 +17,79 @@ export const ICONS = {
   pencil: '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>',
   wifi: '<path d="M2 8.5a15 15 0 0 1 20 0M5.5 12a10 10 0 0 1 13 0M9 15.5a5 5 0 0 1 6 0"/><path d="M12 19h.01"/>',
+  dots: '<circle cx="5.5" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="1.7" fill="currentColor" stroke="none"/>',
+  ask: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 9.5-6.5"/><path d="M17.5 15.5a2 2 0 1 1 2.6 1.9c-.6.2-.9.6-.9 1.1M19.2 21h.01"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
 };
+
+/** „?“ hinter einer Überschrift: die lange Erklärung steht im Tooltip und für Screenreader */
+export function infoIcon(text) {
+  return el("span", { class: "qinfo", tabindex: "0", role: "img", title: text, "aria-label": text, text: "?" });
+}
+
+/**
+ * Kleines Menü an `anchor` mit Einträgen `{ label, run, disabled, danger }`. Schließt bei Auswahl, Esc,
+ * Klick daneben oder Fokus woanders; der Fokus geht dann an `anchor` zurück.
+ */
+export function openMenu(anchor, items) {
+  closeMenu();
+  const menu = el(
+    "div",
+    { class: "menu", role: "menu" },
+    ...items.map((item) =>
+      el("button", {
+        type: "button",
+        role: "menuitem",
+        class: item.danger ? "danger" : "",
+        disabled: item.disabled,
+        text: item.label,
+        onclick: () => {
+          closeMenu(true);
+          item.run();
+        },
+      }),
+    ),
+  );
+  // Im selben Dialog wie der Knopf: sonst läge das Menü unter dem Dialog (oberste Ebene).
+  (anchor.closest("dialog") ?? document.body).append(menu);
+  const at = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, Math.min(at.right - width, innerWidth - width - 8))}px`;
+  menu.style.top = `${at.bottom + 4 + height > innerHeight - 8 ? at.top - height - 4 : at.bottom + 4}px`;
+  anchor.setAttribute("aria-expanded", "true");
+  const buttons = () => [...menu.querySelectorAll("button:not(:disabled)")];
+  menu.addEventListener("keydown", (e) => {
+    const list = buttons();
+    const i = list.indexOf(document.activeElement);
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeMenu(true);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      list[(i + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length]?.focus();
+    } else if (e.key === "Tab") {
+      closeMenu();
+    }
+  });
+  const outside = (e) => {
+    if (!menu.contains(e.target) && e.target !== anchor && !anchor.contains(e.target)) closeMenu();
+  };
+  document.addEventListener("pointerdown", outside, true);
+  openMenu.current = { menu, anchor, outside };
+  buttons()[0]?.focus();
+}
+
+export function closeMenu(refocus = false) {
+  const current = openMenu.current;
+  if (!current) return;
+  openMenu.current = null;
+  document.removeEventListener("pointerdown", current.outside, true);
+  current.anchor.setAttribute("aria-expanded", "false");
+  current.menu.remove();
+  if (refocus) current.anchor.focus();
+}
 
 export function icon(name) {
   const span = document.createElement("span");

@@ -1,7 +1,7 @@
 // Verbindungsqualität
 
-import { $, state } from "./core.js";
-import { el } from "./util.js";
+import { state } from "./core.js";
+import { el, infoIcon } from "./util.js";
 import { chainBlock, updateLatency } from "./latency.js";
 
 /** Länge des Verlaufs in Sekunden (ein Messpunkt pro Sekunde) */
@@ -73,8 +73,9 @@ export function qualityBars() {
   return node;
 }
 
-/** Anzeige einer Verbindung: kompakte Plakette (Stufe + ms) und aufklappbare Details. Die Knoten
- *  bleiben bestehen und werden nur aktualisiert, damit nichts flackert und Aufgeklapptes offen bleibt. */
+/** Anzeige einer Verbindung: kompakte Plakette (Stufe + ms) für Listen und das Panel mit den Details für
+ *  den Detailbereich. Die Knoten bleiben bestehen und werden nur aktualisiert, damit nichts flackert; das
+ *  Panel rechnet nur, solange es im Dokument steht. */
 export function qualityEntry(key) {
   let entry = qualities.get(key);
   if (entry) return entry;
@@ -134,19 +135,20 @@ export function qualityEntry(key) {
   );
   entry.panel = el(
     "div",
-    { class: "qpanel", id, hidden: true },
-    el("div", { class: "qhead" }, entry.headBars, entry.level, entry.reason),
+    { class: "qpanel", id },
+    el(
+      "div",
+      { class: "qhead" },
+      entry.headBars,
+      entry.level,
+      entry.reason,
+      infoIcon("Aus den Bestätigungen der QUIC-Verbindung, ohne zusätzlichen Netzverkehr. Der Verlust gilt für die Senderichtung dieses Rechners."),
+    ),
     el("div", {}, entry.chart, el("div", { class: "qaxis" }, el("span", { text: "Latenz der letzten 60 s" }), el("span", { text: "jetzt" }))),
     el("div", { class: "qstats" }, stat("rtt", "Latenz"), stat("jitter", "Jitter"), stat("loss", "Verlust"), rate),
-    el("p", { class: "hint", text: "Aus den Bestätigungen der QUIC-Verbindung, ohne zusätzlichen Netzverkehr. Der Verlust gilt für die Senderichtung dieses Rechners." }),
     chainBlock(entry, key.startsWith("client:") ? key.slice("client:".length) : null),
   );
-  entry.pill = el("button", { type: "button", class: "qpill", "aria-expanded": "false", "aria-controls": id }, entry.pillBars, entry.pillText);
-  entry.pill.addEventListener("click", () => {
-    entry.panel.hidden = !entry.panel.hidden;
-    entry.pill.setAttribute("aria-expanded", String(!entry.panel.hidden));
-    updateQuality(entry);
-  });
+  entry.pill = el("span", { class: "qpill" }, entry.pillBars, entry.pillText);
   qualities.set(key, entry);
   updateQuality(entry);
   return entry;
@@ -159,11 +161,10 @@ export function updateQuality(entry) {
   for (const svg of [entry.pillBars, entry.headBars]) {
     [...svg.children].forEach((rect, i) => rect.classList.toggle("on", i < bars));
   }
-  const open = !entry.panel.hidden;
   entry.pillText.textContent = last ? formatMs(last.rtt_ms) : "misst …";
-  entry.pill.title = last ? `Verbindung ${last.label}: ${open ? "Details ausblenden" : "Details anzeigen"}` : "Die Verbindungsqualität wird gemessen";
-  entry.pill.setAttribute("aria-label", last ? `Verbindung ${last.label}, Latenz ${formatMs(last.rtt_ms)}` : "Verbindungsqualität wird gemessen");
-  if (!open) return;
+  entry.pill.title = last ? `Verbindung ${last.label}, Latenz ${formatMs(last.rtt_ms)}` : "Die Verbindungsqualität wird gemessen";
+  // Details nur, solange das Panel zu sehen ist; beim Einhängen ruft der Detailbereich hier wieder auf.
+  if (!entry.panel.isConnected) return;
 
   const v = entry.values;
   entry.level.textContent = last ? last.label : "Wird gemessen …";

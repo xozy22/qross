@@ -19,20 +19,20 @@ die Bildschirmkante, ohne dass Maus und Tastatur ins Stocken geraten. Kopierte D
 anderen Rechner einfach **einfügen** (Strg+C hier, Strg+V dort).
 
 <p align="center">
-  <img src="docs/assets/screenshots/server.png" width="820" alt="Server-Ansicht mit Layout-Editor, verbundenen Rechnern, Freigabe-Anfrage und Rechten je Rechner">
+  <img src="docs/assets/screenshots/server.png" width="820" alt="Server-Ansicht: Anordnung der Bildschirme, Rechnerliste mit Freigabe-Anfrage und die Details des ausgewählten Rechners, hier seine Rechte">
 </p>
 
 <table>
   <tr>
-    <td align="center"><img src="docs/assets/screenshots/client.png" alt="Client mit gefundenen Servern im Netzwerk"><br><sub>Client: Server im Netzwerk finden und mit einem Klick verbinden</sub></td>
+    <td align="center"><img src="docs/assets/screenshots/client.png" alt="Client: Status, Verbindungsqualität und der verbundene Server"><br><sub>Client: Status, Verbindungsqualität und der Server; andere Server im Netzwerk mit einem Klick</sub></td>
     <td align="center"><img src="docs/assets/screenshots/freigabe.png" alt="Freigabe-Dialog mit Fingerprint"><br><sub>Neuer Rechner: Freigabe erst nach Fingerprint-Vergleich</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/assets/screenshots/einstellungen.png" alt="Einstellungen in Bereichen, hier die Tastatur mit Fang-Taste und Kürzeln zum Wechseln"><br><sub>Einstellungen in Bereichen, hier Tastatur: Fang-Taste, Kürzel zum Wechseln, Medientasten, Tasten je Rechner</sub></td>
+    <td align="center"><img src="docs/assets/screenshots/einstellungen.png" alt="Einstellungen, hier die Tastatur mit Fang-Taste und Kürzeln zum Wechseln"><br><sub>Einstellungen: oben das aktive Profil (Server, Client), darunter alles für alle Profile, hier die Tastatur</sub></td>
     <td align="center"><img src="docs/assets/screenshots/neuigkeiten.png" alt="Neuigkeiten mit allen Versionen und ihren Änderungen"><br><sub>Neuigkeiten: Klick auf die Version in der Kopfzeile zeigt, was sich geändert hat</sub></td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><img src="docs/assets/screenshots/verbindungsqualitaet.png" width="620" alt="Verbindungsqualität eines Clients mit Latenz, Jitter, Verlust, Verlauf und Verzögerung der Eingabe"><br><sub>Verbindungsqualität je Rechner: Latenz, Jitter, Verlust, Durchsatz, Verlauf der letzten Minute und die Verzögerung der Eingabe, aufgeteilt in Server, Netz und Client</sub></td>
+    <td align="center" colspan="2"><img src="docs/assets/screenshots/verbindungsqualitaet.png" width="620" alt="Details eines Rechners, Reiter Verbindung: Latenz, Jitter, Verlust, Verlauf und Verzögerung der Eingabe"><br><sub>Klick auf einen Rechner zeigt seine Verbindung: Latenz, Jitter, Verlust, Durchsatz, Verlauf der letzten Minute und die Verzögerung der Eingabe, aufgeteilt in Server, Netz und Client</sub></td>
   </tr>
 </table>
 

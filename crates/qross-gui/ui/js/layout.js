@@ -1,12 +1,38 @@
 // Layout-Editor
 
-import { $, DEFAULT_PORT, state } from "./core.js";
+import { $, $$, DEFAULT_PORT, state } from "./core.js";
 import { copy, el, icon, toast } from "./util.js";
 import { askName } from "./dialog.js";
 import { settingsChanged } from "./store.js";
-import { openSharing, renameSharing, renderSharing, sharingOf, sharingSummary } from "./sharing.js";
+import { renameSharing, renderShareDefault, sharingOf, sharingSummary } from "./sharing.js";
 import { renderClipLimit } from "./clipboard-files.js";
 import { hotkeyLabel, loadKeyNames, renameKeyMode, renameSwitchKey } from "./keys.js";
+import { selectComputer } from "./clients.js";
+
+/**
+ * Rechner, dessen Details die Seitenleiste zeigt. Ohne Wahl (oder wenn er nicht mehr in der Anordnung
+ * steht) der mit dem Cursor, sonst der erste verbundene, sonst der erste andere, sonst der Server.
+ * Eine automatische Wahl bleibt stehen, solange der Rechner verbunden ist, damit nichts springt.
+ */
+export function selectedName() {
+  const server = state.settings.server;
+  const names = new Set(server.screens.map((s) => s.name));
+  const s = state.status;
+  const online = s.role === "server" ? s.clients.map((c) => c.name).filter((n) => names.has(n)) : [];
+  const current = state.selected;
+  if (current && names.has(current) && (state.selectedByUser || online.includes(current))) return current;
+  const cursor = s.role === "server" && online.includes(s.cursor_on) ? s.cursor_on : null;
+  const pick = cursor ?? online[0] ?? [...names].find((n) => n !== server.name) ?? server.name;
+  state.selected = pick;
+  state.selectedByUser = false;
+  return pick;
+}
+
+/** Ring um den ausgewählten Bildschirm, ohne die Anordnung neu aufzubauen (etwa mitten im Ziehen) */
+export function markSelected() {
+  const name = selectedName();
+  for (const card of $$("#grid .screen")) card.classList.toggle("selected", card.dataset.name === name);
+}
 
 /** Monitore eines Rechners, sofern es mehrere sind (sonst null: Darstellung wie bisher) */
 export function multipleMonitors(screen) {
@@ -27,7 +53,7 @@ export function screenTitle(name, screen) {
   return [name, ...sorted.map((m, i) => `Monitor ${i + 1}: ${m.width} × ${m.height}`), `Gesamt: ${screen.width} × ${screen.height}`].join("\n");
 }
 
-/** Maßstäbliche Skizze der Monitore hinter der Beschriftung des Kastens */
+/** Maßstäbliche Skizze der Monitore, klein unter der Beschriftung des Kastens */
 export function monitorSketch(screen) {
   const monitors = multipleMonitors(screen);
   if (!monitors) return null;
@@ -97,6 +123,7 @@ export function renderServer() {
   const live = (s) => serverRunning && (s.name === server.name || online.has(s.name));
 
   const hadFocus = document.activeElement?.classList.contains("screen") && grid.contains(document.activeElement);
+  const selected = selectedName();
   const nodes = [];
   for (let row = 0; row < rows; row++) {
     for (let col = 0; col < cols; col++) {
@@ -156,10 +183,17 @@ export function renderServer() {
       : game
         ? { title: "Spielemodus: Cursor bleibt hier, bis das Vollbild endet (Fang-Taste gibt ihn frei)", icon: "game" }
         : { title: "Cursor ist hier", icon: "cursor" };
-    const classes = ["screen", isServer && "server", isOnline && "online", hasCursor && "has-cursor", held && "locked"]
+    const classes = [
+      "screen",
+      isServer && "server",
+      isOnline && "online",
+      hasCursor && "has-cursor",
+      held && "locked",
+      s.name === selected && "selected",
+    ]
       .filter(Boolean)
       .join(" ");
-    // Eingeschränkte Rechte: kleines Schild, das zum Eintrag in der Seitenleiste führt
+    // Eingeschränkte Rechte: kleines Schild, das zu den Rechten in den Details führt
     const limits = isServer ? null : sharingSummary(sharingOf(s.name));
     const card = el(
       "div",
@@ -172,11 +206,11 @@ export function renderServer() {
         style: `grid-column:${s.col + 1};grid-row:${s.row + 1}`,
         title: screenTitle(s.name, screen),
       },
-      monitorSketch(screen),
       isServer ? el("span", { class: "tag", text: "Server" }) : null,
       hasCursor ? el("span", { class: "marker", title: marker.title }, icon(marker.icon)) : null,
       el("span", { class: "name", text: s.name }),
       el("span", { class: "sub", text: sub }),
+      monitorSketch(screen),
       limits
         ? el(
             "button",
@@ -189,7 +223,7 @@ export function renderServer() {
               onpointerdown: (e) => e.stopPropagation(),
               onclick: (e) => {
                 e.stopPropagation();
-                openSharing(s.name);
+                selectComputer(s.name, "rights");
               },
             },
             icon("shield"),
@@ -217,7 +251,11 @@ export function renderServer() {
     card.addEventListener("pointerdown", (e) => startDrag(e, card, s));
     card.addEventListener("dblclick", () => renameScreen(s.name));
     card.addEventListener("keydown", (e) => screenKey(e, s));
-    card.addEventListener("focus", () => (state.focusName = s.name));
+    card.addEventListener("focus", () => {
+      state.focusName = s.name;
+      // Per Tastatur angesteuert: Details zeigen wie beim Klick
+      if (card.matches(":focus-visible") && selectedName() !== s.name) selectComputer(s.name);
+    });
     nodes.push(card);
   }
   grid.replaceChildren(...nodes);
@@ -237,18 +275,21 @@ export function renderServer() {
   $("#discovery").checked = server.discovery;
   renderClipLimit();
   renderAddress();
-  renderSharing();
+  renderShareDefault();
 }
 
-export function renderAddress() {
+/** Adressen, unter denen Clients diesen Server erreichen, je mit Knopf zum Kopieren */
+export function addressChips() {
   const port = state.settings.server.port;
   const suffix = port === DEFAULT_PORT ? "" : `:${port}`;
   const values = [state.hostname, state.localIp].filter(Boolean).map((v) => v + suffix);
-  $("#addressValues").replaceChildren(
-    ...values.map((v) =>
-      el("span", { class: "chip" }, v, el("button", { type: "button", title: "Kopieren", "aria-label": `${v} kopieren`, onclick: () => copy(v) }, icon("copy"))),
-    ),
+  return values.map((v) =>
+    el("span", { class: "chip" }, v, el("button", { type: "button", title: "Kopieren", "aria-label": `${v} kopieren`, onclick: () => copy(v) }, icon("copy"))),
   );
+}
+
+export function renderAddress() {
+  $("#addressValues").replaceChildren(...addressChips());
 }
 
 /** Tastatur im Editor: Pfeile verschieben, Entf entfernt, Enter/F2 benennt um. */
@@ -331,6 +372,9 @@ export function startDrag(e, card, screen) {
     card.style.transform = "";
     if (moved && target) {
       moveScreen(screen, Number(target.dataset.col), Number(target.dataset.row));
+    } else if (!moved) {
+      // Klick ohne Ziehen: Details dieses Rechners zeigen
+      selectComputer(screen.name);
     }
     if (state.renderPending || !moved || !target) {
       state.renderPending = false;
@@ -392,6 +436,7 @@ export async function renameScreen(oldName) {
   }
   server.screens.find((s) => s.name === oldName).name = name;
   if (server.name === oldName) server.name = name;
+  if (state.selected === oldName) state.selected = name;
   renameSwitchKey(oldName, name);
   renameSharing(oldName, name);
   renameKeyMode(oldName, name);
