@@ -8,6 +8,23 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.8.3] - 2026-10-19
+
+### Behoben
+
+- **Haken am Rand des Windows-Servers beim schnellen Wechsel:** Zog man den Cursor zügig vom Windows-Server
+  auf einen Client, blieb er am Rand des Servers hängen, und zwar umso länger, je schneller man zog. Langsam
+  und auf dem Rückweg fiel nichts auf. Bei schneller Bewegung meldet Windows nicht, wo der Cursor steht,
+  sondern wohin er ohne Bildschirmrand käme, also einen Punkt hinter der Kante. Seit Qross mehrere Monitore
+  kennt (0.5.0), galt so eine Berührung nicht als Kante, und gewechselt wurde erst, wenn die Hand abbremste.
+  Jetzt zählt der Punkt auf dem Monitor. Die Änderungen dafür in 0.8.1 und 0.8.2 trafen nicht diese Ursache.
+
+### Verbessert
+
+- **Protokoll jedes Wechsels:** Nach jedem Wechsel auf einen Client schreiben Server und Client je eine Zeile
+  ins Log: wie oft der Cursor gegen die Kante lief, ob die Bewegungen danach lückenlos ankamen und eingespeist
+  wurden und ob welche vor dem Betreten verloren gingen. Als Info erscheint sie nur, wenn etwas auffällt.
+
 ## [0.8.2] - 2026-10-19
 
 ### Behoben
@@ -393,6 +410,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.8.3]: https://github.com/xozy22/qross/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/xozy22/qross/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/xozy22/qross/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/xozy22/qross/compare/v0.7.0...v0.8.0
