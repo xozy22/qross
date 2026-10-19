@@ -8,6 +8,25 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.8.2] - 2026-10-19
+
+### Behoben
+
+- **Tastatur bei offenem Remotedesktop-Fenster:** War am Windows-Server ein Remotedesktop-Client im
+  Vordergrund, landeten die Tasten nach dem Wechsel auf einen Client weiter in der RDP-Sitzung, der Cursor
+  dagegen wanderte mit. Der RDP-Client hat einen eigenen Tastatur-Hook, und Windows fragte ihn vor dem von
+  Qross. Qross setzt seine Hooks jetzt bei jedem Wechsel neu und ist damit wieder zuerst an der Reihe. Das
+  hilft auch bei virtuellen Maschinen und Tastenkürzel-Werkzeugen mit eigenem Hook.
+- **Windows-Server: Wechsel ohne Warten auf den Mauszeiger:** Das Aus- und Einblenden des Mauszeigers hielt
+  die Weitergabe der Eingaben kurz auf. Es läuft jetzt nebenher.
+
+### Verbessert
+
+- **Verzögerungen im Log:** Braucht eine Eingabe länger als 50 ms bis zum Client, schreibt der Server sie mit
+  ihren Teilen (Server, Netz, Client) ins Log, höchstens einmal je Sekunde. Hält ein Schritt am Server die
+  Weitergabe oder am Client das Einspeisen länger als 20 ms auf, steht auch das im Log. So lässt sich ein
+  Haken beim Wechsel einer Ursache zuordnen, etwa dem Stromsparmodus des WLAN.
+
 ## [0.8.1] - 2026-10-19
 
 ### Behoben
@@ -374,6 +393,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.8.2]: https://github.com/xozy22/qross/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/xozy22/qross/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/xozy22/qross/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/xozy22/qross/compare/v0.6.0...v0.7.0
