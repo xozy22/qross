@@ -20,6 +20,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::{CURRENT_TIME, NONE};
 
 use super::keymap::Keymap;
+use super::locks::LockMasks;
 use crate::keymap_linux::{evdev_from_hid, keysym_from_char, X11_OFFSET};
 use crate::Injector;
 
@@ -44,6 +45,8 @@ pub struct X11Injector {
     modifiers: u8,
     /// Als Zeichen bzw. Kürzel gedrückte Keycodes, zum Loslassen
     typed: Vec<(char, u8)>,
+    /// Feststelltaste und Num (ohne XKB: `None`)
+    locks: Option<LockMasks>,
 }
 
 impl X11Injector {
@@ -51,6 +54,9 @@ impl X11Injector {
         let (conn, root) = super::connect()?;
         // Für die aktive Gruppe (z. B. „us,de“) beim Suchen der Taste eines Zeichens
         let xkb = conn.xkb_use_extension(1, 0).ok().and_then(|c| c.reply().ok()).is_some_and(|r| r.supported);
+        let locks = xkb.then(|| LockMasks::fetch(&conn)).and_then(|masks| {
+            masks.map_err(|e| tracing::warn!("Feststelltaste und Num nicht setzbar: {e:#}")).ok()
+        });
         Ok(Self {
             conn,
             root,
@@ -61,6 +67,7 @@ impl X11Injector {
             free: None,
             modifiers: 0,
             typed: Vec::new(),
+            locks,
         })
     }
 
@@ -191,6 +198,10 @@ impl Injector for X11Injector {
         true
     }
 
+    fn syncs_locks(&self) -> bool {
+        self.locks.is_some()
+    }
+
     fn inject(&mut self, event: &Inject) {
         match *event {
             Inject::MoveTo { x, y } => {
@@ -240,6 +251,11 @@ impl Injector for X11Injector {
             Inject::Char { ch, down } => self.type_char(ch, down, self.modifiers == 0, None),
             // Kürzel prüfen Programme am Keysym: Strg+z braucht eine Taste, die z ergibt
             Inject::Shortcut { ch, key, down } => self.type_char(ch, down, true, Some(key)),
+            Inject::Locks(locks) => {
+                if let Some(Err(e)) = self.locks.map(|masks| masks.set(&self.conn, locks)) {
+                    tracing::warn!("Feststelltaste und Num nicht gesetzt: {e:#}");
+                }
+            }
         }
         let _ = self.conn.flush();
     }

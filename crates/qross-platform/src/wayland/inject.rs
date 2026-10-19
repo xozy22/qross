@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use super::tokens::{self, Kind};
 use super::{now_micros, register_app, set_geometry, set_problem, spawn_session, start_error, Fail, Ready, Role};
 use crate::keymap_linux::evdev_from_hid;
-use crate::wayland_logic::{ei_discrete, evdev_button, snap};
+use crate::wayland_logic::{ei_discrete, evdev_button, snap, EiLocks};
 use crate::{Injector, PortalProblem};
 
 /// So lange wartet der Start nach dem Handshake auf ein Gerät für absolute Bewegung
@@ -37,6 +37,11 @@ pub struct WaylandInjector {
 impl Injector for WaylandInjector {
     fn inject(&mut self, event: &Inject) {
         let _ = self.tx.send(*event);
+    }
+
+    /// Nur durch Tastendrücke und so gut, wie der Compositor den Stand meldet (siehe `EiLocks`)
+    fn syncs_locks(&self) -> bool {
+        true
     }
 }
 
@@ -217,11 +222,13 @@ struct Sender {
     sequence: u32,
     /// Zuletzt gesetzte Position, für relative Bewegung ohne Absolut-Gerät
     last: Option<(i32, i32)>,
+    /// Feststelltaste und Num
+    locks: EiLocks,
 }
 
 impl Sender {
     fn new(connection: reis::event::Connection) -> Self {
-        Self { connection, devices: Vec::new(), sequence: 0, last: None }
+        Self { connection, devices: Vec::new(), sequence: 0, last: None, locks: EiLocks::default() }
     }
 
     fn on_event(&mut self, event: EiEvent) -> Option<Ended> {
@@ -261,6 +268,10 @@ impl Sender {
                 if let Some(d) = self.devices.iter_mut().find(|d| d.device == e.device) {
                     d.emulating = false;
                 }
+            }
+            EiEvent::KeyboardModifiers(e) => {
+                tracing::debug!(locked = e.locked, "libei: Stand der Modifier");
+                self.locks.on_modifiers(e.locked);
             }
             EiEvent::Disconnected(e) => {
                 let why = e.explanation.unwrap_or_else(|| format!("{:?}", e.reason));
@@ -361,6 +372,14 @@ impl Sender {
             // (`types_text`), und das kommt nicht vor; ein Kürzel ginge notfalls als Taste.
             Inject::Char { ch, .. } => tracing::debug!(?ch, "libei kann keine Zeichen eingeben"),
             Inject::Shortcut { key, down, .. } => self.inject(&Inject::Key { key, down }),
+            // Setzen geht nur per Tastendruck (Rollen ist unter Wayland kein Modifier)
+            Inject::Locks(locks) => {
+                for lock in self.locks.taps(locks) {
+                    let key = lock.key();
+                    self.inject(&Inject::Key { key, down: true });
+                    self.inject(&Inject::Key { key, down: false });
+                }
+            }
         }
     }
 

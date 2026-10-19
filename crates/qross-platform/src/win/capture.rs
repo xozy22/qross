@@ -19,6 +19,9 @@
 //! bleiben nur kurze Systemaufrufe ohne Warten (Monitor an der Kante, Cursorposition, Tastaturlayout)
 //! und kleine Zeichenketten für den Zeichenmodus. Gehen die Hooks trotzdem verloren, merkt das der
 //! Wächter (`watchdog`) und lässt sie auf ihrem Thread neu setzen (`Hooks::reinstall`).
+//!
+//! Feststelltaste, Num und Rollen lässt er im Remote-Modus durch: Der Server schaltet mit, die
+//! Leuchten seiner Tastatur stimmen, und sein neuer Stand geht als `CaptureEvent::Locks` an den Client.
 
 use std::cell::RefCell;
 use std::mem::size_of;
@@ -33,7 +36,7 @@ use anyhow::{anyhow, bail, Context};
 use qross_core::chars::is_typing_key;
 use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions, MediaKeys};
 use qross_core::CaptureEvent;
-use qross_proto::{Edge, KeyCode, MouseButton};
+use qross_proto::{Edge, KeyCode, Lock, LockState, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
 use windows_sys::Win32::Foundation::{GetLastError, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -46,7 +49,7 @@ use windows_sys::Win32::System::Threading::{
     THREAD_PRIORITY_HIGHEST, THREAD_PRIORITY_TIME_CRITICAL,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetKeyState, VK_CAPITAL, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+    GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_MBUTTON, VK_RBUTTON, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_XBUTTON1, VK_XBUTTON2,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -57,7 +60,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     XBUTTON1,
 };
 
-use super::{cursor, dnd, inject, layout, primary_center, watchdog, INJECT_MAGIC};
+use super::{cursor, dnd, inject, layout, locks, primary_center, watchdog, INJECT_MAGIC};
 use crate::hook_watch::Calls;
 use crate::keymap_windows::{hid_from_windows, WinModifiers};
 use crate::spsc::{self, Consumer, Producer};
@@ -113,9 +116,9 @@ struct HookState {
     hotkey: HotkeyTracker,
     /// Das künstliche Strg links von AltGr ist gedrückt
     altgr: bool,
-    /// Feststelltaste im Remote-Modus: Dort schaltet sie das System nicht um (verschluckt), das
-    /// Layout des Servers soll sie für den Zeichenmodus aber berücksichtigen.
-    caps: bool,
+    /// Feststelltaste, Num und Rollen im Remote-Modus (Reihenfolge wie `Lock::ALL`): beim Wechsel
+    /// gelesen, danach mitgezählt. Die Feststelltaste zählt auch für den Zeichenmodus.
+    locks: [bool; 3],
     was_remote: bool,
     /// Als gedrückt an den Client gemeldete Tasten (nach Virtual-Key) und Maustasten: Gehen die
     /// Hooks verloren, lässt `resync` sie dort los.
@@ -131,7 +134,7 @@ thread_local! {
             buttons_down: [false; 5],
             hotkey: HotkeyTracker::new(),
             altgr: false,
-            caps: false,
+            locks: [false; 3],
             was_remote: false,
             sent: [None; 256],
             sent_buttons: [false; 5],
@@ -169,8 +172,13 @@ impl HookState {
             alt: self.any(VK_LMENU, VK_RMENU),
             altgr: self.altgr && self.pressed[VK_RMENU as usize],
             win: self.any(VK_LWIN, VK_RWIN),
-            caps: self.caps,
+            caps: self.locks[0],
         }
+    }
+
+    fn lock_state(&self) -> LockState {
+        let [caps, num, scroll] = self.locks.map(Some);
+        LockState { caps, num, scroll }
     }
 }
 
@@ -463,6 +471,10 @@ impl Capture for WinCapture {
     fn drop_folder(&self, x: i32, y: i32) -> Option<std::path::PathBuf> {
         super::shell::folder_at(x, y)
     }
+
+    fn locks(&self) -> LockState {
+        locks::current()
+    }
 }
 
 impl Drop for WinCapture {
@@ -588,8 +600,8 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
         }
         let remote = shared.remote.load(Ordering::Acquire);
         if remote && !st.was_remote {
-            // Stand der Feststelltaste beim Wechsel; danach zählt der Hook selbst mit.
-            st.caps = unsafe { GetKeyState(i32::from(VK_CAPITAL)) } & 1 != 0;
+            // Stand der Sperrtasten beim Wechsel; danach zählt der Hook selbst mit.
+            st.locks = Lock::ALL.map(locks::is_on);
         }
         st.was_remote = remote;
         if let Some(key) = key {
@@ -634,8 +646,18 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
             // Künstliches LCtrl von AltGr – der Client erzeugt es selbst.
             return true;
         }
-        if vk == VK_CAPITAL as usize && !up && !was_down {
-            st.caps = !st.caps;
+        if let Some(lock) = locks::lock_of_vk(info.vkCode) {
+            // Durchlassen: Der Server schaltet mit, so wie Synergy es macht. Den neuen Stand
+            // übernehmen Clients ab Qross 0.8; ältere bekommen weiter die Taste.
+            if !up && !was_down {
+                let slot = lock as usize;
+                st.locks[slot] = !st.locks[slot];
+                emit(CaptureEvent::Locks(st.lock_state()));
+            }
+            if let Some(key) = key {
+                emit(CaptureEvent::Key { key, down: !up });
+            }
+            return false;
         }
         if options.media == MediaKeys::Local && key.is_some_and(KeyCode::is_media) {
             // Medientasten wirken auf Wunsch immer hier (z. B. Lautsprecher am Server)

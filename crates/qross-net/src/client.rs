@@ -17,7 +17,7 @@ use qross_platform::{Clipboard, Injector};
 use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
     FileEntry, FrameError, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, Sharing, StreamKind,
-    DEFAULT_PORT, GAME_MODE_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SHARING_SINCE, TEXT_SINCE,
+    DEFAULT_PORT, GAME_MODE_SINCE, LOCKS_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SHARING_SINCE, TEXT_SINCE,
 };
 use quinn::{Connection, ConnectionError, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -73,6 +73,8 @@ struct ScreenQuery {
     game: watch::Receiver<GameState>,
     /// Das Einspeisen kann Zeichen eingeben (Zeichenmodus)
     types_text: bool,
+    /// Das Einspeisen kann Feststelltaste, Num und Rollen setzen
+    syncs_locks: bool,
 }
 
 /// Fehler, bei denen eine Wiederverbindung sinnlos ist.
@@ -280,8 +282,8 @@ async fn run_inner(
     events: Option<Events>,
 ) -> Result<()> {
     let ClientPlatform { mut injector, clipboard, screen, monitors, game } = platform;
-    let types_text = injector.types_text();
-    let screen = ScreenQuery { bounds: screen, monitors, game: game::watch(game), types_text };
+    let (types_text, syncs_locks) = (injector.types_text(), injector.syncs_locks());
+    let screen = ScreenQuery { bounds: screen, monitors, game: game::watch(game), types_text, syncs_locks };
     let _progress = {
         let notices = notices.cloned();
         transfers.spawn_reporter(move |progress| {
@@ -474,6 +476,10 @@ async fn session(
     // unbekannten Nachrichten. Ohne diese Meldung bleibt es bei Tastenpositionen.
     if server_version >= TEXT_SINCE && screen.types_text {
         write_frame(&mut control, &Control::TypesText).await?;
+    }
+    // Den Stand der Sperrtasten schickt nur ein Server, der ihn kennt; sonst bleibt es bei den Tasten.
+    if server_version >= LOCKS_SINCE && screen.syncs_locks {
+        write_frame(&mut control, &Control::SyncsLocks).await?;
     }
     // Die einzelnen Monitore nur an Server, die sie kennen: ältere trennen bei unbekannten Nachrichten.
     let report_monitors = server_version >= MONITORS_SINCE;

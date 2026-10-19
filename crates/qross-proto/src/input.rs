@@ -17,7 +17,10 @@ impl KeyCode {
     pub const A: Self = Self(0x04);
     pub const ENTER: Self = Self(0x28);
     pub const ESCAPE: Self = Self(0x29);
+    pub const CAPS_LOCK: Self = Self(0x39);
     pub const SCROLL_LOCK: Self = Self(0x47);
+    /// Num-Taste; auf Mac-Tastaturen „Clear“
+    pub const NUM_LOCK: Self = Self(0x53);
     pub const MUTE: Self = Self(0x7F);
     pub const VOLUME_UP: Self = Self(0x80);
     pub const VOLUME_DOWN: Self = Self(0x81);

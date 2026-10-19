@@ -3,7 +3,8 @@
 //! Kanäle einer QUIC-Verbindung:
 //! - **Control** (bidirektionaler Stream, vom Client geöffnet): Hello/Welcome, Bildschirmänderungen,
 //!   Rechte je Rechner
-//! - **Input** (unidirektionaler Stream Server → Client): Tasten, Maustasten, Rad, Enter/Leave
+//! - **Input** (unidirektionaler Stream Server → Client): Tasten, Maustasten, Rad, Enter/Leave,
+//!   Stand der Feststelltaste
 //! - **Datagramme** (Server → Client): Mausposition bzw. im Spielemodus Mausbewegung,
 //!   unzuverlässig, die neueste gewinnt
 //! - **Clipboard** (je Übertragung ein eigener unidirektionaler Stream, beide Richtungen)
@@ -31,7 +32,9 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// - 6: `Control::TypesText`, `Input::Text` und `Input::Shortcut`: Zeichen statt Tastenposition
 ///   (seit Qross 0.7)
 /// - 7: `Control::Sharing`, Rechte je Rechner (seit Qross 0.7)
-pub const SERVER_VERSION: u16 = 7;
+/// - 8: `Control::SyncsLocks` und `Input::Locks`: Feststelltaste, Num und Rollen überall gleich
+///   (seit Qross 0.8)
+pub const SERVER_VERSION: u16 = 8;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
 /// die Verbindung bei unbekannten Control-Nachrichten.
 pub const MONITORS_SINCE: u16 = 4;
@@ -44,6 +47,9 @@ pub const TEXT_SINCE: u16 = 6;
 /// Ab dieser `Welcome`-Version schickt der Server `Control::Sharing`: nach dem `Welcome` und bei
 /// jeder Änderung der Rechte.
 pub const SHARING_SINCE: u16 = 7;
+/// Ab dieser `Welcome`-Version darf der Client `Control::SyncsLocks` senden. Nur wer das gesendet
+/// hat, bekommt `Input::Locks`.
+pub const LOCKS_SINCE: u16 = 8;
 /// Höchstzahl Monitore, die der Server aus `Control::Monitors` übernimmt
 pub const MAX_MONITORS: usize = 16;
 /// ALPN-Kennung im TLS-Handshake
@@ -119,6 +125,10 @@ pub enum Control {
     /// und versucht Verbotenes gar nicht erst; durchgesetzt wird es ohnehin auf dem Server, auch
     /// gegenüber älteren Clients, die die Nachricht nie lesen.
     Sharing(Sharing),
+    /// Client → Server (seit Qross 0.8, nur ab `LOCKS_SINCE`): Der Client kann Feststelltaste, Num
+    /// und Rollen auf einen vorgegebenen Stand bringen. Folgt direkt auf das `Welcome`. Nur dann
+    /// schickt ihm der Server `Input::Locks`.
+    SyncsLocks,
 }
 
 /// Rechte je Rechner: In welche Richtung eine Art von Inhalten zwischen Server und Client wandern
@@ -184,6 +194,90 @@ impl GameState {
     }
 }
 
+/// Eine der Tasten, die einen Zustand umschalten, statt etwas einzugeben
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Lock {
+    /// Feststelltaste
+    Caps,
+    /// Num-Taste (Ziffernblock)
+    Num,
+    /// Rollen-Taste
+    Scroll,
+}
+
+impl Lock {
+    pub const ALL: [Self; 3] = [Self::Caps, Self::Num, Self::Scroll];
+
+    /// Die Taste, die diesen Zustand umschaltet
+    pub const fn key(self) -> KeyCode {
+        match self {
+            Self::Caps => KeyCode::CAPS_LOCK,
+            Self::Num => KeyCode::NUM_LOCK,
+            Self::Scroll => KeyCode::SCROLL_LOCK,
+        }
+    }
+
+    /// Welchen Zustand die Taste `key` umschaltet
+    pub fn of_key(key: KeyCode) -> Option<Self> {
+        Self::ALL.into_iter().find(|lock| lock.key() == key)
+    }
+
+    /// Für Log und Oberfläche
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Caps => "Feststelltaste",
+            Self::Num => "Num",
+            Self::Scroll => "Rollen",
+        }
+    }
+}
+
+/// Stand von Feststelltaste, Num und Rollen auf einem Rechner (`Input::Locks`). `None`: Diese Taste
+/// gibt es dort nicht, bzw. Qross kann ihren Stand dort nicht lesen (z. B. Num und Rollen am Mac).
+/// Der Empfänger lässt seine eigene dann, wie sie ist.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LockState {
+    pub caps: Option<bool>,
+    pub num: Option<bool>,
+    pub scroll: Option<bool>,
+}
+
+impl LockState {
+    pub const fn get(self, lock: Lock) -> Option<bool> {
+        match lock {
+            Lock::Caps => self.caps,
+            Lock::Num => self.num,
+            Lock::Scroll => self.scroll,
+        }
+    }
+
+    pub fn set(&mut self, lock: Lock, on: Option<bool>) {
+        match lock {
+            Lock::Caps => self.caps = on,
+            Lock::Num => self.num = on,
+            Lock::Scroll => self.scroll = on,
+        }
+    }
+
+    /// Ist der Stand wenigstens einer Taste bekannt?
+    pub fn is_known(self) -> bool {
+        Lock::ALL.into_iter().any(|lock| self.get(lock).is_some())
+    }
+
+    /// Kurzbeschreibung fürs Log, z. B. „Feststelltaste an, Num an, Rollen aus“
+    pub fn describe(self) -> String {
+        let parts: Vec<String> = Lock::ALL
+            .into_iter()
+            .filter_map(|lock| self.get(lock).map(|on| format!("{} {}", lock.label(), if on { "an" } else { "aus" })))
+            .collect();
+        if parts.is_empty() {
+            "unbekannt".to_owned()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
 /// Zuverlässige, geordnete Eingabe-Ereignisse (Server → Client).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Input {
@@ -212,6 +306,11 @@ pub enum Input {
     /// Zusatztasten), und lässt sie bei `Key { key, down: false }` los. Kennt sein Layout das
     /// Zeichen nicht, nimmt er die Taste `key`.
     Shortcut { key: KeyCode, ch: char },
+    /// Seit Qross 0.8, nur an Clients, die `Control::SyncsLocks` gesendet haben: So stehen
+    /// Feststelltaste, Num und Rollen auf dem Server. Kommt direkt nach `Enter` und bei jeder
+    /// Änderung, solange der Cursor auf dem Client steht; der Client stellt seine genauso ein. Den
+    /// Druck auf eine Taste, deren Stand so ankommt, bekommt er nicht als `Key`.
+    Locks(LockState),
 }
 
 /// Eintrag einer Dateiübertragung. `path` ist relativ, mit `/` getrennt, und beginnt mit dem
@@ -565,5 +664,75 @@ mod tests {
         }
         let emoji = Input::Text { key: KeyCode(0x08), text: "é😀".into() };
         assert_eq!(postcard::from_bytes::<Input>(&postcard::to_stdvec(&emoji).unwrap()).unwrap(), emoji);
+    }
+
+    /// So sah `Control` in Qross 0.7 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ControlV07 {
+        Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+        Welcome { version: u16, server_name: String, platform: Platform },
+        Reject { reason: String },
+        ScreenChanged(ScreenInfo),
+        Monitors(Vec<Rect>),
+        Game(GameState),
+        TypesText,
+        Sharing(Sharing),
+    }
+
+    /// So sah `Input` in Qross 0.7 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum InputV07 {
+        Enter { epoch: u16, x: i32, y: i32 },
+        Leave,
+        Key { key: KeyCode, down: bool },
+        Button { button: MouseButton, down: bool, x: i32, y: i32 },
+        Wheel { dx: i16, dy: i16 },
+        DragStart { transfer: u64, entries: Vec<FileEntry> },
+        Drop { transfer: u64, x: i32, y: i32 },
+        Text { key: KeyCode, text: String },
+        Shortcut { key: KeyCode, ch: char },
+    }
+
+    #[test]
+    fn lock_state_reaches_only_peers_that_understand_it() {
+        // Ein Server aus 0.7 meldet Version 7: Der Client schickt ihm kein `SyncsLocks`.
+        const { assert!(SHARING_SINCE < LOCKS_SINCE && LOCKS_SINCE <= SERVER_VERSION) };
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::MacOs };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV07>(&bytes).unwrap(), ControlV07::Welcome { version: SERVER_VERSION, .. }));
+        let sharing = Control::Sharing(Sharing::ALL);
+        assert_eq!(postcard::from_bytes::<ControlV07>(&postcard::to_stdvec(&sharing).unwrap()).unwrap(), ControlV07::Sharing(Sharing::ALL));
+        let bytes = postcard::to_stdvec(&Control::SyncsLocks).unwrap();
+        assert!(postcard::from_bytes::<ControlV07>(&bytes).is_err(), "ein Server aus 0.7 kann SyncsLocks nicht lesen");
+        assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), Control::SyncsLocks);
+
+        // Ein Client aus 0.7 liest Tasten wie bisher; den Stand bekommt er nie, denn er könnte ihn
+        // nicht lesen (der ganze Input-Stream bräche ab).
+        let key = Input::Key { key: KeyCode::CAPS_LOCK, down: true };
+        let bytes = postcard::to_stdvec(&key).unwrap();
+        assert_eq!(postcard::from_bytes::<InputV07>(&bytes).unwrap(), InputV07::Key { key: KeyCode::CAPS_LOCK, down: true });
+        let locks = Input::Locks(LockState { caps: Some(true), num: Some(false), scroll: None });
+        let bytes = postcard::to_stdvec(&locks).unwrap();
+        assert!(postcard::from_bytes::<InputV07>(&bytes).is_err());
+        assert_eq!(postcard::from_bytes::<Input>(&bytes).unwrap(), locks);
+        assert!(bytes.len() <= 7, "{} Bytes", bytes.len());
+    }
+
+    #[test]
+    fn locks_name_their_keys() {
+        assert_eq!(Lock::of_key(KeyCode(0x39)), Some(Lock::Caps));
+        assert_eq!(Lock::of_key(KeyCode(0x53)), Some(Lock::Num));
+        assert_eq!(Lock::of_key(KeyCode::SCROLL_LOCK), Some(Lock::Scroll));
+        assert_eq!(Lock::of_key(KeyCode::A), None);
+
+        let mut state = LockState::default();
+        assert!(!state.is_known());
+        assert_eq!(state.describe(), "unbekannt");
+        state.set(Lock::Num, Some(true));
+        state.set(Lock::Caps, Some(false));
+        assert!(state.is_known());
+        assert_eq!(state.get(Lock::Num), Some(true));
+        assert_eq!(state.get(Lock::Scroll), None);
+        assert_eq!(state.describe(), "Feststelltaste aus, Num an");
     }
 }

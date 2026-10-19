@@ -176,6 +176,7 @@ enum NetEvent {
     Monitors { name: String, id: usize, monitors: Vec<Rect> },
     Game { name: String, id: usize, game: GameState },
     TypesText { name: String, id: usize },
+    SyncsLocks { name: String, id: usize },
     Clipboard { name: String, id: usize, data: ClipboardData },
     ClipboardFiles { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     ClipboardFile { name: String, id: usize, outcome: FileOutcome },
@@ -407,6 +408,14 @@ impl Server {
         state.set_game_mode(self.game_mode);
         state.set_key_maps(self.keys.remap.clone());
         state.set_key_modes(self.keys.modes.clone());
+        // Welche Sperrtasten der Server lesen kann; Clients übernehmen dann seinen Stand
+        let locks = capture.locks();
+        if locks.is_known() {
+            debug!("Sperrtasten hier: {}", locks.describe());
+        } else {
+            info!("Feststelltaste und Num sind hier nicht lesbar – Clients gleichen sie nicht ab");
+        }
+        state.handle(ServerEvent::LocalLocks(locks));
         for (hotkey, target) in &self.keys.options.switch {
             if let qross_core::keys::SwitchTarget::Screen(name) = target {
                 if *name != self.config.name && !self.config.layout.contains(name) {
@@ -553,6 +562,10 @@ impl Server {
                         }
                         self.notify(ServerNotice::ClientTypesText { name: name.clone() });
                         state.handle(ServerEvent::ClientTypesText { name })
+                    }
+                    NetEvent::SyncsLocks { name, id } if is_current(&clients, &name, id) => {
+                        debug!("„{name}“ übernimmt Feststelltaste, Num und Rollen vom Server");
+                        state.handle(ServerEvent::ClientSyncsLocks { name })
                     }
                     NetEvent::Clipboard { name, id, data } if is_current(&clients, &name, id) => {
                         info!("Zwischenablage von „{name}“: {}", data.summary());
@@ -872,6 +885,14 @@ fn apply(
                 let _ = client.input.send(input);
             }
         }
+        Action::SyncLocks { to } => {
+            // Erst jetzt lesen: Lokal kann sich der Stand geändert haben, ohne dass es jemand sah.
+            let locks = capture.locks();
+            if let (true, Some(client)) = (locks.is_known(), clients.get(&to)) {
+                debug!("Sperrtasten → „{to}“: {}", locks.describe());
+                let _ = client.input.send(Input::Locks(locks));
+            }
+        }
         Action::Move { to, mv } => send_datagram(clients, &to, Datagram::MouseMove(mv)),
         Action::MoveBy { to, delta } => send_datagram(clients, &to, Datagram::MouseDelta(delta)),
         Action::SyncClipboard { to } => {
@@ -1030,7 +1051,8 @@ async fn handle_connection(
         Ok(Admitted { server_name, sharing }) => {
             debug!("„{name}“ läuft unter {platform:?}");
             // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore,
-            // ob sie Zeichen eingeben können und, sobald dort etwas im Vollbild läuft, den Spielemodus.
+            // ob sie Zeichen eingeben und die Sperrtasten setzen können und, sobald dort etwas im
+            // Vollbild läuft, den Spielemodus.
             let welcome = Control::Welcome { version: SERVER_VERSION, server_name, platform: Platform::current() };
             write_frame(&mut send, &welcome).await?;
             tokio::spawn(send_sharing(send, sharing.clone(), name.clone()));
@@ -1061,6 +1083,9 @@ async fn handle_connection(
             }
             Ok(Some(Control::TypesText)) => {
                 let _ = tx.send(NetEvent::TypesText { name: name.clone(), id });
+            }
+            Ok(Some(Control::SyncsLocks)) => {
+                let _ = tx.send(NetEvent::SyncsLocks { name: name.clone(), id });
             }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht"),
             Ok(None) | Err(_) => break,

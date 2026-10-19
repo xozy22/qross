@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use qross_core::keys::KeyOptions;
 use qross_core::Inject;
-use qross_proto::ClipboardData;
+use qross_proto::{ClipboardData, LockState};
 
 use crate::{Capture, Clipboard, Injector};
 
@@ -23,16 +23,22 @@ impl Injector for LogInjector {
     fn types_text(&self) -> bool {
         true
     }
+
+    fn syncs_locks(&self) -> bool {
+        true
+    }
 }
 
 /// Merkt sich alle Ereignisse (für Tests); `1` ist der Ablageordner für Drag & Drop, `2` die
 /// Dateien, die hier gerade gezogen werden (Drag & Drop zum Server), `3`: kann Zeichen eingeben
-/// (Zeichenmodus, siehe [`RecordingInjector::typing`]).
+/// (Zeichenmodus, siehe [`RecordingInjector::typing`]), `4`: kann die Sperrtasten setzen (siehe
+/// [`RecordingInjector::locking`]).
 #[derive(Clone, Default)]
 pub struct RecordingInjector(
     pub Arc<Mutex<Vec<Inject>>>,
     pub Arc<Mutex<Option<PathBuf>>>,
     pub Arc<Mutex<Vec<PathBuf>>>,
+    pub bool,
     pub bool,
 );
 
@@ -40,6 +46,11 @@ impl RecordingInjector {
     /// Einer, der Zeichen eingeben kann (wie Windows, macOS, X11)
     pub fn typing() -> Self {
         Self { 3: true, ..Self::default() }
+    }
+
+    /// Einer, der Feststelltaste, Num und Rollen setzen kann (wie Windows, macOS, X11)
+    pub fn locking() -> Self {
+        Self { 4: true, ..Self::default() }
     }
 }
 
@@ -50,6 +61,10 @@ impl Injector for RecordingInjector {
 
     fn types_text(&self) -> bool {
         self.3
+    }
+
+    fn syncs_locks(&self) -> bool {
+        self.4
     }
 
     fn drop_folder(&mut self, _x: i32, _y: i32) -> Option<PathBuf> {
@@ -150,12 +165,14 @@ pub enum CaptureCall {
 }
 
 /// Merkt sich Aufrufe der Erfassungs-Steuerung (für Tests); `1` ist der Ablageordner für Dateien
-/// vom Client, `2` die zuletzt eingestellten Tasten-Optionen.
+/// vom Client, `2` die zuletzt eingestellten Tasten-Optionen, `3` der Stand der Sperrtasten
+/// (Standard: unbekannt, wie unter Wayland).
 #[derive(Clone, Default)]
 pub struct RecordingCapture(
     pub Arc<Mutex<Vec<CaptureCall>>>,
     pub Arc<Mutex<Option<PathBuf>>>,
     pub Arc<Mutex<Option<KeyOptions>>>,
+    pub Arc<Mutex<LockState>>,
 );
 
 impl Capture for RecordingCapture {
@@ -185,5 +202,9 @@ impl Capture for RecordingCapture {
 
     fn set_key_options(&self, options: KeyOptions) {
         *self.2.lock().unwrap() = Some(options);
+    }
+
+    fn locks(&self) -> LockState {
+        *self.3.lock().unwrap()
     }
 }

@@ -7,6 +7,9 @@
 //!
 //! Im Remote-Modus meldet der Tap zu jeder Zeichentaste, was sie im Tastaturlayout der aktuellen
 //! Eingabequelle ergibt (`CaptureEvent::Typed`, für Clients im Zeichenmodus).
+//!
+//! Die Feststelltaste schaltet der Mac selbst um, bevor der Tap sie sieht; ihr neuer Stand geht als
+//! `CaptureEvent::Locks` an den Client. Num und Rollen gibt es auf Mac-Tastaturen nicht.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -20,14 +23,14 @@ use anyhow::{anyhow, Result};
 use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
-    CallbackResult, CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
-    EventField,
+    CallbackResult, CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventType, EventField,
 };
 use core_graphics::geometry::CGPoint;
 use qross_core::chars::is_typing_key;
 use qross_core::keys::{HotkeyEvent, HotkeyTracker, KeyOptions};
 use qross_core::CaptureEvent;
-use qross_proto::{Edge, MouseButton};
+use qross_proto::{Edge, LockState, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::layout;
@@ -249,8 +252,14 @@ fn handle(s: &Shared, state: &RefCell<TapState>, kind: CGEventType, event: &CGEv
             }
             match hid_from_mac(code) {
                 Some(key) if code == KVK_CAPS_LOCK => {
+                    // Schon umgeschaltet, die Flags tragen den neuen Stand. Clients ab Qross 0.8
+                    // übernehmen ihn, ältere bekommen die Taste. Durchlassen, damit auch die
+                    // Programme hier ihn sehen (wie unter Windows).
+                    let caps = event.get_flags().contains(CGEventFlags::CGEventFlagAlphaShift);
+                    send(CaptureEvent::Locks(LockState { caps: Some(caps), num: None, scroll: None }));
                     send(CaptureEvent::Key { key, down: true });
-                    Some(CaptureEvent::Key { key, down: false })
+                    send(CaptureEvent::Key { key, down: false });
+                    return CallbackResult::Keep;
                 }
                 // Zeichenmodus: was die Taste im Layout ergibt (ohne gelesenes Layout: Position)
                 Some(key) if matches!(kind, KeyDown) && is_typing_key(key) => Some(match layout::current() {
@@ -323,6 +332,10 @@ impl Capture for MacCapture {
 
     fn await_local_drop(&self) {
         self.0.await_drop.store(true, Ordering::Release);
+    }
+
+    fn locks(&self) -> LockState {
+        super::locks::current()
     }
 
     fn capture_remote(&self) {

@@ -67,10 +67,15 @@ impl Injector for WinInjector {
             Inject::Key { key, down } => key_event(key, down),
             Inject::Char { ch, down } => type_char(ch, down),
             Inject::Shortcut { ch, key, down } => shortcut(ch, key, down),
+            Inject::Locks(locks) => super::locks::set(locks),
         }
     }
 
     fn types_text(&self) -> bool {
+        true
+    }
+
+    fn syncs_locks(&self) -> bool {
         true
     }
 
@@ -312,6 +317,7 @@ mod tests {
     #[test]
     fn injector_types_text() {
         assert!(WinInjector.types_text());
+        assert!(WinInjector.syncs_locks());
     }
 
     #[test]

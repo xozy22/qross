@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use qross_proto::{Edge, KeyCode, MouseButton};
+use qross_proto::{Edge, KeyCode, LockState, MouseButton};
 
 use crate::chars::KeyChars;
 use crate::keys::SwitchTarget;
@@ -29,6 +29,9 @@ pub enum CaptureEvent {
     DragProbeResult { files: Vec<PathBuf> },
     /// Nach `Action::AwaitLocalDrop`: Maustaste hier losgelassen – Dateien vom Client ablegen.
     LocalDrop { x: i32, y: i32 },
+    /// Remote-Modus: Feststelltaste, Num oder Rollen gedrückt. Der Server hat mit umgeschaltet
+    /// (unter Windows lässt die Erfassung die Taste dafür durch); das ist sein neuer Stand.
+    Locks(LockState),
 }
 
 /// Was der Client in sein Betriebssystem einspeisen soll.
@@ -46,4 +49,6 @@ pub enum Inject {
     /// Kürzel im Zeichenmodus: die Taste drücken bzw. loslassen, die hier `ch` ergibt (ohne
     /// Zusatztasten); kennt das Layout das Zeichen nicht, die Taste `key`.
     Shortcut { ch: char, key: KeyCode, down: bool },
+    /// Feststelltaste, Num und Rollen auf diesen Stand bringen; `None` lässt eine Taste, wie sie ist
+    Locks(LockState),
 }
