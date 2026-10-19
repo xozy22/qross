@@ -1,10 +1,14 @@
 //! Eingabe-Erfassung unter X11.
 //!
-//! Lokaler Modus: Zeigerposition alle 4 ms abfragen und Kanten melden. Gegriffen werden nur die
-//! Kürzel (Fang-Taste, Wechsel-Kürzel; passiver Tastengriff), sonst verhält sich das System
-//! völlig normal.
+//! Lokaler Modus: Nach jeder Bewegung und jedem Maustastenwechsel die Zeigerposition abfragen und
+//! Kanten melden. Davon erfährt die Erfassung über Rohereignisse von XInput 2, ohne den Zeiger zu
+//! greifen; ohne XInput 2.1 fragt sie wie früher alle 4 ms ab. Gegriffen werden nur die Kürzel
+//! (Fang-Taste, Wechsel-Kürzel; passiver Tastengriff), sonst verhält sich das System völlig normal.
 //! Remote-Modus: Zeiger und Tastatur auf dem Root-Fenster grabben, Cursor durch einen leeren
 //! ersetzen und nach jeder Bewegung in die Mitte zurücksetzen.
+//!
+//! Die Schleife schläft, bis der X-Server ein Ereignis schickt. Steuerbefehle von außen (Wechsel,
+//! Ende, Dateien ablegen) wecken sie mit einer ClientMessage an ein eigenes Fenster (`Shared::wake`).
 //!
 //! Medientasten gehen unter X11 immer an den aktiven Rechner: Während des Tastatur-Grabs lässt
 //! sich eine einzelne Taste nicht lokal durchreichen.
@@ -25,8 +29,12 @@ use qross_core::CaptureEvent;
 use qross_proto::{Edge, KeyCode, MouseButton};
 use tokio::sync::mpsc::UnboundedSender;
 use x11rb::connection::Connection;
+use x11rb::protocol::xinput::{self, ConnectionExt as _, XIEventMask};
 use x11rb::protocol::xkb::{self, ConnectionExt as _};
-use x11rb::protocol::xproto::{ConnectionExt as _, Cursor, EventMask, GrabMode, GrabStatus, KeyButMask, ModMask, Window};
+use x11rb::protocol::xproto::{
+    AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, Cursor, EventMask, GrabMode, GrabStatus, KeyButMask,
+    ModMask, Window, WindowClass,
+};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use x11rb::{CURRENT_TIME, NONE};
@@ -42,12 +50,17 @@ const ALT: [u16; 2] = [56, 100];
 const SHIFT: [u16; 2] = [42, 54];
 /// Button1Mask … Button5Mask
 const ANY_BUTTON_MASK: u16 = 0x1F00;
+/// Ohne XInput 2.1: so oft fragt die Erfassung im lokalen Modus die Zeigerposition ab
 const POLL: Duration = Duration::from_millis(4);
 
 struct Shared {
     conn: RustConnection,
     root: Window,
     blank: Cursor,
+    /// Unsichtbares Fenster nur für die Weckrufe an die Schleife
+    wake_window: Window,
+    /// Erfassung beendet: Die Schleife hört auf; mit der Verbindung enden auch die Griffe der Kürzel.
+    stop: AtomicBool,
     remote: AtomicBool,
     events: UnboundedSender<CaptureEvent>,
     keys: Mutex<KeyOptions>,
@@ -87,6 +100,18 @@ impl Shared {
         let _ = self.conn.ungrab_pointer(CURRENT_TIME);
         let _ = self.conn.ungrab_keyboard(CURRENT_TIME);
     }
+
+    /// Weckt die Schleife, damit sie einen Steuerbefehl sofort umsetzt. Der Weckruf geht als
+    /// ClientMessage über den X-Server und landet so in derselben Warteschlange wie die Eingaben.
+    /// Ein eigener Kanal (eventfd) mit `poll` auf den Socket verpasste Ereignisse: Wartet ein anderer
+    /// Thread auf eine Antwort (Griffe in `capture_remote`, `set_key_options`), liest er dabei auch
+    /// Ereignisse aus dem Socket, und davon erfährt nur, wer in x11rb auf Ereignisse wartet.
+    fn wake(&self) {
+        let event = ClientMessageEvent::new(32, self.wake_window, AtomEnum::NONE, [0u32; 5]);
+        // Ohne Ereignismaske geht das Ereignis an den, der das Fenster angelegt hat.
+        let _ = self.conn.send_event(false, self.wake_window, EventMask::NO_EVENT, event);
+        let _ = self.conn.flush();
+    }
 }
 
 pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> {
@@ -100,24 +125,29 @@ pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> 
         let none = xkb::BoolCtrl::from(0u32);
         let _ = conn.xkb_per_client_flags(device, flag, flag, none, none, none);
     }
+    let wake_window = conn.generate_id()?;
+    conn.create_window(0, wake_window, root, 0, 0, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new())?;
     let shared = Arc::new(Shared {
         conn,
         root,
         blank,
+        wake_window,
+        stop: AtomicBool::new(false),
         remote: AtomicBool::new(false),
         events,
         keys: Mutex::new(KeyOptions::default()),
         grabbed: Mutex::new(Vec::new()),
         await_drop: AtomicBool::new(false),
     });
-    X11Capture(shared.clone()).set_key_options(KeyOptions::default());
-    let worker = shared.clone();
+    // Nicht als Zwischenwert: Sein Drop würde die Schleife gleich wieder beenden.
+    let capture = X11Capture(shared.clone());
+    capture.set_key_options(KeyOptions::default());
     thread::Builder::new().name("qross-x11-capture".into()).spawn(move || {
-        if let Err(e) = run(&worker) {
+        if let Err(e) = run(&shared) {
             tracing::error!("X11-Erfassung beendet: {e:#}");
         }
     })?;
-    Ok(Arc::new(X11Capture(shared)))
+    Ok(Arc::new(capture))
 }
 
 fn blank_cursor(conn: &RustConnection, root: Window) -> Result<Cursor> {
@@ -170,6 +200,8 @@ impl Capture for X11Capture {
 
     fn await_local_drop(&self) {
         self.0.await_drop.store(true, Ordering::Release);
+        // Ist schon keine Taste mehr gedrückt, legt die Schleife sofort ab.
+        self.0.wake();
     }
 
     fn capture_remote(&self) {
@@ -197,6 +229,7 @@ impl Capture for X11Capture {
         s.remote.store(true, Ordering::Release);
         let (cx, cy) = s.center();
         s.warp(cx, cy);
+        s.wake();
     }
 
     fn release(&self, x: i32, y: i32) {
@@ -204,13 +237,16 @@ impl Capture for X11Capture {
         s.remote.store(false, Ordering::Release);
         s.ungrab();
         s.warp(x as i16, y as i16);
+        // Ein Warp ist für XInput keine Bewegung: Die Schleife soll trotzdem gleich nachsehen.
+        s.wake();
     }
 }
 
 impl Drop for X11Capture {
     fn drop(&mut self) {
         self.0.ungrab();
-        let _ = self.0.conn.flush();
+        self.0.stop.store(true, Ordering::Release);
+        self.0.wake();
     }
 }
 
@@ -222,8 +258,20 @@ fn run(s: &Shared) -> Result<()> {
     let mut was_remote = false;
     // Belegung für den Zeichenmodus; ohne sie bleibt es bei Tastenpositionen
     let mut keymap = Keymap::fetch(&s.conn).map_err(|e| tracing::warn!("Tastaturbelegung nicht lesbar: {e:#}")).ok();
+    let raw = listen_raw(&s.conn, s.root)
+        .map_err(|e| tracing::info!("Kein XInput 2.1 ({e:#}): Zeigerposition wird alle 4 ms abgefragt"))
+        .is_ok();
+    // Lokal: Zeigerposition prüfen, sobald die Warteschlange leer ist – einmal für alle Bewegungen
+    // seit der letzten Prüfung
+    let mut check = true;
+    // Ereignis, auf das die Schleife gewartet hat; verarbeitet erst, nachdem sie den Modus neu gelesen
+    // hat (er kann sich währenddessen geändert haben)
+    let mut next = None;
 
     loop {
+        if s.stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let remote = s.remote.load(Ordering::Acquire);
         if remote && !was_remote {
             // Was lokal an Zusatztasten passierte, hat die Erfassung nicht gesehen.
@@ -231,54 +279,60 @@ fn run(s: &Shared) -> Result<()> {
         } else if !remote && was_remote {
             // Das Loslassen gedrückter Kürzel-Tasten geht jetzt an andere Programme.
             hotkey.forget_keys();
+            check = true;
         }
         was_remote = remote;
+
+        let event = match next.take() {
+            Some(event) => event,
+            None => match s.conn.poll_for_event()? {
+                Some(event) => event,
+                None if !remote && check => {
+                    check = false;
+                    check_pointer(s, &mut size, &mut size_checked)?;
+                    continue;
+                }
+                None if !remote && !raw => {
+                    thread::sleep(POLL);
+                    check = true;
+                    continue;
+                }
+                None => {
+                    // Schlafen bis zur nächsten Eingabe oder bis ein Steuerbefehl weckt
+                    next = Some(s.conn.wait_for_event()?);
+                    continue;
+                }
+            },
+        };
+
         if !remote {
-            if size_checked.elapsed() > Duration::from_secs(1) {
-                size = super::root_size(&s.conn, s.root)?;
-                size_checked = Instant::now();
-            }
-            let pointer = s.conn.query_pointer(s.root)?.reply()?;
-            let (x, y) = (i32::from(pointer.root_x), i32::from(pointer.root_y));
-            let buttons = u16::from(pointer.mask) & ANY_BUTTON_MASK != 0;
-            if !buttons && s.await_drop.swap(false, Ordering::AcqRel) {
-                // Dateien vom Client: hier losgelassen = hier ablegen
-                let _ = s.events.send(CaptureEvent::LocalDrop { x, y });
-            }
-            if let Some(edge) = edge_at(x, y, size) {
-                let buttons_down = buttons;
-                let _ = s.events.send(CaptureEvent::EdgeHit { edge, x, y, buttons_down });
-            }
             // Lokal kommen nur die passiv gegriffenen Kürzel an; Reste der Remote-Phase verwerfen.
-            while let Some(event) = s.conn.poll_for_event()? {
-                if let Event::MappingNotify(_) = event {
-                    keymap = Keymap::fetch(&s.conn).ok();
-                    continue;
-                }
-                let (Event::KeyPress(e) | Event::KeyRelease(e)) = &event else { continue };
-                let down = matches!(event, Event::KeyPress(_));
-                let grabbed = s.grabbed.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&(code, _)| code == e.detail);
-                let Some(key) = hid_from_evdev(u16::from(e.detail).wrapping_sub(X11_OFFSET)).filter(|_| grabbed) else {
-                    continue;
-                };
-                if down {
-                    // Zusatztasten so, wie sie beim Drücken waren: Bis die Erfassung das Ereignis liest
-                    // (alle 4 ms), können sie schon wieder losgelassen sein.
-                    hotkey.sync_modifiers(modifiers_in(e.state));
-                }
-                let options = s.keys.lock().unwrap_or_else(|e| e.into_inner());
-                if let HotkeyEvent::Triggered { event, .. } = hotkey.on_key(key, down, &options) {
-                    let _ = s.events.send(event);
-                }
+            if let Event::MappingNotify(_) = event {
+                keymap = Keymap::fetch(&s.conn).ok();
+                continue;
             }
-            thread::sleep(POLL);
+            let (Event::KeyPress(e) | Event::KeyRelease(e)) = &event else {
+                // Maus bewegt oder Taste gewechselt (XInput), Weckruf: Zeigerposition prüfen
+                check = true;
+                continue;
+            };
+            let down = matches!(event, Event::KeyPress(_));
+            let grabbed = s.grabbed.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&(code, _)| code == e.detail);
+            let Some(key) = hid_from_evdev(u16::from(e.detail).wrapping_sub(X11_OFFSET)).filter(|_| grabbed) else {
+                continue;
+            };
+            if down {
+                // Zusatztasten so, wie sie beim Drücken waren: Bis die Erfassung das Ereignis liest,
+                // können sie schon wieder losgelassen sein.
+                hotkey.sync_modifiers(modifiers_in(e.state));
+            }
+            let options = s.keys.lock().unwrap_or_else(|e| e.into_inner());
+            if let HotkeyEvent::Triggered { event, .. } = hotkey.on_key(key, down, &options) {
+                let _ = s.events.send(event);
+            }
             continue;
         }
 
-        let Some(event) = s.conn.poll_for_event()? else {
-            thread::sleep(Duration::from_millis(1));
-            continue;
-        };
         let (cx, cy) = s.center();
         let report = match event {
             Event::MotionNotify(e) => {
@@ -331,6 +385,48 @@ fn run(s: &Shared) -> Result<()> {
             let _ = s.events.send(event);
         }
     }
+}
+
+/// Lokal: Zeigerposition abfragen, Kanten und das Ablegen von Dateien vom Client melden
+fn check_pointer(s: &Shared, size: &mut (u16, u16), size_checked: &mut Instant) -> Result<()> {
+    if size_checked.elapsed() > Duration::from_secs(1) {
+        *size = super::root_size(&s.conn, s.root)?;
+        *size_checked = Instant::now();
+    }
+    let pointer = s.conn.query_pointer(s.root)?.reply()?;
+    let (x, y) = (i32::from(pointer.root_x), i32::from(pointer.root_y));
+    let buttons = u16::from(pointer.mask) & ANY_BUTTON_MASK != 0;
+    if !buttons && s.await_drop.swap(false, Ordering::AcqRel) {
+        // Dateien vom Client: hier losgelassen = hier ablegen
+        let _ = s.events.send(CaptureEvent::LocalDrop { x, y });
+    }
+    if let Some(edge) = edge_at(x, y, *size) {
+        let buttons_down = buttons;
+        let _ = s.events.send(CaptureEvent::EdgeHit { edge, x, y, buttons_down });
+    }
+    Ok(())
+}
+
+/// Rohereignisse von XInput 2 abonnieren: Sie kommen bei jeder Bewegung und jedem Tastenwechsel der
+/// Maus (auch bei Druck gegen die Kante, wenn sich der Zeiger nicht mehr bewegt), ohne dass die
+/// Erfassung den Zeiger greift. Erst ab Version 2.1 auch, während ein anderes Programm ihn gegriffen
+/// hat, etwa beim Ziehen eines Fensters oder von Dateien. Touch erst ab 2.2.
+fn listen_raw(conn: &RustConnection, root: Window) -> Result<()> {
+    let version = conn.xinput_xi_query_version(2, 2)?.reply()?;
+    let version = (version.major_version, version.minor_version);
+    anyhow::ensure!(version >= (2, 1), "Version {}.{}", version.0, version.1);
+    let select = |mask: XIEventMask| -> Result<()> {
+        let masks = [xinput::EventMask { deviceid: xinput::Device::ALL_MASTER.into(), mask: vec![mask] }];
+        conn.xinput_xi_select_events(root, &masks)?.check()?;
+        Ok(())
+    };
+    let mouse = XIEventMask::RAW_MOTION | XIEventMask::RAW_BUTTON_PRESS | XIEventMask::RAW_BUTTON_RELEASE;
+    let touch = XIEventMask::RAW_TOUCH_BEGIN | XIEventMask::RAW_TOUCH_UPDATE | XIEventMask::RAW_TOUCH_END;
+    // Touch ist eine Zugabe: Lehnt der X-Server es ab, bleibt es bei der Maus.
+    if version >= (2, 2) && select(mouse | touch).is_ok() {
+        return Ok(());
+    }
+    select(mouse)
 }
 
 /// Beim Wechsel in den Remote-Modus die gerade gedrückten Zusatztasten vom X-Server übernehmen:

@@ -17,7 +17,8 @@ tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.14", features = ["randr", "xkb", "xtest"] }
+# xinput: Rohereignisse der Maus wecken die Erfassung (statt Abfragen im festen Takt)
+x11rb = { version = "0.14", features = ["randr", "xinput", "xkb", "xtest"] }
 # wayland-data-control: Zwischenablage ohne Fenster unter KDE, Sway, Hyprland; sonst über XWayland
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 # Markierungen der Passwortmanager unter Wayland lesen (dieselbe Version, die arboard mitbringt)
