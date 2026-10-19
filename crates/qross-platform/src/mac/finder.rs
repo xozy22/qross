@@ -1,12 +1,17 @@
 //! Drag & Drop: Welcher Ordner liegt unter dem Cursor? Schreibtisch → `~/Desktop`, Finder-Fenster →
 //! der Ordner, den es zeigt. Alles andere (Programme, Dock, Menüleiste, Suchfenster) → `None`.
 //!
-//! Welches Fenster an der Stelle oben liegt, sagt die Fensterliste von CoreGraphics; dafür braucht es
-//! keine Rechte. Den Ordner eines Finder-Fensters lesen die Bedienungshilfen (Accessibility), deren
-//! Recht Qross ohnehin hat. Der Finder per AppleScript (`target of window`) wüsste ihn genau, verlangt
-//! aber das Recht „Automation“ – eine weitere Abfrage des Systems, ausgerechnet mitten im Ablegen.
-//! `AXDocument` lässt der Finder unter macOS 26 leer; der Ordner ergibt sich deshalb aus Titel,
-//! Pfadleiste und den Datei-URLs einiger sichtbarer Einträge (siehe `dnd_logic::finder_folder`).
+//! Welches Programm an der Stelle liegt, sagt der Treffertest der Bedienungshilfen (Accessibility),
+//! deren Recht Qross ohnehin hat. Die Fensterliste von CoreGraphics taugt dafür nicht allein: Sie
+//! kennt auch Flächen, die keine Klicks fangen (der Dock legt z. B. eine über den ganzen Bildschirm).
+//! Sie sagt aber, ob das Fenster des Finders dort der Schreibtisch ist (Ebene unter den normalen
+//! Fenstern) oder ein Ordnerfenster; ohne das Recht bleibt sie der Rückfall für den Schreibtisch.
+//!
+//! Den Ordner eines Finder-Fensters lesen ebenfalls die Bedienungshilfen. Der Finder per AppleScript
+//! (`target of window`) wüsste ihn genau, verlangt aber das Recht „Automation“ – eine weitere Abfrage
+//! des Systems, ausgerechnet mitten im Ablegen. `AXDocument` lässt der Finder unter macOS 26 leer; der
+//! Ordner ergibt sich deshalb aus Titel, Pfadleiste und den Datei-URLs einiger sichtbarer Einträge
+//! (siehe `dnd_logic::finder_folder`).
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -74,18 +79,25 @@ impl Trace {
 
 fn inspect(x: i32, y: i32, trace: &mut Trace) -> Option<PathBuf> {
     autoreleasepool(|_| {
-        let (pid, layer) = top_window_at(f64::from(x), f64::from(y), trace)?;
+        let (fx, fy) = (f64::from(x), f64::from(y));
+        let hit = element_at(x, y, trace);
+        let pid = match &hit {
+            Some(hit) => hit.pid()?,
+            // Ohne das Recht: das oberste Fenster der Fensterliste (genügt für den Schreibtisch)
+            None => top_window_at(fx, fy, None, trace)?.0,
+        };
         let bundle = bundle_id(pid);
-        trace.note(|| format!("oberstes Fenster: pid {pid}, Ebene {layer}, Programm {bundle:?}"));
+        trace.note(|| format!("Programm an der Stelle: pid {pid}, {bundle:?}"));
         if bundle.as_deref() != Some(FINDER) {
             tracing::debug!("unter dem Cursor liegt kein Finder-Fenster");
             return None;
         }
+        let (_, layer) = top_window_at(fx, fy, Some(pid), trace)?;
         let folder = if layer < 0 {
             // Unterhalb der normalen Fenster: der Schreibtisch, den der Finder zeichnet
             dirs::desktop_dir().filter(|dir| dir.is_dir())
         } else if layer == 0 {
-            finder_window_at(pid, x, y, trace)
+            hit.and_then(|hit| finder_window(hit, trace))
         } else {
             None
         };
@@ -97,8 +109,9 @@ fn inspect(x: i32, y: i32, trace: &mut Trace) -> Option<PathBuf> {
 
 // ------------------------------------------------------------------ Fensterliste
 
-/// Besitzer (pid) und Ebene des obersten sichtbaren Fensters an (x, y), Koordinaten wie CGEvent
-fn top_window_at(x: f64, y: f64, trace: &mut Trace) -> Option<(i32, i32)> {
+/// Besitzer (pid) und Ebene des obersten sichtbaren Fensters an (x, y), Koordinaten wie CGEvent;
+/// mit `owner` nur unter den Fenstern dieses Programms
+fn top_window_at(x: f64, y: f64, owner: Option<i32>, trace: &mut Trace) -> Option<(i32, i32)> {
     let Some(windows) = copy_window_info(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) else {
         trace.note(|| "keine Fensterliste".into());
         return None;
@@ -117,6 +130,9 @@ fn top_window_at(x: f64, y: f64, trace: &mut Trace) -> Option<(i32, i32)> {
         ) else {
             continue;
         };
+        if owner.is_some_and(|owner| owner != pid) {
+            continue;
+        }
         let Some(bounds) = value(unsafe { kCGWindowBounds })
             .and_then(|v| v.downcast::<CFDictionary>())
             .and_then(|dict| CGRect::from_dict_representation(&dict))
@@ -166,7 +182,8 @@ impl_TCFType!(AxElement, AXUIElementRef, AXUIElementGetTypeID);
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXUIElementGetTypeID() -> CFTypeID;
-    fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
+    fn AXUIElementCreateSystemWide() -> CFTypeRef;
+    fn AXUIElementGetPid(element: CFTypeRef, pid: *mut i32) -> i32;
     fn AXUIElementCopyElementAtPosition(application: CFTypeRef, x: f32, y: f32, element: *mut CFTypeRef) -> i32;
     fn AXUIElementCopyAttributeValue(element: CFTypeRef, attribute: CFStringRef, value: *mut CFTypeRef) -> i32;
     fn AXUIElementSetMessagingTimeout(element: CFTypeRef, seconds: f32) -> i32;
@@ -230,24 +247,35 @@ impl AxElement {
     fn role(&self) -> String {
         self.string("AXRole").unwrap_or_default()
     }
+
+    fn pid(&self) -> Option<i32> {
+        let mut pid = 0;
+        (unsafe { AXUIElementGetPid(self.as_CFTypeRef(), &mut pid) } == 0).then_some(pid)
+    }
 }
 
-/// Ordner des Finder-Fensters an (x, y). Ohne das Recht „Bedienungshilfen“ antwortet der Finder nicht.
-fn finder_window_at(pid: i32, x: i32, y: i32, trace: &mut Trace) -> Option<PathBuf> {
-    let app = unsafe { AXUIElementCreateApplication(pid) };
-    if app.is_null() {
+/// Das Element an (x, y) laut Treffertest der Bedienungshilfen; `None` ohne das Recht
+fn element_at(x: i32, y: i32, trace: &mut Trace) -> Option<AxElement> {
+    let system = unsafe { AXUIElementCreateSystemWide() };
+    if system.is_null() {
         return None;
     }
-    let app = unsafe { AxElement::wrap_under_create_rule(app as AXUIElementRef) }.limited();
+    // Am systemweiten Element gilt die Zeitgrenze für alle Elemente ohne eigene (wie in `game.rs`).
+    let system = unsafe { AxElement::wrap_under_create_rule(system as AXUIElementRef) }.limited();
     let mut hit: CFTypeRef = null();
-    let error = unsafe { AXUIElementCopyElementAtPosition(app.as_CFTypeRef(), x as f32, y as f32, &mut hit) };
+    let error = unsafe { AXUIElementCopyElementAtPosition(system.as_CFTypeRef(), x as f32, y as f32, &mut hit) };
     if error != 0 || hit.is_null() {
-        tracing::debug!("Finder-Fenster nicht lesbar (Fehler {error}; fehlt das Recht „Bedienungshilfen“?)");
+        tracing::debug!("kein Element bei {x},{y} (Fehler {error}; fehlt das Recht „Bedienungshilfen“?)");
         trace.note(|| format!("AXUIElementCopyElementAtPosition: Fehler {error}"));
         return None;
     }
     let hit = unsafe { AxElement::wrap_under_create_rule(hit as AXUIElementRef) }.limited();
     trace.note(|| format!("Element an der Stelle: {}", describe(&hit)));
+    Some(hit)
+}
+
+/// Ordner des Finder-Fensters, zu dem das Element unter dem Cursor gehört
+fn finder_window(hit: AxElement, trace: &mut Trace) -> Option<PathBuf> {
     let Some(window) = window_of(hit) else {
         trace.note(|| "kein Fenster zum Element".into());
         return None;
