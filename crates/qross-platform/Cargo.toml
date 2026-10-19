@@ -55,7 +55,7 @@ foreign-types = "0.5"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSColor", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSView", "NSWindow", "objc2-core-graphics"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventTypes"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSFileManager", "NSGeometry", "NSString", "NSURL", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSFileManager", "NSGeometry", "NSProcessInfo", "NSString", "NSURL", "objc2-core-foundation"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # Netzwerk für Profile je Ort: eigene Adresse und Präfix je Karte

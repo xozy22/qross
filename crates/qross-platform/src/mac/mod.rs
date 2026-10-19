@@ -37,7 +37,24 @@ pub(crate) use pasteboard::concealed;
 pub use permissions::{granted as has_permission, request as request_permission};
 pub use secure_input::state as secure_input;
 
-pub fn init_process() {}
+/// Einmal beim Programmstart: App Nap für die ganze Laufzeit abschalten. Läuft Qross ohne sichtbares
+/// Fenster (im Tray, als `qross client`), bremst macOS es sonst aus: Timer und Netzwerk werden
+/// gebündelt, und die ersten Eingaben nach einer Pause kommen spürbar verzögert an – etwa beim Wechsel
+/// vom Server auf diesen Mac, während der Rückweg flüssig bleibt. Synergy macht es genauso.
+/// Bildschirmschoner, Display- und Systemschlaf bleiben erlaubt.
+pub fn init_process() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep | NSActivityOptions::LatencyCritical;
+        let reason = NSString::from_str("Qross gibt Maus und Tastatur ohne Verzögerung weiter");
+        let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, &reason);
+        // Nie beenden: Die Aktivität gilt, solange der Prozess läuft.
+        std::mem::forget(activity);
+        tracing::debug!("App Nap abgeschaltet");
+    });
+}
 
 pub(crate) fn displays() -> Vec<CGRect> {
     CGDisplay::active_displays()
@@ -87,4 +104,14 @@ pub fn clipboard() -> Box<dyn Clipboard> {
 
 pub fn finder_overlay() -> Option<Arc<dyn FinderOverlay>> {
     Some(Arc::new(crate::finder::Overlay::new(finder::surface)))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn app_nap_is_switched_off_once() {
+        // Zweimal aufgerufen (Server und Client im selben Prozess): kein Absturz, keine zweite Aktivität
+        super::init_process();
+        super::init_process();
+    }
 }

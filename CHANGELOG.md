@@ -8,6 +8,15 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [Unreleased]
+
+### Behoben
+
+- **macOS: Verzögerung beim Wechsel auf den Mac:** Lief Qross am Mac nur im Tray oder als `qross client`, bremste
+  macOS es mit App Nap aus: Wechselte der Cursor vom Server auf den Mac, kam die Maus dort erst nach einem
+  spürbaren Moment an, der Rückweg blieb flüssig. Qross schaltet App Nap jetzt für seine Laufzeit ab, wie
+  Synergy. Bildschirmschoner, Display- und Systemschlaf des Macs bleiben erlaubt.
+
 ## [0.8.0] - 2026-10-19
 
 ### Neu
