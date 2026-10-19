@@ -19,7 +19,7 @@ die Bildschirmkante, ohne dass Maus und Tastatur ins Stocken geraten. Kopierte D
 anderen Rechner einfach **einfügen** (Strg+C hier, Strg+V dort).
 
 <p align="center">
-  <img src="docs/assets/screenshots/server.png" width="820" alt="Server-Ansicht mit Layout-Editor, verbundenen Rechnern und Freigabe-Anfrage">
+  <img src="docs/assets/screenshots/server.png" width="820" alt="Server-Ansicht mit Layout-Editor, verbundenen Rechnern, Freigabe-Anfrage und Rechten je Rechner">
 </p>
 
 <table>
@@ -28,11 +28,11 @@ anderen Rechner einfach **einfügen** (Strg+C hier, Strg+V dort).
     <td align="center"><img src="docs/assets/screenshots/freigabe.png" alt="Freigabe-Dialog mit Fingerprint"><br><sub>Neuer Rechner: Freigabe erst nach Fingerprint-Vergleich</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/assets/screenshots/einstellungen.png" alt="Einstellungen mit Autostart, Fang-Taste, Medientasten und Tastenumbelegung"><br><sub>Einstellungen: Autostart, Updates, Fang-Taste, Medientasten, Tasten je Rechner</sub></td>
+    <td align="center"><img src="docs/assets/screenshots/einstellungen.png" alt="Einstellungen in Bereichen, hier die Tastatur mit Fang-Taste und Kürzeln zum Wechseln"><br><sub>Einstellungen in Bereichen, hier Tastatur: Fang-Taste, Kürzel zum Wechseln, Medientasten, Tasten je Rechner</sub></td>
     <td align="center"><img src="docs/assets/screenshots/neuigkeiten.png" alt="Neuigkeiten mit allen Versionen und ihren Änderungen"><br><sub>Neuigkeiten: Klick auf die Version in der Kopfzeile zeigt, was sich geändert hat</sub></td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><img src="docs/assets/screenshots/verbindungsqualitaet.png" width="620" alt="Verbindungsqualität eines Clients mit Latenz, Jitter, Verlust und Verlauf"><br><sub>Verbindungsqualität je Rechner: Latenz, Jitter, Verlust, Durchsatz und Verlauf der letzten Minute</sub></td>
+    <td align="center" colspan="2"><img src="docs/assets/screenshots/verbindungsqualitaet.png" width="620" alt="Verbindungsqualität eines Clients mit Latenz, Jitter, Verlust, Verlauf und Verzögerung der Eingabe"><br><sub>Verbindungsqualität je Rechner: Latenz, Jitter, Verlust, Durchsatz, Verlauf der letzten Minute und die Verzögerung der Eingabe, aufgeteilt in Server, Netz und Client</sub></td>
   </tr>
 </table>
 
@@ -372,7 +372,7 @@ Hinweise:
 | `qross-platform` | Betriebssystem: Windows (Hooks, SendInput, OLE/Shell), Linux (X11/XTest, Wayland über Desktop-Portale und libei), macOS (CGEventTap) |
 | `qross-net` | QUIC/TLS, Fingerprint-Vertrauen, LAN-Suche, Dateiübertragung, Laufzeit von Server und Client |
 | `qross` | Kommandozeilenprogramm |
-| `qross-gui` | Grafische Oberfläche (Tauri) |
+| `qross-gui` | Grafische Oberfläche (Tauri); die Seite liegt in `ui/`, ihr Code als ES-Module in `ui/js/` (`main.js` startet, je Bereich ein Modul) |
 | `bench/netbench` | Benchmark TCP+TLS vs. QUIC (eigener Cargo-Workspace) |
 
 Hintergrund: [Benchmark](docs/benchmark-ergebnisse.md) · [Protokoll](docs/protokoll.md) · [Wayland](docs/wayland.md)
