@@ -27,7 +27,7 @@ env:
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
-  # Läuft zuerst, damit ein fehlender Changelog-Eintrag auffällt, bevor 20 Minuten gebaut wird.
+  # Läuft zuerst, damit ein fehlender Changelog-Eintrag auffällt, bevor gebaut wird.
   # Beim manuellen Start kommt der Changelog vom gewählten Branch, so lassen sich alte Releases neu beschreiben.
   notes:
     name: Release-Notizen aus dem Changelog
@@ -59,6 +59,45 @@ jobs:
             tools/latest_json.py
           if-no-files-found: error
 
+  # Die Tests laufen schon in der CI, auf denselben Systemen und für denselben Commit. Statt sie hier
+  # noch einmal im Debug-Profil zu bauen (bis zu 5 Minuten je System), wird nur ihr Ergebnis verlangt.
+  # Läuft die CI noch, wartet dieser Job; die Builds laufen derweil schon.
+  ci:
+    name: CI für diesen Commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: CI-Lauf grün
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.test_run }}" = "true" ]; then
+            sha="${{ github.sha }}"
+          else
+            sha="$(gh api "repos/${REPO}/commits/${TAG}" --jq .sha)"
+          fi
+          run="$(gh run list --repo "${REPO}" --workflow ci.yml --commit "${sha}" --limit 1 \
+            --json databaseId --jq '.[0].databaseId // empty')"
+          if [ -z "${run}" ]; then
+            if [ "${{ inputs.test_run }}" = "true" ]; then
+              echo "::warning::Keine CI für ${sha} – der Testlauf baut ohne geprüfte Tests"
+              exit 0
+            fi
+            echo "::error::Keine CI für ${sha} – den Commit zuerst auf main pushen und die CI abwarten"
+            exit 1
+          fi
+          echo "CI für ${sha}: ${{ github.server_url }}/${REPO}/actions/runs/${run}"
+          if ! gh run watch "${run}" --repo "${REPO}" --exit-status --interval 30 > /dev/null; then
+            echo "::error::Die CI für ${sha} ist nicht grün (abgebrochen oder fehlgeschlagen) – erst sie neu starten"
+            exit 1
+          fi
+          echo "Die CI ist grün."
+
   build:
     name: Build ${{ matrix.name }}
     needs: notes
@@ -89,30 +128,24 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Der Cache kommt von main (release-cache.yml). Einen eigenen legt der Tag nicht an: Den sähe
+      # schon das nächste Release nicht, und er verdrängte die Caches von main.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          shared-key: release-${{ matrix.target }}
+          save-if: false
 
       - uses: actions/setup-node@v7
         with:
           node-version: latest
 
-      - name: Linux-Abhängigkeiten (Tauri, X11-Tests)
+      - name: Linux-Abhängigkeiten (Tauri, AppImage)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev \
-            patchelf file xvfb
-
-      - name: Tests
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            xvfb-run -a -s "-screen 0 1280x800x24" cargo test --workspace --locked
-          else
-            cargo test --workspace --locked
-          fi
+            patchelf file
 
       - name: Kommandozeile bauen
         run: cargo build --release --locked -p qross --target ${{ matrix.target }}
@@ -374,7 +407,7 @@ jobs:
 
   publish:
     name: GitHub-Release veröffentlichen
-    needs: [notes, build, macos-check]
+    needs: [notes, ci, build, macos-check]
     if: ${{ !inputs.test_run }}
     runs-on: ubuntu-24.04
     steps:

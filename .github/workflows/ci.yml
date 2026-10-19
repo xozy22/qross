@@ -37,7 +37,11 @@ jobs:
         with:
           components: clippy
 
+      # PRs lesen den Cache von main, legen aber keinen eigenen an: GitHub hält je Repository nur
+      # 10 GB, und die Caches eines PRs (3–4 GB) verdrängten sonst die von main und den Release-Cache.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Linux-Abhängigkeiten (Tauri, X11-Tests)
         if: runner.os == 'Linux'
@@ -71,6 +75,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: mutter installieren
         run: |
