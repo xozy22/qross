@@ -18,7 +18,7 @@ use qross_platform::{Clipboard, FinderOverlay, Injector};
 use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
     DragMessage, FileEntry, FrameError, GameState, Input, Latency, LatencySummary, MouseDelta, MouseMove, Platform, Rect,
-    ScreenInfo, Sharing, StreamKind, DEFAULT_PORT, GAME_MODE_SINCE, LATENCY_SINCE, LOCKS_SINCE, MONITORS_SINCE,
+    SampleId, ScreenInfo, Sharing, StreamKind, DEFAULT_PORT, GAME_MODE_SINCE, LATENCY_SINCE, LOCKS_SINCE, MONITORS_SINCE,
     PROTOCOL_VERSION, SCREEN_SAVER_SINCE, SHARING_SINCE, TEXT_SINCE,
 };
 use quinn::{Connection, ConnectionError, Endpoint, RecvStream};
@@ -35,6 +35,7 @@ use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
 use crate::screensaver;
 use crate::streams::{read_kind, send_drag_message};
+use crate::switch_trace::{ClientTrace, Discarded};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::wake::{self, Backoff, SystemEvent};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
@@ -153,11 +154,12 @@ struct Reconnect {
 /// Lebendprüfung nach dem Aufwachen oder einem Netzwechsel (siehe [`wake::answers`])
 type Probe = Pin<Box<dyn Future<Output = bool> + Send>>;
 
-/// Was vom Server kommt; Stichproben der Eingabekette mit dem Zeitpunkt ihres Empfangs
+/// Was vom Server kommt; Bewegungen mit dem Zeitpunkt ihres Empfangs, Eingaben mit ihrer Stichprobe
+/// der Eingabekette
 enum FromServer {
-    Move(MouseMove, Option<Stamp>),
+    Move(MouseMove, Instant),
     /// Relative Bewegung (Spielemodus)
-    Delta(MouseDelta, Option<Stamp>),
+    Delta(MouseDelta, Instant),
     Input(Input, Option<Stamp>),
     Clipboard(ClipboardData),
     File(FileOutcome),
@@ -614,27 +616,45 @@ async fn session(
     let mut probe: Option<Probe> = None;
     // Was der Cursor-Finder hier zeigt; ältere Server melden nichts, dann bleibt er aus.
     let mut finder_style = CursorFinder::OFF;
+    // Protokoll des Betretens (siehe `switch_trace`): verworfene Bewegungen, das laufende Protokoll
+    // und die Rückmeldungen des Einspeise-Threads dazu
+    let mut discarded = Discarded::default();
+    let mut entering: Option<ClientTrace> = None;
+    let (traced_tx, mut traced_rx) = mpsc::unbounded_channel::<Measured>();
 
     let outcome: Result<()> = async {
         loop {
+            if entering.as_ref().is_some_and(|trace| trace.is_due(Instant::now())) {
+                entering.take().expect("geprüft").log();
+            }
             tokio::select! {
                 Some(msg) = rx.recv() => match msg {
-                    FromServer::Move(mv, stamp) => {
-                        if let Some(event) = state.on_move(mv) {
+                    FromServer::Move(mv, received) => match state.on_move(mv) {
+                        Some(event) => {
                             moves += 1;
                             last_pos = (mv.x, mv.y);
                             let _ = inject.send(ToInjector::Inject(event));
-                            mark(inject, stamp, marks.as_ref());
+                            mark(inject, Stamp::mouse(mv.epoch, mv.seq, received), marks.as_ref());
+                            let id = SampleId::Mouse { epoch: mv.epoch, seq: mv.seq };
+                            trace_move(&mut entering, inject, &traced_tx, id, received);
                         }
-                    }
-                    FromServer::Delta(delta, stamp) => {
-                        if let Some(event) = state.on_delta(delta) {
+                        None => discarded.add(mv.epoch, received),
+                    },
+                    FromServer::Delta(delta, received) => match state.on_delta(delta) {
+                        Some(event) => {
                             moves += 1;
                             let _ = inject.send(ToInjector::Inject(event));
-                            mark(inject, stamp, marks.as_ref());
+                            mark(inject, Stamp::mouse(delta.epoch, delta.seq, received), marks.as_ref());
+                            let id = SampleId::Mouse { epoch: delta.epoch, seq: delta.seq };
+                            trace_move(&mut entering, inject, &traced_tx, id, received);
                         }
-                    }
+                        None => discarded.add(delta.epoch, received),
+                    },
                     FromServer::Input(input, stamp) => {
+                        let entered = match &input {
+                            Input::Enter { epoch, .. } => Some(*epoch),
+                            _ => None,
+                        };
                         let dropped = match &input {
                             Input::Enter { x, y, .. } => {
                                 (moves, last_pos) = (0, (*x, *y));
@@ -670,8 +690,17 @@ async fn session(
                             Some(Transition::Entered) => {
                                 info!("Cursor betritt diesen Rechner bei {},{}", last_pos.0, last_pos.1);
                                 notify(notices, ClientNotice::CursorEntered);
+                                if let Some(earlier) = entering.take() {
+                                    earlier.log();
+                                }
+                                if let Some(epoch) = entered {
+                                    entering = Some(ClientTrace::start(epoch, Instant::now(), &mut discarded));
+                                }
                             }
                             Some(Transition::Left) => {
+                                if let Some(trace) = entering.take() {
+                                    trace.log();
+                                }
                                 receiver.cancel_undropped();
                                 notify(notices, ClientNotice::CursorLeft);
                                 info!(
@@ -808,6 +837,11 @@ async fn session(
                         probe = Some(Box::pin(wake::answers(conn.clone(), wake::CLIENT_PROBE)));
                     }
                 },
+                Some(injected) = traced_rx.recv() => {
+                    if let Some(trace) = &mut entering {
+                        trace.on_injected(injected.received, injected.done);
+                    }
+                }
                 alive = async { probe.as_mut().expect("nur mit laufender Prüfung").await }, if probe.is_some() => {
                     probe = None;
                     if !alive {
@@ -855,6 +889,20 @@ fn mark(inject: &Sender<ToInjector>, stamp: Option<Stamp>, marks: Option<&mpsc::
     if let (Some(stamp), Some(done)) = (stamp, marks) {
         let _ = inject.send(ToInjector::Measured { stamp, done: done.clone() });
     }
+}
+
+/// Bewegung fürs Protokoll des Betretens; im Beobachtungsfenster meldet der Einspeise-Thread auch, wann
+/// sie eingespeist ist (jede, nicht nur die Stichproben der Eingabekette).
+fn trace_move(
+    trace: &mut Option<ClientTrace>,
+    inject: &Sender<ToInjector>,
+    done: &mpsc::UnboundedSender<Measured>,
+    id: SampleId,
+    received: Instant,
+) {
+    let Some(trace) = trace.as_mut().filter(|trace| trace.watches(received)) else { return };
+    trace.on_move(received);
+    let _ = inject.send(ToInjector::Measured { stamp: Stamp { id, received }, done: done.clone() });
 }
 
 /// Fertig übertragene Dateien vom Server in die Zwischenablage legen.
@@ -960,10 +1008,10 @@ async fn receive_datagrams(conn: Connection, tx: mpsc::UnboundedSender<FromServe
         let received = Instant::now();
         match decode_datagram(&bytes) {
             Ok(Datagram::MouseMove(mv)) => {
-                let _ = tx.send(FromServer::Move(mv, Stamp::mouse(mv.epoch, mv.seq, received)));
+                let _ = tx.send(FromServer::Move(mv, received));
             }
             Ok(Datagram::MouseDelta(delta)) => {
-                let _ = tx.send(FromServer::Delta(delta, Stamp::mouse(delta.epoch, delta.seq, received)));
+                let _ = tx.send(FromServer::Delta(delta, received));
             }
             Err(e) => debug!("ungültiges Datagramm: {e}"),
         }

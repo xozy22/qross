@@ -576,8 +576,7 @@ fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
 
     if !remote {
         if msg == WM_MOUSEMOVE {
-            let (x, y) = (info.pt.x, info.pt.y);
-            if let Some(edge) = outer_edge_at(x, y) {
+            if let Some((edge, x, y)) = outer_edge_at(info.pt.x, info.pt.y) {
                 emit(CaptureEvent::EdgeHit { edge, x, y, buttons_down: buttons_down() });
             }
         }
@@ -728,8 +727,14 @@ fn button_of(msg: u32, info: &MSLLHOOKSTRUCT) -> Option<(MouseButton, bool)> {
 /// Liegt (x, y) an einer Monitorkante, hinter der kein weiterer Monitor folgt?
 /// Pro Monitor statt über die Bounding-Box: Bei unterschiedlich großen Monitoren ist so
 /// z. B. auch die Unterkante des kleineren Monitors eine echte Außenkante.
-fn outer_edge_at(x: i32, y: i32) -> Option<Edge> {
+/// Kante ohne Nachbarmonitor, an der (x, y) liegt, mit dem Punkt auf dem Monitor. Bei schneller
+/// Bewegung meldet der Hook nicht, wo der Cursor steht, sondern wo er ohne Bildschirmrand hinkäme: oft
+/// weit hinter der Kante (Synergy nennt das „bogus mouse positions“). So ginge die Berührung als Punkt
+/// neben jedem Monitor an den Server-Kern, er wechselte nicht, und der Cursor hinge am Rand, bis die
+/// Hand abbremst – je schneller, desto länger. Deshalb erst auf den Monitor holen.
+fn outer_edge_at(x: i32, y: i32) -> Option<(Edge, i32, i32)> {
     let monitor = monitor_rect(x, y)?;
+    let (x, y) = (x.clamp(monitor.left, monitor.right - 1), y.clamp(monitor.top, monitor.bottom - 1));
     let candidates = [
         (x <= monitor.left, Edge::Left, (x - 1, y)),
         (x >= monitor.right - 1, Edge::Right, (x + 1, y)),
@@ -739,7 +744,7 @@ fn outer_edge_at(x: i32, y: i32) -> Option<Edge> {
     candidates
         .into_iter()
         .find(|&(at_edge, _, (bx, by))| at_edge && !has_monitor(bx, by))
-        .map(|(_, edge, _)| edge)
+        .map(|(_, edge, _)| (edge, x, y))
 }
 
 fn monitor_rect(x: i32, y: i32) -> Option<RECT> {
@@ -814,6 +819,20 @@ mod tests {
         [(m.left, cy), (m.right - 1, cy), (cx, m.top), (cx, m.bottom - 1)]
             .into_iter()
             .find(|&(x, y)| outer_edge_at(x, y).is_some())
+    }
+
+    #[test]
+    fn a_point_behind_the_edge_counts_as_the_edge() {
+        // So meldet der Hook schnelle Bewegungen: hinter dem Rand. Gemeldet wird der Punkt auf dem Monitor.
+        let Some((x, y)) = outer_edge_point() else { return };
+        let (edge, ..) = outer_edge_at(x, y).expect("Punkt an der Kante");
+        let behind = match edge {
+            Edge::Left => (x - 40, y),
+            Edge::Right => (x + 40, y),
+            Edge::Top => (x, y - 40),
+            Edge::Bottom => (x, y + 40),
+        };
+        assert_eq!(outer_edge_at(behind.0, behind.1), Some((edge, x, y)));
     }
 
     /// Steht der Cursor kurz an der Kante, meldet der Hook `EdgeHit`: Der ganze Weg bis zum Server-Kern

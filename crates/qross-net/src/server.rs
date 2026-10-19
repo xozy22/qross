@@ -34,6 +34,7 @@ use crate::screensaver;
 use crate::secure_input;
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
+use crate::switch_trace::{EdgeHits, ServerTrace};
 use crate::tls::{peer_fingerprint, server_config};
 use crate::wake::{self, SystemEvent};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore};
@@ -564,7 +565,14 @@ impl Server {
         self.notify(ServerNotice::Listening { addr: self.local_addr()? });
         self.notify(ServerNotice::LocalScreenChanged { screen: local_screen, monitors: local_monitors.clone() });
 
+        // Protokoll des letzten Wechsels auf einen Client (siehe `switch_trace`)
+        let mut edge_hits = EdgeHits::default();
+        let mut switching: Option<ServerTrace> = None;
+
         loop {
+            if switching.as_ref().is_some_and(|trace| trace.is_due(Instant::now())) {
+                switching.take().expect("geprüft").log();
+            }
             // Wann das auslösende Ereignis aus der Erfassung abgeholt wurde (Eingabekette)
             let mut captured = None;
             let actions = tokio::select! {
@@ -586,14 +594,23 @@ impl Server {
                                 }
                             }
                         }
+                        if let (Some(trace), Some(at)) = (&mut switching, captured) {
+                            trace.on_move(at, dx, dy);
+                        }
                         let mut actions = state.handle(ServerEvent::Capture(CaptureEvent::MouseDelta { dx, dy }));
                         if let Some(event) = next {
+                            if matches!(event, CaptureEvent::EdgeHit { .. }) {
+                                edge_hits.hit(Instant::now());
+                            }
                             actions.extend(self.on_capture(&mut state, event));
                         }
                         actions
                     }
                     Some(event) => {
                         captured = Some(Instant::now());
+                        if matches!(event, CaptureEvent::EdgeHit { .. }) {
+                            edge_hits.hit(Instant::now());
+                        }
                         self.on_capture(&mut state, event)
                     }
                     None => bail!("Eingabe-Erfassung wurde beendet"),
@@ -839,6 +856,22 @@ impl Server {
                 }
             };
             for action in actions {
+                match &action {
+                    Action::Send { to, input: Input::Enter { .. } } => {
+                        if let Some(earlier) = switching.take() {
+                            earlier.log();
+                        }
+                        let at = captured.unwrap_or_else(Instant::now);
+                        switching = Some(ServerTrace::start(to.clone(), at, &mut edge_hits));
+                    }
+                    Action::ReleaseCapture { .. } => {
+                        if let Some(mut trace) = switching.take() {
+                            trace.on_back(Instant::now());
+                            trace.log();
+                        }
+                    }
+                    _ => {}
+                }
                 self.notify_action(&action);
                 self.explain_key_mode(&action, &clients);
                 if let Some(overlay) = &finder {

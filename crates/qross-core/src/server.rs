@@ -528,6 +528,10 @@ impl ServerState {
                 if self.active != Active::Local || self.held() {
                     return;
                 }
+                // Auf den Monitor: Bei schneller Bewegung meldet die Erfassung womöglich, wohin der
+                // Cursor ohne Rand käme, also einen Punkt hinter der Kante (Windows). Er zählte sonst
+                // nicht als äußere Kante, und gewechselt würde erst, wenn die Hand abbremst.
+                let (x, y) = self.local.snap(x, y);
                 let Some(target) = self.layout.neighbor(&self.me, edge).map(str::to_owned) else {
                     return;
                 };
@@ -915,6 +919,25 @@ mod tests {
             ]
         );
         assert_eq!(s.active_screen(), "laptop");
+    }
+
+    #[test]
+    fn a_fast_push_reported_behind_the_edge_switches_at_once() {
+        // Bei schneller Bewegung meldet der Windows-Hook, wohin der Cursor ohne Rand käme: hinter die
+        // Kante. Das zählt wie die Kante selbst, sonst hinge der Cursor dort, bis die Hand abbremst.
+        let mut s = state();
+        s.handle(ServerEvent::LocalMonitors(vec![PC]));
+        assert!(s.handle(edge_hit(Edge::Right, 1949, 540)).contains(&Action::Send {
+            to: "laptop".into(),
+            input: Input::Enter { epoch: 1, x: 1, y: 399 }
+        }));
+        // Auch schräg über die Ecke hinaus: Die Höhe bleibt auf dem Monitor.
+        let mut s = state();
+        s.handle(ServerEvent::LocalMonitors(vec![PC]));
+        assert!(s.handle(edge_hit(Edge::Right, 1990, 1100)).contains(&Action::Send {
+            to: "laptop".into(),
+            input: Input::Enter { epoch: 1, x: 1, y: 799 }
+        }));
     }
 
     #[test]

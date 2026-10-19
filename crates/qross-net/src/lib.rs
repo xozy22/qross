@@ -19,6 +19,7 @@ pub mod quality;
 pub mod secure_input;
 pub mod screensaver;
 pub mod server;
+mod switch_trace;
 mod rights;
 mod streams;
 /// TLS-Konfiguration; öffentlich auch für Tests, die ältere Gegenstellen nachbauen
