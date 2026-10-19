@@ -72,6 +72,7 @@ fn start() -> Setup {
         screen: Box::new(|| PC),
         monitors: Box::new(Vec::new),
         game: Box::new(GameState::default),
+        finder: None,
     }));
     let client_config = ClientConfig {
         name: "laptop".into(),
@@ -91,6 +92,7 @@ fn start() -> Setup {
             screen: Box::new(|| LAPTOP),
             monitors: Box::new(Vec::new),
             game: Box::new(GameState::default),
+            finder: None,
         },
         client_tx,
     ));

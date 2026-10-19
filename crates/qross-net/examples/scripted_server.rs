@@ -6,6 +6,7 @@
 //! cargo run -p qross-net --example scripted_server -- drag <Client-Name> <Datei>
 //! cargo run -p qross-net --example scripted_server -- copy <Client-Name> <Datei>
 //! cargo run -p qross-net --example scripted_server -- receive <Client-Name>
+//! cargo run -p qross-net --example scripted_server -- finder <Client-Name> [Wechsel]
 //! ```
 //!
 //! Lauscht nur auf `127.0.0.1:24990` und nimmt einen Client mit diesem Namen ohne Rückfrage an.
@@ -16,6 +17,9 @@
 //! - `copy`: Die Datei landet in der Zwischenablage des Clients.
 //! - `receive`: Cursor zum Client und zurück; dessen kopierte Dateien kommen hierher (ohne
 //!   Testmodus, denn im Testmodus hat der Client eine eigene, leere Zwischenablage).
+//! - `finder`: Cursor-Finder mit Ring und Name an; der Cursor geht alle drei Sekunden zum Client (Standard:
+//!   fünfmal) und nach anderthalb Sekunden zurück. Ohne Testmodus, denn erst dann steht der Ring dort, wo
+//!   der Client den echten Mauszeiger hinsetzt (links am Rand, auf halber Höhe).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,7 +32,7 @@ use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform};
 use qross_net::{Identity, TrustOutcome, TrustStore, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{CaptureCall, RecordingCapture, SharedClipboard};
 use qross_platform::Clipboard;
-use qross_proto::{ClipboardData, Edge, MouseButton, Rect};
+use qross_proto::{ClipboardData, CursorFinder, Edge, MouseButton, Rect};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 const SERVER: &str = "testserver";
@@ -41,8 +45,13 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let switches: u32 = match args.as_slice() {
+        [mode, _, count] if mode == "finder" => count.parse().context("Zahl der Wechsel")?,
+        _ => 5,
+    };
     let (mode, client, file) = match args.as_slice() {
-        [mode, client] if mode == "receive" => (mode.as_str(), client.clone(), None),
+        [mode, client] if mode == "receive" || mode == "finder" => (mode.as_str(), client.clone(), None),
+        [mode, client, _] if mode == "finder" => (mode.as_str(), client.clone(), None),
         [mode, client, file] if mode == "drag" || mode == "copy" => {
             let file = std::path::absolute(file)?;
             if !file.exists() {
@@ -50,7 +59,10 @@ async fn main() -> Result<()> {
             }
             (mode.as_str(), client.clone(), Some(file))
         }
-        _ => bail!("Aufruf: scripted_server drag|copy <Client-Name> <Datei> oder scripted_server receive <Client-Name>"),
+        _ => bail!(
+            "Aufruf: scripted_server drag|copy <Client-Name> <Datei>, scripted_server receive <Client-Name> oder \
+             scripted_server finder <Client-Name> [Wechsel]"
+        ),
     };
 
     // Eigene Identität und Freigaben in einem festen Ordner: Der Client bestätigt den Fingerprint nur einmal.
@@ -63,7 +75,8 @@ async fn main() -> Result<()> {
     let (notice_tx, mut notices) = tokio::sync::mpsc::unbounded_channel();
     let server = Server::bind(config, &identity, TrustStore::load(&trust_file)?)?
         .with_notices(notice_tx)
-        .with_discovery(false);
+        .with_discovery(false)
+        .with_cursor_finder(if mode == "finder" { CursorFinder { ring: true, name: true } } else { CursorFinder::OFF });
 
     let capture = RecordingCapture::default();
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -79,6 +92,7 @@ async fn main() -> Result<()> {
         screen: Box::new(|| SCREEN),
         monitors: Box::new(Vec::new),
         game: Box::new(qross_proto::GameState::default),
+        finder: None,
     }));
     println!("Server „{SERVER}“ auf 127.0.0.1:24990, Fingerprint {}", identity.fingerprint());
     println!("Warte auf den Client „{client}“ …");
@@ -110,6 +124,17 @@ async fn main() -> Result<()> {
         ("copy", _) => {
             hit_edge(&events, &capture, false).await?;
             watch(&mut notices, Direction::Sending).await?;
+        }
+        ("finder", _) => {
+            for i in 1..=switches {
+                capture.0.lock().unwrap().clear();
+                hit_edge(&events, &capture, false).await?;
+                println!("Wechsel {i}: Cursor auf „{client}“");
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                events.send(CaptureEvent::MouseDelta { dx: -5000, dy: 0 })?;
+                println!("Wechsel {i}: Cursor zurück");
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            }
         }
         _ => {
             hit_edge(&events, &capture, false).await?;

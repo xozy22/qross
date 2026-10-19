@@ -11,15 +11,15 @@ use qross_core::sharing::{Share, Sharing, SharingRules};
 use qross_core::{CaptureEvent, Inject, Layout, LinkConfig};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::progress::{Direction, Kind, Phase, Progress, Transfers};
-use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle};
+use qross_net::server::{CursorFinderHandle, Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle};
 use qross_net::{clipfiles, files};
 use qross_net::{Identity, TrustStore};
-use qross_platform::dryrun::{CaptureCall, RecordingCapture, RecordingInjector, SharedClipboard};
+use qross_platform::dryrun::{CaptureCall, FinderCall, RecordingCapture, RecordingFinder, RecordingInjector, SharedClipboard};
 use qross_platform::Clipboard;
 use qross_proto::{
-    read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, DragMessage, Edge, FileEntry, GameState,
-    KeyCode, LockState, MouseButton, MouseMove, Platform, Rect, ScreenInfo, StreamKind, PROTOCOL_VERSION,
-    SERVER_VERSION,
+    read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, DragMessage, Edge,
+    FileEntry, FrameError, GameState, KeyCode, LockState, MouseButton, MouseMove, Platform, Rect, ScreenInfo,
+    StreamKind, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -60,6 +60,10 @@ struct Setup {
     client_transfers: Transfers,
     /// Rechte je Rechner des Servers (Standard: alles erlaubt)
     sharing: SharingHandle,
+    /// Cursor-Finder des Servers (Standard: aus) und was er auf beiden Seiten gezeigt hätte
+    cursor_finder: CursorFinderHandle,
+    server_finder: RecordingFinder,
+    client_finder: RecordingFinder,
     server_task: JoinHandle<anyhow::Result<()>>,
     client_task: JoinHandle<anyhow::Result<()>>,
 }
@@ -121,6 +125,8 @@ fn start_client_screen(
     let addr = server.local_addr().unwrap();
     let server_transfers = server.transfers();
     let sharing = server.sharing();
+    let cursor_finder = server.cursor_finder();
+    let (server_finder, client_finder) = (RecordingFinder::default(), RecordingFinder::default());
 
     let capture = RecordingCapture::default();
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -133,6 +139,7 @@ fn start_client_screen(
         screen: Box::new(|| PC),
         monitors: Box::new(Vec::new),
         game: detector(&server_game),
+        finder: Some(Arc::new(server_finder.clone())),
     }));
 
     let injected = RecordingInjector::default();
@@ -159,6 +166,7 @@ fn start_client_screen(
             screen: Box::new(move || screen.lock().unwrap().0),
             monitors: Box::new(move || monitors.lock().unwrap().1.clone()),
             game: detector(&client_game),
+            finder: Some(Arc::new(client_finder.clone())),
         },
         client_tx,
         client_transfers.clone(),
@@ -178,6 +186,9 @@ fn start_client_screen(
         server_transfers,
         client_transfers,
         sharing,
+        cursor_finder,
+        server_finder,
+        client_finder,
         server_task,
         client_task,
     }
@@ -788,6 +799,7 @@ async fn connection_quality_is_measured_on_both_sides() {
         screen: Box::new(|| PC),
         monitors: Box::new(Vec::new),
         game: Box::new(GameState::default),
+        finder: None,
     }));
     let (client_tx, mut client_rx) = tokio::sync::mpsc::unbounded_channel();
     let client_task = tokio::spawn(client::run_with_notices(
@@ -806,6 +818,7 @@ async fn connection_quality_is_measured_on_both_sides() {
             screen: Box::new(|| LAPTOP),
             monitors: Box::new(Vec::new),
             game: Box::new(GameState::default),
+            finder: None,
         },
         client_tx,
     ));
@@ -984,6 +997,7 @@ async fn an_older_client_stays_connected_and_gets_positions() {
         screen: Box::new(|| PC),
         monitors: Box::new(Vec::new),
         game: Box::new(GameState::default),
+        finder: None,
     }));
 
     // Ein Client wie Qross 0.5: Hello, Welcome, danach meldet er nie einen Spielemodus.
@@ -1054,6 +1068,7 @@ async fn client_reports_with(welcome_version: u16, injector: RecordingInjector) 
             screen: Box::new(|| LAPTOP),
             monitors: Box::new(Vec::new),
             game: Box::new(|| FULLSCREEN),
+            finder: None,
         },
     ));
 
@@ -1510,6 +1525,7 @@ async fn an_older_client_that_tries_anyway_is_refused_cleanly() {
         screen: Box::new(|| PC),
         monitors: Box::new(Vec::new),
         game: Box::new(GameState::default),
+        finder: None,
     }));
 
     // Ein Client wie Qross 0.6: Nach dem Welcome liest er den Control-Stream nicht mehr und kennt
@@ -1584,6 +1600,8 @@ fn start_typing(mode: KeyMode, injected: RecordingInjector) -> Setup {
     let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
     let server = Server::bind(config, &server_id, trust).unwrap().with_keys(keys).with_notices(notice_tx);
     let (addr, server_transfers, sharing) = (server.local_addr().unwrap(), server.transfers(), server.sharing());
+    let cursor_finder = server.cursor_finder();
+    let (server_finder, client_finder) = (RecordingFinder::default(), RecordingFinder::default());
 
     let capture = RecordingCapture::default();
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1596,6 +1614,7 @@ fn start_typing(mode: KeyMode, injected: RecordingInjector) -> Setup {
         screen: Box::new(|| PC),
         monitors: Box::new(Vec::new),
         game: detector(&server_game),
+        finder: None,
     }));
     let client_config = ClientConfig {
         name: "laptop".into(),
@@ -1617,6 +1636,7 @@ fn start_typing(mode: KeyMode, injected: RecordingInjector) -> Setup {
             screen: Box::new(|| LAPTOP),
             monitors: Box::new(Vec::new),
             game: detector(&client_game),
+            finder: None,
         },
         client_tx,
         client_transfers.clone(),
@@ -1635,6 +1655,9 @@ fn start_typing(mode: KeyMode, injected: RecordingInjector) -> Setup {
         server_transfers,
         client_transfers,
         sharing,
+        cursor_finder,
+        server_finder,
+        client_finder,
         server_task,
         client_task,
     }
@@ -1801,6 +1824,7 @@ async fn an_older_client_set_to_characters_gets_keys_it_can_read() {
         screen: Box::new(|| PC),
         monitors: Box::new(Vec::new),
         game: Box::new(GameState::default),
+        finder: None,
     }));
 
     // Ein Client wie Qross 0.6: Hello, Welcome, kein `TypesText`
@@ -1918,8 +1942,75 @@ async fn a_server_that_cannot_read_its_locks_keeps_sending_the_keys() {
     assert!(locks_injected(&s.injected).is_empty());
 }
 
+// ------------------------------------------------------------------ Cursor-Finder
+
+const BOTH: CursorFinder = CursorFinder { ring: true, name: true };
+const NAME_ONLY: CursorFinder = CursorFinder { ring: false, name: true };
+
+/// Zuletzt beim Client gemeldeter Cursor-Finder
+fn client_cursor_finder(s: &Setup) -> Option<CursorFinder> {
+    s.client_notices.lock().unwrap().iter().rev().find_map(|n| match n {
+        ClientNotice::CursorFinder(finder) => Some(*finder),
+        _ => None,
+    })
+}
+
+fn show(style: CursorFinder, name: &str) -> FinderCall {
+    FinderCall::Show { style, name: name.into() }
+}
+
+#[tokio::test]
+async fn the_cursor_finder_flashes_where_the_cursor_arrives() {
+    let s = start(true, None);
+    s.cursor_finder.set(BOTH);
+    wait_for("Cursor-Finder beim Client", || client_cursor_finder(&s) == Some(BOTH)).await;
+
+    enter_laptop(&s).await;
+    let client = s.client_finder.clone();
+    wait_for("Ring und Name auf dem Laptop", || client.shown() == [show(BOTH, "laptop")]).await;
+    assert_eq!(s.server_finder.calls(), [FinderCall::Hide], "der Server blendet beim Verlassen nur aus");
+
+    leave_laptop(&s).await;
+    let server = s.server_finder.clone();
+    wait_for("Ring und Name zurück auf dem Server", || server.shown() == [show(BOTH, "pc")]).await;
+    wait_for("auf dem Laptop ausgeblendet", || client.calls().last() == Some(&FinderCall::Hide)).await;
+
+    // Im Betrieb geändert: gilt sofort, ohne neue Verbindung
+    s.cursor_finder.set(NAME_ONLY);
+    wait_for("geänderter Cursor-Finder beim Client", || client_cursor_finder(&s) == Some(NAME_ONLY)).await;
+    reenter_laptop(&s).await;
+    wait_for("nur der Name", || client.shown().last() == Some(&show(NAME_ONLY, "laptop"))).await;
+
+    // Ausgeschaltet: nirgends mehr etwas
+    s.cursor_finder.set(CursorFinder::OFF);
+    wait_for("ausgeschaltet beim Client", || client_cursor_finder(&s) == Some(CursorFinder::OFF)).await;
+    leave_laptop(&s).await;
+    let capture = s.capture.clone();
+    wait_for("Rückkehr zum Server", || released(&capture)).await;
+    reenter_laptop(&s).await;
+    assert_eq!(client.shown().len(), 2, "{:?}", client.calls());
+    assert_eq!(server.shown().len(), 1, "{:?}", server.calls());
+
+    let notices = s.client_notices.lock().unwrap();
+    assert_eq!(notices.iter().filter(|n| matches!(n, ClientNotice::Connected { .. })).count(), 1, "keine neue Verbindung");
+}
+
+#[tokio::test]
+async fn the_cursor_finder_stays_off_by_default() {
+    let s = start(true, None);
+    wait_for("Rechte nach dem Verbinden", || client_sharing(&s).is_some()).await;
+    enter_laptop(&s).await;
+    leave_laptop(&s).await;
+    let capture = s.capture.clone();
+    wait_for("Rückkehr zum Server", || released(&capture)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(s.client_finder.shown().is_empty(), "{:?}", s.client_finder.calls());
+    assert!(s.server_finder.shown().is_empty(), "{:?}", s.server_finder.calls());
+    assert_eq!(client_cursor_finder(&s), None, "ausgeschaltet schickt der Server nichts");
+}
+
 /// So sah `Control` in Qross 0.7 aus.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[allow(dead_code)]
 enum ControlV07 {
     Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
@@ -1981,6 +2072,7 @@ async fn an_older_client_keeps_getting_lock_keys() {
         screen: Box::new(|| PC),
         monitors: Box::new(Vec::new),
         game: Box::new(GameState::default),
+        finder: None,
     }));
 
     // Ein Client wie Qross 0.7: Hello, Welcome, kein `SyncsLocks`
@@ -2039,5 +2131,71 @@ async fn an_older_client_keeps_getting_lock_keys() {
     );
     assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
     reader.abort();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn a_client_from_0_7_skips_the_cursor_finder_and_stays_connected() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let (server_id, client_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let server = Server::bind(config, &server_id, trust).unwrap().with_cursor_finder(BOTH);
+    let (addr, sharing, finder) = (server.local_addr().unwrap(), server.sharing(), server.cursor_finder());
+    let capture = RecordingCapture::default();
+    let server_finder = RecordingFinder::default();
+    let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(capture.clone()),
+        events: events_rx,
+        clipboard: Box::new(SharedClipboard::default()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+        finder: Some(Arc::new(server_finder.clone())),
+    }));
+
+    // Ein Client wie Qross 0.7: Er liest nach dem Welcome weiter und überspringt, was er nicht kennt.
+    let (_endpoint, conn) = connect_raw(addr, &client_id).await;
+    let (mut control, mut control_rx) = conn.open_bi().await.unwrap();
+    let screen = ScreenInfo { bounds: LAPTOP };
+    let hello = Control::Hello { version: PROTOCOL_VERSION, name: "laptop".into(), screen, platform: Platform::Linux };
+    write_frame(&mut control, &hello).await.unwrap();
+    let welcome = read_frame::<_, ControlV07>(&mut control_rx).await.unwrap();
+    assert!(matches!(welcome, Some(ControlV07::Welcome { version: SERVER_VERSION, .. })), "{welcome:?}");
+    let next = read_frame::<_, ControlV07>(&mut control_rx).await.unwrap();
+    assert_eq!(next, Some(ControlV07::Sharing(Sharing::ALL)));
+    let skipped = read_frame::<_, ControlV07>(&mut control_rx).await;
+    assert!(matches!(skipped, Err(FrameError::Codec(_))), "den Cursor-Finder kann er nicht lesen: {skipped:?}");
+
+    // Danach liest er weiter wie bisher: Änderungen der Rechte kommen an, die des Cursor-Finders überspringt er.
+    finder.set(NAME_ONLY);
+    let laptop = Sharing { clipboard: Share::ToClient, ..Sharing::ALL };
+    sharing.set(laptop_rules(laptop));
+    let mut seen = Vec::new();
+    while seen.len() < 2 {
+        match tokio::time::timeout(Duration::from_secs(5), read_frame::<_, ControlV07>(&mut control_rx)).await.unwrap() {
+            Ok(Some(message)) => seen.push(Ok(message)),
+            Err(FrameError::Codec(_)) => seen.push(Err(())),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(seen.contains(&Ok(ControlV07::Sharing(laptop))) && seen.contains(&Err(())), "{seen:?}");
+
+    // Er bleibt verbunden; der Cursor wechselt zu ihm und zurück, gezeigt wird nur auf dem Server.
+    let calls = capture.clone();
+    wait_for("Wechsel zum alten Client", || {
+        let _ = events.send(edge_hit());
+        calls.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    wait_for("Rückkehr zum Server", || released(&capture)).await;
+    let shown = server_finder.clone();
+    wait_for("Name auf dem Server", || shown.shown() == [show(NAME_ONLY, "pc")]).await;
+    assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
     server_task.abort();
 }

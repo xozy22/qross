@@ -227,6 +227,7 @@ async fn rig(test: &str) -> Rig {
         screen: Box::new(|| Rect::new(0, 0, 1920, 1080)),
         monitors: Box::new(Vec::new),
         game: Box::new(GameState::default),
+        finder: None,
     }));
     Rig {
         events,
@@ -257,6 +258,7 @@ impl Rig {
             screen: Box::new(|| Rect::new(0, 0, 1280, 800)),
             monitors: Box::new(Vec::new),
             game: Box::new(GameState::default),
+            finder: None,
         };
         let identity = Identity::load_or_create(&self.client_dir).unwrap();
         let task = tokio::spawn(client::run_with_system_events(
@@ -493,7 +495,9 @@ async fn a_vanished_client_is_dropped_after_the_idle_timeout() {
     let gone = Instant::now();
     let dropped = rig.server_drops(before, Duration::from_secs(15)).await;
     let took = report("Server hält verschwundenen Client", gone, Some(dropped));
-    assert!(took < Duration::from_millis(6000), "{took:?}");
+    // 5 s Zeitüberschreitung; jedes Keep-alive des Servers (1 s) startet sie neu, solange er seit dem
+    // letzten Empfang noch keins geschickt hat (RFC 9000, 10.1). Also rund 6 s, dazu etwas Luft.
+    assert!(took < Duration::from_millis(7000), "{took:?}");
 }
 
 /// Der Server wacht auf und seine Clients sind inzwischen weg: Er wirft sie hinaus, statt ihnen bis

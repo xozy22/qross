@@ -3,6 +3,7 @@
 
 pub mod chars;
 pub mod client;
+pub mod finder;
 pub mod input;
 pub mod keys;
 pub mod layout;

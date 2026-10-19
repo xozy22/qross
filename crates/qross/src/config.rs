@@ -8,7 +8,7 @@ use qross_core::keys::{parse_key_map, parse_switch_keys, Hotkey, KeyConfig, KeyM
 use qross_core::server::SwitchOptions;
 use qross_core::sharing::{Share, Sharing, SharingRules};
 use qross_core::LinkConfig;
-use qross_proto::DEFAULT_PORT;
+use qross_proto::{CursorFinder, DEFAULT_PORT};
 use serde::Deserialize;
 
 /// Inhalt von `qross.toml` auf dem Server.
@@ -34,6 +34,27 @@ pub struct ServerFile {
     pub game: GameSection,
     #[serde(default)]
     pub sharing: SharingSection,
+    #[serde(default)]
+    pub finder: FinderSection,
+}
+
+/// Abschnitt `[finder]`: der Cursor-Finder (Standard: aus). Er gilt für alle Rechner; Clients ab
+/// Qross 0.8 erfahren ihn vom Server.
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FinderSection {
+    /// Beim Wechsel einen Ring um den Cursor zeigen
+    #[serde(default)]
+    pub ring: bool,
+    /// Beim Wechsel den Namen des Rechners zeigen
+    #[serde(default)]
+    pub name: bool,
+}
+
+impl FinderSection {
+    pub fn style(&self) -> CursorFinder {
+        CursorFinder { ring: self.ring, name: self.name }
+    }
 }
 
 /// Abschnitt `[sharing]`: Rechte je Rechner. Die Werte direkt darunter gelten für jeden Rechner,
@@ -255,6 +276,18 @@ mod tests {
         assert_eq!(keys.options.media, MediaKeys::Active);
         assert_eq!(keys.remap["laptop"].len(), 1, "Beispiel: Alt und Windows-Taste am Mac");
         assert!(file.game.enabled);
+        assert_eq!(file.finder.style(), CursorFinder::OFF, "Beispiel: Cursor-Finder aus");
+    }
+
+    #[test]
+    fn the_cursor_finder_is_off_unless_switched_on() {
+        let file: ServerFile = toml::from_str("name = \"pc\"").unwrap();
+        assert_eq!(file.finder.style(), CursorFinder::OFF);
+        let file: ServerFile = toml::from_str("[finder]\nring = true").unwrap();
+        assert_eq!(file.finder.style(), CursorFinder { ring: true, name: false });
+        let file: ServerFile = toml::from_str("[finder]\nring = true\nname = true").unwrap();
+        assert_eq!(file.finder.style(), CursorFinder { ring: true, name: true });
+        assert!(toml::from_str::<ServerFile>("[finder]\nnamen = true").is_err(), "Tippfehler fallen auf");
     }
 
     #[test]

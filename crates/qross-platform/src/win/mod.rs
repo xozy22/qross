@@ -2,6 +2,7 @@ mod capture;
 mod clipboard;
 mod cursor;
 mod dnd;
+mod finder;
 mod game;
 mod inject;
 mod layout;
@@ -59,6 +60,10 @@ pub fn monitors() -> Vec<Rect> {
     // Ohne Gerätekontext liefert der Rückruf je Monitor dessen Rechteck im virtuellen Desktop.
     unsafe { EnumDisplayMonitors(null_mut(), null(), Some(collect), &mut list as *mut Vec<Rect> as LPARAM) };
     list
+}
+
+pub fn finder_overlay() -> Option<std::sync::Arc<dyn crate::FinderOverlay>> {
+    Some(std::sync::Arc::new(crate::finder::Overlay::new(finder::surface)))
 }
 
 /// Mitte des primären Monitors (liegt garantiert auf einem Bildschirm).

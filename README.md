@@ -79,6 +79,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Dateiübertragungen: Fortschritt, Rate und Restzeit, Abbrechen auf beiden Seiten | ✔ | ✔ | ✔ | ✔¹ |
 | Rechte je Rechner: Zwischenablage, kopierte Dateien, Drag & Drop je Richtung erlauben oder sperren | ✔ | ✔ | ✔ | ✔¹ |
 | Server: [„Sichere Tastatureingabe“](#macos-sichere-tastatureingabe) erkennen, Hinweis, Cursor bleibt auf dem Mac | entfällt | entfällt | entfällt | ✔¹ |
+| Cursor-Finder: beim Wechsel Ring um den Cursor und Name des Rechners⁶ | ✔ | ✔ mit Compositor | – (keine Fenster über anderen Programmen möglich) | ✔ in der App¹ |
 | Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
 | Profile je Ort, automatisch nach Netzwerk (Gateway, ohne Zusatzrechte)⁴ | ✔ mit Netzwerkname | ✔, Name über NetworkManager | ✔ wie X11 | ✔ ohne WLAN-Namen¹ |
 | [Autostart](docs/autostart.md) bei der Anmeldung, unsichtbar im Tray⁵ | ✔ `HKCU\…\Run` | ✔ XDG-Autostart | ✔ XDG-Autostart | ✔ LaunchAgent¹ |
@@ -104,6 +105,10 @@ geprüft.
 wird. Die CI schreibt, prüft und entfernt auf allen drei Systemen einen echten Eintrag, unter Windows auch
 lokal geprüft; den Start bei der Anmeldung selbst prüft kein Test. Ohne Oberfläche: `qross` als
 systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autostart.md).
+⁶ Standard aus. Am Server eingestellt, gilt für alle Rechner (Clients ab Qross 0.8); nicht über Programmen im
+Vollbild. Unter Wayland lassen sich keine Fenster über andere Programme legen, dort zeigt der Rechner selbst
+nichts. Unter macOS braucht das Fenster die Ereignisschleife der App; `qross` auf der Kommandozeile zeigt dort
+nichts. Unter Windows echt geprüft, macOS und X11 nur gebaut und mit Clippy geprüft.
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
@@ -113,8 +118,8 @@ systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autost
   Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Abgleich von Feststelltaste,
   Num und Rollen samt Gegenstellen aus 0.7, Rechte je Rechner für jede
   Art und Richtung samt sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene
-  vertrauliche Inhalte, Ablehnung unbekannter Clients, LAN-Suche, Zurückholen und Halten des Cursors bei
-  sicherer Tastatureingabe).
+  vertrauliche Inhalte, Cursor-Finder samt sofortiger Änderung und Clients aus 0.7, Ablehnung unbekannter
+  Clients, LAN-Suche, Zurückholen und Halten des Cursors bei sicherer Tastatureingabe).
 - macOS, sichere Tastatureingabe: Die CI schaltet sie im Test selbst ein, erkennt sie samt Prozess und schaltet
   sie wieder aus. Mit einem echten Passwortfeld oder Terminal ist es noch nicht geprüft.
 - Windows-Tastaturlayouts: echter Test mit dem deutschen und dem US-Layout (AltGr, tote Tasten, Kürzel), soweit
@@ -152,6 +157,10 @@ systemd-Dienst, LaunchAgent oder geplante Aufgabe, siehe [Autostart](docs/autost
   Drag & Drop – senden und empfangen, nur empfangen, nur senden oder aus. Was ein Client sendet, erreicht über
   den Server auch andere Rechner, soweit sie es empfangen dürfen. Der Server setzt das selbst durch, auch bei
   älteren Clients; Änderungen gelten sofort.
+- **Cursor-Finder** (Einstellungen → Allgemein bzw. `[finder]`, Standard aus): Beim Wechsel blitzt auf dem
+  Rechner, auf dem der Cursor ankommt, etwa eine Sekunde lang ein Ring um den Cursor auf und darunter sein Name;
+  beides einzeln schaltbar. Eingestellt wird am Server, er gibt es an alle Clients weiter. „Ausprobieren“ zeigt
+  es sofort. Die Anzeige lässt Klicks hindurch und erscheint nicht über Programmen im Vollbild.
 - **Zeichen statt Tastenposition** (je Rechner, Einstellungen → Tastatur bzw. `[keys.mode]`): Standard ist die
   Tastenposition, dort bestimmt das eigene Layout das Zeichen. Auf „Zeichen“ kommt an, was du auf dem Server
   tippst, auch bei anderem Layout (z. B. Server Deutsch, Mac US): Y und Z, Umlaute, @, €, Klammern, ^ und ´.
@@ -303,6 +312,8 @@ Hinweise:
   Tastenposition). Tastennamen wie `KeyboardEvent.code` im Browser.
 - `[game] enabled` in `qross.toml` (Standard `true`) schaltet den Spielemodus; `qross client --no-game-mode`
   meldet dem Server nie, dass auf dem Client etwas im Vollbild läuft.
+- `[finder]` in `qross.toml`: `ring` und `name` (Standard je `false`) schalten den Cursor-Finder für alle Rechner;
+  die Clients erfahren es vom Server.
 - `[sharing]` in `qross.toml`: `clipboard`, `files` und `drag` je `"both"` (Standard), `"to-client"`,
   `"from-client"` oder `"off"` für alle Rechner, `[sharing.clients.<rechner>]` für einzelne. Fehlende Angaben
   übernimmt ein Rechner aus `[sharing]`.
