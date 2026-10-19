@@ -1236,6 +1236,77 @@ async fn dragged_files_report_progress_and_the_receiver_can_cancel() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Drag vom Server zum Client starten: gedrückte Taste an der Kante, Prüfung findet `source`
+async fn drag_to_laptop(s: &Setup, source: PathBuf) -> u64 {
+    let held = CaptureEvent::EdgeHit { edge: Edge::Right, x: 1919, y: 540, buttons_down: true };
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Drag-Prüfung", || {
+        let _ = events.send(held.clone());
+        capture.0.lock().unwrap().contains(&CaptureCall::ProbeDrag { x: 1919, y: 540 })
+    })
+    .await;
+    s.events.send(CaptureEvent::DragProbeResult { files: vec![source] }).unwrap();
+    let sending = wait_for_progress("Fortschritt beim Server", || server_progress(s), running(Direction::Sending)).await;
+    let id = sending.transfer;
+    wait_for_progress("Fortschritt beim Client", || client_progress(s), |p| p.transfer == id && running(Direction::Receiving)(p))
+        .await;
+    id
+}
+
+#[tokio::test]
+async fn the_server_can_cancel_a_drag_to_the_client() {
+    let s = start(true, None);
+    let base = std::env::temp_dir().join(format!("qross-abbruch-server-drag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let name = "abbrechen-vom-server.bin";
+    let source = big_file(&base.join("quelle"), name);
+    let target = base.join("ziel");
+    std::fs::create_dir_all(&target).unwrap();
+    *s.injected.1.lock().unwrap() = Some(target.clone());
+    let id = drag_to_laptop(&s, source).await;
+
+    // Der Sender bricht ab, der Empfänger erfährt es über den zurückgesetzten Stream.
+    assert!(s.server_transfers.cancel(Direction::Sending, id));
+    wait_for_progress("Abbruch beim Server", || server_progress(&s), ended(id, Phase::Cancelled { by_peer: false })).await;
+    wait_for_progress("Abbruch beim Client", || client_progress(&s), ended(id, Phase::Cancelled { by_peer: true })).await;
+
+    // Loslassen über dem Ordner legt nichts mehr ab.
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+    wait_for("aufgeräumtes Staging", || drag_leftovers(id, name).is_empty()).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "Zielordner bleibt leer");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn going_back_to_the_server_without_dropping_discards_the_drag() {
+    let s = start(true, None);
+    let base = std::env::temp_dir().join(format!("qross-zurueck-ohne-ablegen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let name = "zurueck-ohne-ablegen.bin";
+    let source = big_file(&base.join("quelle"), name);
+    let target = base.join("ziel");
+    std::fs::create_dir_all(&target).unwrap();
+    *s.injected.1.lock().unwrap() = Some(target.clone());
+    let id = drag_to_laptop(&s, source).await;
+
+    // Mit weiter gedrückter Taste zurück über die Kante zum Server
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("Rückkehr zum Server", || released(&capture)).await;
+    wait_for_progress("Verworfen beim Client", || client_progress(&s), ended(id, Phase::Cancelled { by_peer: false })).await;
+    wait_for("aufgeräumtes Staging", || drag_leftovers(id, name).is_empty()).await;
+
+    // Losgelassen wird jetzt auf dem Server; beim Client kommt nichts mehr an.
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "Zielordner bleibt leer");
+    let log = s.injected.0.lock().unwrap().clone();
+    assert!(!log.iter().any(|i| matches!(i, Inject::Button { .. })), "keine Taste beim Client: {log:?}");
+    assert!(drag_leftovers(id, name).is_empty(), "{:?}", drag_leftovers(id, name));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[tokio::test]
 async fn copied_files_report_progress_and_the_sender_can_cancel() {
     let mut s = start(true, None);

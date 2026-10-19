@@ -4,6 +4,11 @@
 //! Gibt es keine, oder ist gerade eine Zusatztaste gedrückt, belegt Qross einen freien Keycode
 //! vorübergehend mit dem Zeichen (wie `xdotool type`). Die zuletzt benutzten Zeichen bleiben dort
 //! liegen, damit nicht jeder Tastendruck die Belegung ändert; beim Beenden räumt Qross sie ab.
+//!
+//! Drag & Drop zum Server: Zieht der Nutzer hier Dateien an die Kante, liest der Client sie aus dem
+//! laufenden XDND-Ziehen und bricht es mit Esc ab (siehe `xdnd`).
+
+use std::path::PathBuf;
 
 use anyhow::Result;
 use qross_core::Inject;
@@ -21,6 +26,7 @@ use x11rb::{CURRENT_TIME, NONE};
 
 use super::keymap::Keymap;
 use super::locks::LockMasks;
+use super::xdnd::{self, DragState};
 use crate::keymap_linux::{evdev_from_hid, keysym_from_char, X11_OFFSET};
 use crate::Injector;
 
@@ -47,6 +53,8 @@ pub struct X11Injector {
     typed: Vec<(char, u8)>,
     /// Feststelltaste und Num (ohne XKB: `None`)
     locks: Option<LockMasks>,
+    /// Laufendes XDND-Ziehen erkennen; angelegt beim ersten Drücken der linken Maustaste
+    drag: Option<DragState>,
 }
 
 impl X11Injector {
@@ -68,6 +76,7 @@ impl X11Injector {
             modifiers: 0,
             typed: Vec::new(),
             locks,
+            drag: None,
         })
     }
 
@@ -210,6 +219,24 @@ impl Injector for X11Injector {
         self.locks.is_some()
     }
 
+    fn drop_folder(&mut self, x: i32, y: i32) -> Option<PathBuf> {
+        super::desktop::folder_at(&self.conn, self.root, x, y)
+    }
+
+    fn take_dragged_files(&mut self, _x: i32, _y: i32) -> Vec<PathBuf> {
+        // Nur ein Ziehen, das nach dem Drücken der Taste begonnen hat, zählt.
+        let Some(drag) = self.drag.as_mut() else { return Vec::new() };
+        if !drag.take() {
+            return Vec::new();
+        }
+        let files = drag.files();
+        if !files.is_empty() {
+            // Esc bricht das Ziehen ab – die Dateien wandern stattdessen zum Server.
+            xdnd::tap_escape(&self.conn, self.root);
+        }
+        files
+    }
+
     fn inject(&mut self, event: &Inject) {
         match *event {
             Inject::MoveTo { x, y } => {
@@ -225,6 +252,14 @@ impl Injector for X11Injector {
                 }
             }
             Inject::Button { button, down } => {
+                if button == MouseButton::Left {
+                    let drag = self.drag.get_or_insert_with(DragState::new);
+                    if down {
+                        drag.press();
+                    } else {
+                        drag.release();
+                    }
+                }
                 let detail = match button {
                     MouseButton::Left => 1,
                     MouseButton::Middle => 2,

@@ -4,6 +4,7 @@
 
 pub mod clipformat;
 pub mod concealed;
+pub mod dnd_logic;
 pub mod dryrun;
 pub mod finder;
 pub mod keymap_linux;
@@ -77,7 +78,8 @@ pub trait Capture: Send + Sync {
     /// Dateien vom Client sind unterwegs: Das nächste Loslassen einer Maustaste hier als
     /// `CaptureEvent::LocalDrop` melden. Ohne Unterstützung bleiben sie liegen, bis der Cursor wechselt.
     fn await_local_drop(&self) {}
-    /// Ordner zum Ablegen an (x, y), z. B. das Explorer-Fenster darunter; `None`: „Downloads“.
+    /// Ordner zum Ablegen an (x, y), z. B. das Explorer- bzw. Finder-Fenster oder der Schreibtisch
+    /// darunter; `None`: „Downloads“.
     fn drop_folder(&self, _x: i32, _y: i32) -> Option<PathBuf> {
         None
     }
@@ -111,8 +113,9 @@ pub trait Injector: Send {
     fn syncs_locks(&self) -> bool {
         false
     }
-    /// Ordner, in dem an (x, y) abgelegte Dateien landen sollen – z. B. das Explorer-Fenster oder
-    /// der Desktop unter dem Cursor. `None`: keine passende Ablage, die Laufzeit nimmt „Downloads“.
+    /// Ordner, in dem an (x, y) abgelegte Dateien landen sollen – z. B. das Explorer- bzw.
+    /// Finder-Fenster oder der Schreibtisch unter dem Cursor. `None`: keine passende Ablage, die
+    /// Laufzeit nimmt „Downloads“.
     fn drop_folder(&mut self, _x: i32, _y: i32) -> Option<PathBuf> {
         None
     }
@@ -368,6 +371,19 @@ pub fn clipboard() -> Box<dyn Clipboard> {
 pub fn folder_at(x: i32, y: i32) -> Option<PathBuf> {
     injector().ok()?.drop_folder(x, y)
 }
+
+/// Diagnose: wie [`folder_at`], dazu jeder Schritt der Suche als Text (Fensterliste, Elemente des
+/// Finder-Fensters). Nur am Mac.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn trace_folder_at(x: i32, y: i32) -> (Option<PathBuf>, Vec<String>) {
+    mac::trace_folder_at(x, y)
+}
+
+/// Nur für Tests: die Drag-Erkennung des Mac-Servers, ohne Event-Tap (der braucht Rechte).
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use mac::DragWatch;
 
 /// Diagnose: aktueller Ordner eines Explorer-Fensters (Windows-Fensterhandle).
 #[cfg(windows)]

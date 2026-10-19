@@ -67,9 +67,9 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Dateien kopieren und einfügen, in beide Richtungen | ✔ Explorer | ✔ Dateimanager mit `text/uri-list` (Nautilus, Dolphin) | wie Zwischenablage | ✔ Finder¹ |
 | Passwörter nicht teilen: was Passwortmanager als vertraulich markieren, bleibt auf dem Rechner | ✔ Formate für Verlauf, Cloud und Zwischenablage-Programme | ✔ `x-kde-passwordManagerHint` (KeePassXC) | wie Zwischenablage | ✔ `ConcealedType`, `TransientType`¹ |
 | Cursor auf dem Server ausblenden | ✔ | ✔ | Sache des Compositors | soweit macOS es zulässt¹ |
-| Drag & Drop **vom Server** ziehen | ✔ | – | – | – |
-| Drag & Drop **vom Client** zum Server ziehen | ✔ Explorer | – | – | ✔ Finder¹ |
-| Gezogene Dateien **ablegen** | ✔ Explorer/Desktop unter dem Cursor | ✔ in `~/Downloads/Qross` | Client: in `~/Downloads/Qross` | ✔ in `~/Downloads/Qross`¹ |
+| Drag & Drop **vom Server** ziehen⁸ | ✔ | ✔ Dateimanager (XDND) | – | ✔ Finder¹ |
+| Drag & Drop **vom Client** zum Server ziehen⁸ | ✔ Explorer | ✔ Dateimanager (XDND) | – | ✔ Finder¹ |
+| Gezogene Dateien **ablegen**⁸ | ✔ Explorer-Fenster oder Desktop unter dem Cursor | ✔ Schreibtisch unter dem Cursor, sonst `~/Downloads/Qross` | Client: in `~/Downloads/Qross` | ✔ Finder-Fenster oder Schreibtisch unter dem Cursor¹ |
 | Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | Fang-Taste nur, solange der Cursor auf einem Client ist | ✔¹ ² |
 | Zeichen statt Tastenposition je Rechner: anderes Tastaturlayout, tote Tasten, AltGr | ✔ | ✔ | – (bleibt Tastenposition) | ✔¹ |
 | Feststelltaste, Num und Rollen auf allen Rechnern gleich (Stand des Servers) | ✔ alle drei | ✔ Feststelltaste, Num | Client: per Tastendruck, so gut der Compositor seinen Stand meldet; Server: – | ✔ Feststelltaste¹ |
@@ -123,19 +123,27 @@ Gegenstellen im Test; unter Windows echt das Erkennen und „keiner eingerichtet
 Systemschnittstelle (der Testrechner lief per Remotedesktop). Ob ein Client sich sperrt, folgt aus dem
 Verhalten der Systeme, auf echter Hardware ist es noch nicht geprüft; macOS ist nur übersetzt, Linux nur gegen
 Xvfb getestet.
+⁸ Abgelegt wird im Ordner unter dem Cursor: der Ordner, den ein Explorer- bzw. Finder-Fenster zeigt, oder der
+Schreibtisch; sonst in `Downloads/Qross`. Direkt in ein Programm, etwa als Anhang in eine E-Mail, legt Qross auf
+keinem System ab. Den Ordner eines Finder-Fensters liest Qross über die Bedienungshilfen aus Titel, Pfadleiste
+und den sichtbaren Einträgen; in einer Suche, in „Zuletzt benutzt“ oder AirDrop gibt es keinen, dann gilt
+`Downloads/Qross`. Unter X11 erkennt Qross nur den Schreibtisch (Fenstertyp `_NET_WM_WINDOW_TYPE_DESKTOP`, etwa
+von xfdesktop, Plasma, Nemo oder Caja): Dateimanager verraten nicht verlässlich, welchen Ordner ein Fenster
+zeigt. Unter Wayland sieht kein Programm fremde Drag-&-Drop-Vorgänge oder das Fenster unter dem Cursor, und kein
+Desktop-Portal bietet das an; InputCapture meldet an der Kante nicht einmal, ob eine Taste gedrückt ist.
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
   (Wechsel, Eingaben, Zwischenablage mit Text, HTML und Bildern, Drag & Drop mit 8 MB und Ordnern, kopierte
   Dateien und Ordner in beide Richtungen, Drag & Drop zum Server, Fortschritt und Abbrechen von Sender und
-  Empfänger, mehrere Monitore je Client, Messwerte der Verbindungsqualität, Verzögerung der Eingabekette samt
-  Uhrenversatz und Gegenstellen aus 0.7, Spielemodus samt Gegenstellen aus 0.5,
-  Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Abgleich von Feststelltaste,
-  Num und Rollen samt Gegenstellen aus 0.7, Rechte je Rechner für jede
-  Art und Richtung samt sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene
-  vertrauliche Inhalte, Cursor-Finder samt sofortiger Änderung und Clients aus 0.7, Bildschirmschoner samt Ende
-  durch Eingaben für einen Client, Sperren und Gegenstellen aus 0.7, Ablehnung unbekannter Clients, LAN-Suche,
-  Zurückholen und Halten des Cursors bei sicherer Tastatureingabe).
+  Empfänger, Rückkehr mit gedrückter Taste ohne Ablegen, mehrere Monitore je Client, Messwerte der
+  Verbindungsqualität, Verzögerung der Eingabekette samt Uhrenversatz und Gegenstellen aus 0.7, Spielemodus samt
+  Gegenstellen aus 0.5, Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Abgleich
+  von Feststelltaste, Num und Rollen samt Gegenstellen aus 0.7, Rechte je Rechner für jede Art und Richtung samt
+  sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene vertrauliche Inhalte,
+  Cursor-Finder samt sofortiger Änderung und Clients aus 0.7, Bildschirmschoner samt Ende durch Eingaben für einen
+  Client, Sperren und Gegenstellen aus 0.7, Ablehnung unbekannter Clients, LAN-Suche, Zurückholen und Halten des
+  Cursors bei sicherer Tastatureingabe).
 - macOS, sichere Tastatureingabe: Die CI schaltet sie im Test selbst ein, erkennt sie samt Prozess und schaltet
   sie wieder aus. Mit einem echten Passwortfeld oder Terminal ist es noch nicht geprüft.
 - Windows-Tastaturlayouts: echter Test mit dem deutschen und dem US-Layout (AltGr, tote Tasten, Kürzel), soweit
@@ -145,7 +153,11 @@ Xvfb getestet.
 - Feststelltaste und Num unter Windows: echt umgeschaltet und zurückgestellt (`SendInput`, `GetKeyState`),
   solange der Rechner nicht gesperrt ist. Unter X11 setzt und liest der X11-Test sie. macOS
   (`IOHIDSetModifierLockState`) ist nur übersetzt, nicht auf einem echten Mac geprüft.
-- Linux: echte Tests gegen einen X-Server (Xvfb in Docker).
+- Linux: echte Tests gegen einen X-Server (Xvfb in Docker und in der CI), darunter Drag & Drop mit einer
+  nachgebauten ziehenden Anwendung (XDND, Zeiger- und Tastatur-Grab, Abbruch mit Esc) und der Schreibtisch unter
+  dem Cursor. Mit echten Dateimanagern ist das Ziehen noch nicht geprüft.
+- macOS: Drag-Erkennung gegen die echte Drag-Zwischenablage in der CI. Den Ordner eines Finder-Fensters prüft die
+  CI nur, wenn sie das Recht „Bedienungshilfen“ hat; echtes Ziehen im Finder ist noch nicht geprüft.
 - Wayland: Einspeisen über libei gegen eine EIS-Gegenstelle im Test und gegen mutter ohne Bildschirm
   (eigener CI-Job, noch experimentell). Portal, Freigabe-Dialog und Erfassen sind nur übersetzt, nicht
   auf einem echten Desktop geprüft.

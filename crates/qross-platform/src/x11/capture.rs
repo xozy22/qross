@@ -18,6 +18,10 @@
 //!
 //! Feststelltaste und Num schaltet der X-Server auch während des Grabs um; nach jedem Druck liest
 //! die Erfassung den Stand und meldet Änderungen (`CaptureEvent::Locks`).
+//!
+//! Drag & Drop zum Client: Mit gedrückter Taste an der Kante prüft der Server, ob seit dem Drücken ein
+//! XDND-Ziehen mit Dateien begonnen hat (siehe `xdnd`). Dann bricht Esc es ab; das ziehende Programm
+//! gibt seinen Zeiger-Grab frei, und erst danach kann die Erfassung selbst greifen.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +48,7 @@ use x11rb::{CURRENT_TIME, NONE};
 
 use super::keymap::Keymap;
 use super::locks::LockMasks;
+use super::xdnd::{self, DragState};
 use crate::keymap_linux::{evdev_from_hid, hid_from_evdev, X11_OFFSET};
 use crate::Capture;
 
@@ -56,6 +61,8 @@ const SHIFT: [u16; 2] = [42, 54];
 const ANY_BUTTON_MASK: u16 = 0x1F00;
 /// Ohne XInput 2.1: so oft fragt die Erfassung im lokalen Modus die Zeigerposition ab
 const POLL: Duration = Duration::from_millis(4);
+/// So lange wartet der Wechsel höchstens, bis ein abgebrochenes Ziehen Zeiger und Tastatur freigibt
+const DRAG_RELEASE_WAIT: Duration = Duration::from_millis(500);
 
 struct Shared {
     conn: RustConnection,
@@ -74,6 +81,10 @@ struct Shared {
     await_drop: AtomicBool,
     /// Feststelltaste und Num (ohne XKB: `None`)
     locks: Option<LockMasks>,
+    /// Laufendes XDND-Ziehen erkennen
+    drag: Mutex<DragState>,
+    /// Zeitpunkt, zu dem zuletzt ein lokales Ziehen abgebrochen wurde
+    drag_cancelled: Mutex<Option<Instant>>,
 }
 
 /// Feststell- und Num-Taste sollen die Kürzel nicht verhindern.
@@ -153,6 +164,8 @@ pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> 
         grabbed: Mutex::new(Vec::new()),
         await_drop: AtomicBool::new(false),
         locks,
+        drag: Mutex::new(DragState::new()),
+        drag_cancelled: Mutex::new(None),
     });
     // Nicht als Zwischenwert: Sein Drop würde die Schleife gleich wieder beenden.
     let capture = X11Capture(shared.clone());
@@ -231,22 +244,65 @@ impl Capture for X11Capture {
         self.0.read_locks()
     }
 
+    fn probe_drag(&self, _x: i32, _y: i32) {
+        let s = &self.0;
+        if !s.drag.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = s.events.send(CaptureEvent::DragProbeResult { files: Vec::new() });
+            return;
+        }
+        // Die Dateiliste kommt vom ziehenden Programm und kann etwas dauern.
+        let shared = s.clone();
+        thread::spawn(move || {
+            let files = shared.drag.lock().unwrap_or_else(|e| e.into_inner()).files();
+            if !files.is_empty() {
+                tracing::info!("{} Datei(en) werden über die Kante gezogen", files.len());
+            }
+            let _ = shared.events.send(CaptureEvent::DragProbeResult { files });
+        });
+    }
+
+    fn cancel_local_drag(&self) {
+        xdnd::tap_escape(&self.0.conn, self.0.root);
+        *self.0.drag_cancelled.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    }
+
+    fn drop_folder(&self, x: i32, y: i32) -> Option<std::path::PathBuf> {
+        super::desktop::folder_at(&self.0.conn, self.0.root, x, y)
+    }
+
     fn capture_remote(&self) {
         let s = &self.0;
-        let mask = EventMask::POINTER_MOTION | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE;
-        let pointer = s
-            .conn
-            .grab_pointer(false, s.root, mask, GrabMode::ASYNC, GrabMode::ASYNC, s.root, s.blank, CURRENT_TIME)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .map(|r| r.status);
-        let keyboard = s
-            .conn
-            .grab_keyboard(false, s.root, CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .map(|r| r.status);
-        if pointer != Some(GrabStatus::SUCCESS) || keyboard != Some(GrabStatus::SUCCESS) {
+        let grab = || {
+            let mask = EventMask::POINTER_MOTION | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE;
+            let pointer = s
+                .conn
+                .grab_pointer(false, s.root, mask, GrabMode::ASYNC, GrabMode::ASYNC, s.root, s.blank, CURRENT_TIME)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .map(|r| r.status);
+            let keyboard = s
+                .conn
+                .grab_keyboard(false, s.root, CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .map(|r| r.status);
+            (pointer, keyboard)
+        };
+        let ok = |(pointer, keyboard)| pointer == Some(GrabStatus::SUCCESS) && keyboard == Some(GrabStatus::SUCCESS);
+        let mut status = grab();
+        // Nach einem abgebrochenen Ziehen hält das ziehende Programm Zeiger und Tastatur, bis es das Esc
+        // verarbeitet hat – meist wenige Millisekunden.
+        let cancelled = s.drag_cancelled.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if cancelled.is_some_and(|at| at.elapsed() < Duration::from_secs(2)) {
+            let deadline = Instant::now() + DRAG_RELEASE_WAIT;
+            while !ok(status) && Instant::now() < deadline {
+                s.ungrab();
+                thread::sleep(Duration::from_millis(10));
+                status = grab();
+            }
+        }
+        let (pointer, keyboard) = status;
+        if !ok(status) {
             // Ein anderes Programm hält gerade einen Grab (z. B. ein offenes Menü): nicht wechseln.
             tracing::warn!("Eingaben lassen sich gerade nicht abfangen (Zeiger: {pointer:?}, Tastatur: {keyboard:?})");
             s.ungrab();
@@ -285,6 +341,8 @@ fn run(s: &Shared) -> Result<()> {
     let mut was_remote = false;
     // Zuletzt gemeldeter Stand der Sperrtasten (Remote-Modus)
     let mut locks = LockState::default();
+    // Maustasten bei der letzten Abfrage im lokalen Modus
+    let mut buttons_before = false;
     // Belegung für den Zeichenmodus; ohne sie bleibt es bei Tastenpositionen
     let mut keymap = Keymap::fetch(&s.conn).map_err(|e| tracing::warn!("Tastaturbelegung nicht lesbar: {e:#}")).ok();
     let raw = listen_raw(&s.conn, s.root)
@@ -319,7 +377,7 @@ fn run(s: &Shared) -> Result<()> {
                 Some(event) => event,
                 None if !remote && check => {
                     check = false;
-                    check_pointer(s, &mut size, &mut size_checked)?;
+                    check_pointer(s, &mut size, &mut size_checked, &mut buttons_before)?;
                     continue;
                 }
                 None if !remote && !raw => {
@@ -428,8 +486,9 @@ fn run(s: &Shared) -> Result<()> {
     }
 }
 
-/// Lokal: Zeigerposition abfragen, Kanten und das Ablegen von Dateien vom Client melden
-fn check_pointer(s: &Shared, size: &mut (u16, u16), size_checked: &mut Instant) -> Result<()> {
+/// Lokal: Zeigerposition abfragen, Kanten und das Ablegen von Dateien vom Client melden, Beginn und
+/// Ende eines Tastendrucks für die Erkennung eines XDND-Ziehens merken
+fn check_pointer(s: &Shared, size: &mut (u16, u16), size_checked: &mut Instant, buttons_before: &mut bool) -> Result<()> {
     if size_checked.elapsed() > Duration::from_secs(1) {
         *size = super::root_size(&s.conn, s.root)?;
         *size_checked = Instant::now();
@@ -437,6 +496,16 @@ fn check_pointer(s: &Shared, size: &mut (u16, u16), size_checked: &mut Instant) 
     let pointer = s.conn.query_pointer(s.root)?.reply()?;
     let (x, y) = (i32::from(pointer.root_x), i32::from(pointer.root_y));
     let buttons = u16::from(pointer.mask) & ANY_BUTTON_MASK != 0;
+    if buttons != *buttons_before {
+        // Ein Ziehen beginnt erst nach dem Drücken; hier den Stand von XdndSelection merken.
+        let mut drag = s.drag.lock().unwrap_or_else(|e| e.into_inner());
+        if buttons {
+            drag.press();
+        } else {
+            drag.release();
+        }
+        *buttons_before = buttons;
+    }
     if !buttons && s.await_drop.swap(false, Ordering::AcqRel) {
         // Dateien vom Client: hier losgelassen = hier ablegen
         let _ = s.events.send(CaptureEvent::LocalDrop { x, y });

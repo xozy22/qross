@@ -2,10 +2,12 @@
 //! läuft über die Desktop-Portale im Modul `wayland`.
 
 mod capture;
+mod desktop;
 mod finder;
 mod inject;
 mod keymap;
 mod locks;
+mod xdnd;
 
 use std::sync::{Arc, Mutex, OnceLock};
 

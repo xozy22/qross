@@ -8,6 +8,7 @@
 mod capture;
 mod drag;
 mod finder;
+mod finder_folder;
 mod game;
 mod inject;
 mod layout;
@@ -29,6 +30,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::arboard_clipboard::ArboardClipboard;
 use crate::{Capture, Clipboard, FinderOverlay, Injector, Permission};
 
+pub use drag::DragWatch;
+pub use finder_folder::trace_folder_at;
 pub use game::game_state;
 pub(crate) use pasteboard::concealed;
 pub use permissions::{granted as has_permission, request as request_permission};

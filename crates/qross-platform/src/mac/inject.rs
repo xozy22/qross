@@ -13,6 +13,7 @@ use core_graphics::geometry::CGPoint;
 use qross_core::Inject;
 use qross_proto::MouseButton;
 
+use super::drag::DragWatch;
 use super::layout;
 
 use crate::keymap_mac::mac_from_hid;
@@ -29,8 +30,8 @@ pub struct MacInjector {
     /// Letzter Klick: Taste, Zeitpunkt, Zähler (für Doppel-/Dreifachklick)
     last_click: Option<(MouseButton, Instant, i64)>,
     wheel_rest: (i32, i32),
-    /// Stand der Drag-Zwischenablage beim Drücken der linken Maustaste
-    drag_mark: Option<isize>,
+    /// Erkennt einen Drag, der nach dem Drücken der linken Maustaste begonnen hat
+    drag: DragWatch,
 }
 
 // SAFETY: Der Injector wird einmal in den Einspeise-Thread verschoben und nur dort benutzt.
@@ -51,7 +52,7 @@ impl MacInjector {
             flags: CGEventFlags::CGEventFlagNull,
             last_click: None,
             wheel_rest: (0, 0),
-            drag_mark: None,
+            drag: DragWatch::new(),
         })
     }
 
@@ -126,17 +127,16 @@ impl Injector for MacInjector {
         true
     }
 
+    fn drop_folder(&mut self, x: i32, y: i32) -> Option<std::path::PathBuf> {
+        super::finder_folder::folder_at(x, y)
+    }
+
     fn take_dragged_files(&mut self, _x: i32, _y: i32) -> Vec<std::path::PathBuf> {
         // Nur ein Drag, der nach dem Drücken der Taste begonnen hat, zählt.
-        let Some(mark) = self.drag_mark.filter(|_| self.buttons[MouseButton::Left as usize]) else { return Vec::new() };
-        if super::drag::change_count() == mark {
-            return Vec::new();
-        }
-        let files = super::drag::dragged_files();
+        let files = self.drag.probe();
         if !files.is_empty() {
             // Esc bricht den Drag im Finder ab – die Dateien wandern stattdessen zum Server.
             self.tap_escape();
-            self.drag_mark = None;
         }
         files
     }
@@ -159,7 +159,11 @@ impl Injector for MacInjector {
             Inject::Button { button, down } => {
                 self.buttons[button as usize] = down;
                 if button == MouseButton::Left {
-                    self.drag_mark = down.then(super::drag::change_count);
+                    if down {
+                        self.drag.press();
+                    } else {
+                        self.drag.release();
+                    }
                 }
                 let (kind, cg_button, number) = match (button, down) {
                     (MouseButton::Left, true) => (CGEventType::LeftMouseDown, CGMouseButton::Left, 0),
