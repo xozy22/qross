@@ -220,6 +220,21 @@ pub fn init_process() {
     imp::init_process();
 }
 
+/// Solange der Wert lebt, bremst das System Qross nicht aus (macOS: App Nap aus). Für die Zeit, in
+/// der Server oder Client laufen; gestoppt darf das System wieder sparen. Anderswo ohne Wirkung.
+#[must_use = "wirkt nur, solange der Wert lebt"]
+pub struct Responsive {
+    #[cfg(target_os = "macos")]
+    _activity: mac::Activity,
+}
+
+pub fn keep_responsive() -> Responsive {
+    Responsive {
+        #[cfg(target_os = "macos")]
+        _activity: mac::Activity::begin(),
+    }
+}
+
 /// Datenverzeichnis von Qross (z. B. `--data-dir`). Dort merkt sich Qross unter Wayland die
 /// Freigaben der Desktop-Portale; ohne Aufruf gilt `~/.config/Qross`.
 pub fn set_data_dir(dir: &Path) {

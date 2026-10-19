@@ -1,6 +1,6 @@
 // Kopierte Dateien
 
-import { $, $$, state } from "./core.js";
+import { $$, state } from "./core.js";
 import { saveSoon, updatePreview } from "./store.js";
 
 export const TOAST_KIND = { info: "", success: "success", warn: "warn", error: "error" };

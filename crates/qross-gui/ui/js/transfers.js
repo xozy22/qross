@@ -1,7 +1,7 @@
 // Dateiübertragungen
 
-import { $, invoke, state } from "./core.js";
-import { el, icon, running, toast } from "./util.js";
+import { $, invoke } from "./core.js";
+import { el, icon, toast } from "./util.js";
 import { TOAST_KIND } from "./clipboard-files.js";
 import { NBSP } from "./quality.js";
 

@@ -1,6 +1,6 @@
 // Verzögerung der Eingabekette
 
-import { $, state } from "./core.js";
+import { state } from "./core.js";
 import { el } from "./util.js";
 import { NBSP, decimal, qualityEntry } from "./quality.js";
 

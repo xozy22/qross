@@ -115,7 +115,7 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
     let _ = PROFILES.set(profiles);
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon(&Status::default()))
+        .icon(icon(None))
         .tooltip("Qross – gestoppt")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -231,17 +231,46 @@ pub fn update_profiles(app: &AppHandle, profiles: &Profiles) {
             warn!("Profile im Tray-Menü nicht aktualisiert: {e}");
         }
     }
-    update(app, &app.state::<Arc<Runtime>>().status());
+    update(app);
 }
 
-pub fn update(app: &AppHandle, status: &Status) {
+/// Was der Tray gerade zeigt. Der Status ändert sich bei jedem Wechsel des Cursors, Punkt, Tooltip
+/// und Menü dagegen selten; ans System geht nur, was sich geändert hat.
+struct Shown {
+    dot: Option<[u8; 3]>,
+    tooltip: String,
+    running: bool,
+}
+
+static SHOWN: Mutex<Option<Shown>> = Mutex::new(None);
+
+/// Zeigt den Status im Tray, auf dem Hauptthread und mit dem Stand von dann: Wer den Status meldet,
+/// wartet nicht auf das System, und dicht aufeinander folgende Meldungen enden beim neuesten Stand.
+pub fn update(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || show(&handle));
+}
+
+fn show(app: &AppHandle) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
-    let _ = tray.set_icon(Some(icon(status)));
+    let Some(rt) = app.try_state::<Arc<Runtime>>() else { return };
+    let status = rt.status();
     let profile = PROFILE_NAME.lock().unwrap().clone();
-    let _ = tray.set_tooltip(Some(tooltip(status, profile.as_deref())));
-    if let Some(toggle) = TOGGLE.get() {
-        let _ = toggle.set_text(if status.running() { "Stoppen" } else { "Starten" });
+    let next = Shown { dot: dot(&status), tooltip: tooltip(&status, profile.as_deref()), running: status.running() };
+    let mut shown = SHOWN.lock().unwrap();
+    let before = shown.as_ref();
+    if before.is_none_or(|s| s.dot != next.dot) {
+        let _ = tray.set_icon(Some(icon(next.dot)));
     }
+    if before.is_none_or(|s| s.tooltip != next.tooltip) {
+        let _ = tray.set_tooltip(Some(&next.tooltip));
+    }
+    if before.is_none_or(|s| s.running != next.running) {
+        if let Some(toggle) = TOGGLE.get() {
+            let _ = toggle.set_text(if next.running { "Stoppen" } else { "Starten" });
+        }
+    }
+    *shown = Some(next);
 }
 
 fn tooltip(status: &Status, profile: Option<&str>) -> String {
@@ -258,6 +287,7 @@ fn tooltip(status: &Status, profile: Option<&str>) -> String {
             n => format!("{n} Clients verbunden"),
         },
         (_, Phase::Connected) => format!("verbunden mit {}", status.server_name.as_deref().unwrap_or("Server")),
+        (_, Phase::Connecting) if status.retry_reason.is_some() => "Server nicht erreichbar, versucht es weiter".to_owned(),
         (_, Phase::Connecting) => "verbindet …".to_owned(),
         (_, Phase::Starting) => "startet …".to_owned(),
         _ => status.message.clone(),
@@ -274,12 +304,9 @@ fn tooltip(status: &Status, profile: Option<&str>) -> String {
     format!("Qross {role}{profile} – {detail}{lock}")
 }
 
-/// Basis-Icon mit Statuspunkt unten links.
-fn icon(status: &Status) -> Image<'static> {
-    let base = Image::from_bytes(include_bytes!("../icons/32x32.png")).expect("eingebettetes Icon");
-    let (w, h) = (base.width(), base.height());
-    let mut rgba = base.rgba().to_vec();
-    let color = match status.phase {
+/// Farbe des Statuspunkts; gestoppt ohne Punkt
+fn dot(status: &Status) -> Option<[u8; 3]> {
+    match status.phase {
         Phase::Stopped => None,
         Phase::Error => Some([220, 38, 38]),
         Phase::Starting | Phase::Connecting => Some([234, 179, 8]),
@@ -287,8 +314,15 @@ fn icon(status: &Status) -> Image<'static> {
         // Sichere Tastatureingabe: Der Cursor kommt nicht zu den Clients
         Phase::Listening if status.secure_input.is_some() => Some([234, 179, 8]),
         Phase::Listening | Phase::Connected => Some([22, 163, 74]),
-    };
-    if let Some([r, g, b]) = color {
+    }
+}
+
+/// Basis-Icon mit Statuspunkt unten links.
+fn icon(dot: Option<[u8; 3]>) -> Image<'static> {
+    let base = Image::from_bytes(include_bytes!("../icons/32x32.png")).expect("eingebettetes Icon");
+    let (w, h) = (base.width(), base.height());
+    let mut rgba = base.rgba().to_vec();
+    if let Some([r, g, b]) = dot {
         // unten links, damit der Mauszeiger im Logo frei bleibt
         let (cx, cy, radius) = (8.0, h as f32 - 8.0, 7.5f32);
         for y in 0..h {

@@ -2,7 +2,6 @@
 
 import { $, $$, state } from "./core.js";
 import { running } from "./util.js";
-import { toggle } from "./start.js";
 
 export function renderTopbar() {
   const role = state.settings.role;
@@ -23,10 +22,12 @@ export function renderTopbar() {
   }
   // Als Client nur mit wem; die Adresse steht im Tooltip und in der Client-Ansicht
   if (s.role === "client" && s.phase === "connected" && s.server_name) text = `Verbunden mit „${s.server_name}“`;
+  // Neue Versuche: stabil statt im Wechsel „Verbinde …“ und Fehler; Einzelheiten im Tooltip und in der Client-Ansicht
+  if (s.role === "client" && s.phase === "connecting") text = s.retry_reason ? "Server nicht erreichbar" : "Verbindet …";
   if (s.role === "server" && s.locked) text += `, Cursor auf „${s.cursor_on}“ gesperrt`;
   else if (s.role === "server" && s.game_hold) text += `, Spielemodus hält den Cursor auf „${s.cursor_on}“`;
   $("#statusText").textContent = text;
-  status.title = s.message || "";
+  status.title = s.role === "client" && s.retry_reason ? `${s.retry_reason}. Qross versucht es weiter.` : s.message || "";
 
   const toggle = $("#toggle");
   const isRunning = running();

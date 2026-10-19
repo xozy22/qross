@@ -39,10 +39,45 @@ pub fn hostname() -> String {
 
 pub fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        // Die Seite zuerst, sonst blitzt das Fenster kurz leer auf
+        page_shown(&window, true);
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// Sagt der Seite, ob das Fenster zu sehen ist. WebView2 merkt Verstecken (Tray) und Minimieren
+/// nicht von selbst und zeichnet weiter, jede laufende Animation (pulsierender Punkt,
+/// Verbindungslinien) mit 60 Bildern pro Sekunde, auch tagelang im Tray. Versteckt ruht die Seite:
+/// Ereignisse kommen weiter an, gezeichnet wird erst wieder beim Zeigen. macOS und Linux erkennen
+/// das selbst.
+fn page_shown(window: &tauri::WebviewWindow, shown: bool) {
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // So legt Tauri die Seite an; nur Wechsel gehen an WebView2 (Resized kommt beim Ziehen oft)
+        static SHOWN: AtomicBool = AtomicBool::new(true);
+        if SHOWN.swap(shown, Ordering::Relaxed) != shown {
+            let page: &tauri::Webview = window.as_ref();
+            if let Err(e) = if shown { page.show() } else { page.hide() } {
+                warn!("Seite nicht {}: {e}", if shown { "gezeigt" } else { "versteckt" });
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (window, shown);
+}
+
+/// Nach Verstecken, Minimieren, Wiederherstellen oder Fokus: zeigt das Fenster gerade etwas?
+fn sync_page(app: &AppHandle) {
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window("main") {
+        let shown = window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false);
+        page_shown(&window, shown);
+    }
+    #[cfg(not(windows))]
+    let _ = app;
 }
 
 /// Stoppt Server bzw. Client (gibt Maus und Tastatur frei) und beendet die App.
@@ -492,6 +527,7 @@ fn show_window(app: &AppHandle) {
         let _ = window.show();
     } else if tray::available() {
         info!("Autostart: Qross läuft im Tray");
+        page_shown(&window, false);
     } else {
         // Erst minimieren, dann zeigen: umgekehrt geht das Minimieren beim frisch gezeigten Fenster verloren.
         let _ = window.minimize();
@@ -633,6 +669,15 @@ fn main() {
             let autostart = Autostart::new(appimage.as_deref().map(std::path::Path::new));
             configure_autostart(&autostart, &rt);
             app.manage(autostart);
+            // Eigene Titelleiste: Die Kopfzeile der Seite zieht das Fenster und trägt Minimieren,
+            // Maximieren und Schließen. Unter macOS bleiben die Ampel-Knöpfe des Systems und liegen in
+            // ihr (titleBarStyle „Overlay“ in tauri.conf.json).
+            #[cfg(not(target_os = "macos"))]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = window.set_decorations(false) {
+                    warn!("Fensterrahmen nicht abgeschaltet: {e}");
+                }
+            }
             show_window(app.handle());
             let handle = app.handle().clone();
             let watch = rt.clone();
@@ -645,17 +690,20 @@ fn main() {
             updates::spawn_scheduler(app.handle().clone());
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 if tray::available() {
                     // Mit Tray versteckt Schließen das Fenster nur; beendet wird über das Tray-Menü.
                     let _ = window.hide();
+                    sync_page(window.app_handle());
                 } else {
                     // Ohne Tray wäre ein verstecktes Fenster nicht mehr erreichbar.
                     quit(window.app_handle());
                 }
             }
+            WindowEvent::Resized(_) | WindowEvent::Focused(true) => sync_page(window.app_handle()),
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("Qross-Oberfläche konnte nicht starten");

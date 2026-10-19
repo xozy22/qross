@@ -23,6 +23,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use core_graphics::display::CGDisplay;
 use core_graphics::geometry::CGRect;
+use objc2::rc::Retained;
+use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
 use qross_core::CaptureEvent;
 use qross_proto::Rect;
 use tokio::sync::mpsc::UnboundedSender;
@@ -37,23 +40,37 @@ pub(crate) use pasteboard::concealed;
 pub use permissions::{granted as has_permission, request as request_permission};
 pub use secure_input::state as secure_input;
 
-/// Einmal beim Programmstart: App Nap für die ganze Laufzeit abschalten. Läuft Qross ohne sichtbares
-/// Fenster (im Tray, als `qross client`), bremst macOS es sonst aus: Timer und Netzwerk werden
-/// gebündelt, und die ersten Eingaben nach einer Pause kommen spürbar verzögert an – etwa beim Wechsel
-/// vom Server auf diesen Mac, während der Rückweg flüssig bleibt. Synergy macht es genauso.
-/// Bildschirmschoner, Display- und Systemschlaf bleiben erlaubt.
-pub fn init_process() {
-    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+/// Einmal beim Programmstart; unter macOS gibt es dabei nichts zu tun (App Nap: siehe [`Activity`]).
+pub fn init_process() {}
 
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
+/// App Nap aus, solange der Wert lebt: für die Zeit, in der Server oder Client laufen. Läuft Qross
+/// ohne sichtbares Fenster (im Tray, als `qross client`), bremst macOS es sonst aus: Timer und Netzwerk
+/// werden gebündelt, und die ersten Eingaben nach einer Pause kommen spürbar verzögert an. Gestoppt
+/// darf macOS wieder sparen, das schont den Akku. Synergy macht es genauso. Bildschirmschoner,
+/// Display- und Systemschlaf bleiben erlaubt.
+pub struct Activity(Retained<ProtocolObject<dyn NSObjectProtocol>>);
+
+// SAFETY: Das Token ist ein unveränderliches NSObject, und NSProcessInfo ist thread-sicher: Beenden
+// geht von jedem Thread aus.
+unsafe impl Send for Activity {}
+unsafe impl Sync for Activity {}
+
+impl Activity {
+    pub fn begin() -> Self {
         let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep | NSActivityOptions::LatencyCritical;
         let reason = NSString::from_str("Qross gibt Maus und Tastatur ohne Verzögerung weiter");
-        let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, &reason);
-        // Nie beenden: Die Aktivität gilt, solange der Prozess läuft.
-        std::mem::forget(activity);
-        tracing::debug!("App Nap abgeschaltet");
-    });
+        let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, &reason);
+        tracing::debug!("App Nap aus, solange Qross läuft");
+        Self(token)
+    }
+}
+
+impl Drop for Activity {
+    fn drop(&mut self) {
+        // SAFETY: Das Token stammt aus beginActivityWithOptions_reason, hat also den erwarteten Typ.
+        unsafe { NSProcessInfo::processInfo().endActivity(&self.0) };
+        tracing::debug!("App Nap wieder erlaubt");
+    }
 }
 
 pub(crate) fn displays() -> Vec<CGRect> {
@@ -111,9 +128,12 @@ pub fn finder_overlay() -> Option<Arc<dyn FinderOverlay>> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn app_nap_is_switched_off_once() {
-        // Zweimal aufgerufen (Server und Client im selben Prozess): kein Absturz, keine zweite Aktivität
-        super::init_process();
-        super::init_process();
+    fn app_nap_stays_off_while_an_activity_lives() {
+        // Beginnen, beenden, und zwei zugleich (etwa Neustart des Servers): kein Absturz
+        drop(super::Activity::begin());
+        let first = super::Activity::begin();
+        let second = super::Activity::begin();
+        drop(first);
+        drop(second);
     }
 }

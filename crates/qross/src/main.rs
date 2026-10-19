@@ -151,6 +151,8 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     let trust = TrustStore::load(&data_dir.join(TRUSTED_CLIENTS_FILE))?;
 
     qross_platform::init_process();
+    // Bis zum Ende des Laufs: Das System bremst den Server nicht aus (macOS: App Nap aus)
+    let _responsive = qross_platform::keep_responsive();
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
     let capture = qross_platform::start_capture(events)?;
     info!("Notausgang: Strg+Alt+Shift+Esc holt Maus und Tastatur sofort zurück");
@@ -216,6 +218,8 @@ async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool, game_m
     let trust = TrustStore::load(&data_dir.join(KNOWN_SERVERS_FILE))?;
 
     qross_platform::init_process();
+    // Bis zum Ende des Laufs: Das System bremst den Client nicht aus (macOS: App Nap aus)
+    let _responsive = qross_platform::keep_responsive();
     let platform = if dry_run {
         info!("Dry-Run: Eingaben werden nur protokolliert");
         ClientPlatform {

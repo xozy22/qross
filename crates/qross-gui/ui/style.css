@@ -68,6 +68,22 @@ code { font-family: var(--mono); font-size: 12.5px; }
   border-bottom: 1px solid var(--line);
   background: var(--ink-0);
 }
+/* Nur der Status darf schrumpfen (mit „…“), sonst schöbe ein langer Text die Bedienelemente zusammen. */
+.topbar > * { flex: none; }
+.topbar > .status { flex: 0 1 auto; }
+
+/* Fensterknöpfe (Windows, Linux) ganz rechts; Schließen färbt sich beim Darüberfahren */
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: -6px; padding-left: 10px; border-left: 1px solid var(--line); }
+.win-btn { width: 36px; height: 36px; border-radius: 9px; }
+.win-btn .ico { width: 17px; height: 17px; }
+.win-btn .ico-restore { display: none; }
+.win-btn.maximized .ico-max { display: none; }
+.win-btn.maximized .ico-restore { display: block; }
+.win-btn.close:hover { background: var(--coral-soft); color: var(--coral); }
+:root:not([data-platform="macos"]) .topbar { padding-right: 12px; }
+/* macOS: Die Ampel-Knöpfe des Systems liegen links in der Kopfzeile (trafficLightPosition) */
+[data-platform="macos"] .win-controls { display: none; }
+[data-platform="macos"] .topbar { padding-left: 92px; }
 
 .brand { display: flex; align-items: center; gap: 11px; font: 650 18px/1 var(--font-display); letter-spacing: -.01em; }
 /* Das Logo bringt eigene abgerundete Ecken mit; 36 px bleiben unter der Höhe des Umschalters (41 px). */
@@ -943,6 +959,11 @@ dialog {
 }
 dialog[open] { animation: rise .2s var(--ease); }
 dialog::backdrop { background: rgba(6, 9, 20, .65); backdrop-filter: blur(4px); }
+/* Dauer-Animationen hinter einem offenen Dialog anhalten: Sonst muss der weichgezeichnete Hintergrund jedes
+   Bild neu berechnet werden, ohne Grafikkarte (VM, Remotedesktop) fast einen ganzen Prozessorkern lang. */
+body:has(dialog[open]) :is(.topbar, main, .drawer) *,
+body:has(dialog[open]) :is(.topbar, main, .drawer) *::before,
+body:has(dialog[open]) :is(.topbar, main, .drawer) *::after { animation-play-state: paused !important; }
 @keyframes rise { from { opacity: 0; transform: translateY(8px) scale(.98); } }
 .dialog { padding: 24px 26px 20px; display: grid; gap: 14px; }
 .dialog h2 { font: 600 19px/1.3 var(--font-display); margin: 0; }
@@ -1482,12 +1503,14 @@ dialog.settings { width: min(800px, calc(100vw - 32px)); height: min(660px, calc
 @media (max-width: 680px) {
   .topbar {
     display: grid;
-    grid-template-columns: auto 1fr auto auto;
-    grid-template-areas: "brand seg toggle gear" "profile status status status";
+    grid-template-columns: auto 1fr auto auto auto;
+    grid-template-areas: "brand seg toggle gear win" "profile status status status status";
     gap: 10px 12px;
     padding: 10px 14px;
   }
   .header-icon { grid-area: gear; margin-left: 0; }
+  .win-controls { grid-area: win; margin-left: 0; padding-left: 6px; }
+  .win-btn { width: 32px; height: 32px; }
   .nav-group { display: none; }
   .brand { grid-area: brand; }
   .brand .brand-name { display: none; }

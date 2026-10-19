@@ -22,6 +22,7 @@ import { onLatency } from "./latency.js";
 import { checkPermissions, renderPermissions } from "./permissions.js";
 import { forgetPortal, refreshPortal, renderPortal } from "./portal.js";
 import { renderSecureInput } from "./secure-input.js";
+import { setupWindowControls } from "./window-controls.js";
 
 export function render() {
   pruneQualities();
@@ -40,6 +41,18 @@ export function render() {
     renderCursorFinder();
     renderProfileScope();
   }
+}
+
+// Der Status kommt bei jedem Wechsel des Cursors: höchstens einmal je Bild neu aufbauen. Solange das
+// Fenster nicht zu sehen ist, ruht requestAnimationFrame; gezeigt wird dann gleich der neueste Stand.
+let renderQueued = false;
+function renderSoon() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    render();
+  });
 }
 
 async function init() {
@@ -72,6 +85,8 @@ async function init() {
     desktop: snap.desktop ?? state.desktop,
     version: snap.version,
   });
+  // Titelleiste: braucht das System; ein Fehler darf den Rest der Oberfläche nicht aufhalten
+  setupWindowControls().catch((e) => console.warn("Fensterknöpfe:", e));
   for (const node of $$("[data-own-fingerprint]")) fillFingerprint(node, snap.fingerprint);
   for (const node of $$("[data-data-dir]")) node.textContent = snap.data_dir;
   $("#clientName").placeholder = snap.hostname;
@@ -91,7 +106,7 @@ async function init() {
     const before = state.status;
     state.status = e.payload;
     if (!running() || state.status.phase === "starting") clearTransfers();
-    render();
+    renderSoon();
     // Unter Wayland nach jedem Phasenwechsel (Start, Fehler, verbunden) die Portale neu ansehen
     if (before?.phase !== e.payload.phase || before?.role !== e.payload.role) refreshPortal();
   });

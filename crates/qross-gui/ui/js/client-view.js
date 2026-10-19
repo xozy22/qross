@@ -38,9 +38,11 @@ export function renderClient() {
   // Status: was gerade gilt; „Verbunden mit …“ steht schon in der Kopfzeile
   $("#clientStatus").dataset.phase = phase;
   const server = `„${s.server_name}“`;
+  // Scheitern die Versuche, bleibt der Grund stehen, statt mit „Verbinde …“ abzuwechseln.
+  const retry = s.retry_reason ? `${s.retry_reason.charAt(0).toUpperCase()}${s.retry_reason.slice(1)}. Qross versucht es weiter.` : null;
   const [headline, message] = {
     stopped: ["Nicht verbunden", "Wähl unten einen gefundenen Server oder gib seine Adresse ein."],
-    connecting: ["Suche den Server …", s.message],
+    connecting: retry ? ["Server nicht erreichbar", retry] : ["Suche den Server …", s.message],
     connected: s.cursor_here
       ? ["Der Cursor ist hier", `Zurück zu ${server} geht es über den Bildschirmrand.`]
       : [`Der Cursor ist auf ${server}`, "Schieb die Maus dort über den Bildschirmrand, um hierher zu wechseln."],

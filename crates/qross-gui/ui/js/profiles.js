@@ -1,7 +1,7 @@
 // Profile je Ort
 
 import { $, invoke, state } from "./core.js";
-import { copy, el, icon, toast } from "./util.js";
+import { el, icon, toast } from "./util.js";
 import { askName, confirmRoleChange, showDialog } from "./dialog.js";
 import { saveSoon } from "./store.js";
 import { startFlow } from "./start.js";

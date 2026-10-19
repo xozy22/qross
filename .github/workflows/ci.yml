@@ -61,6 +61,25 @@ jobs:
         if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1280x800x24" cargo test --workspace --locked
 
+  # Die Oberfläche läuft ohne Build-Schritt direkt aus crates/qross-gui/ui. Tippfehler, falsche
+  # Importe oder fehlende Element-IDs fielen sonst erst in der laufenden App auf.
+  ui:
+    name: Oberfläche (ESLint, Tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      - name: ESLint
+        working-directory: crates/qross-gui
+        run: npx --yes eslint@10.12.0 ui/js ui-tests
+
+      - name: Tests
+        run: node --test "crates/qross-gui/ui-tests/*.test.mjs"
+
   # Einspeisen über libei in einen echten Compositor. Das Desktop-Portal lässt sich hier nicht
   # testen: Den Freigabe-Dialog von GNOME kann niemand bestätigen, und KWin 5.27 aus Ubuntu 24.04
   # kann noch kein libei. Deshalb öffnet der Test die Sitzung direkt bei mutter

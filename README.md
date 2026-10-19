@@ -401,6 +401,16 @@ cargo build --release
 cargo test --workspace
 ```
 
+Oberfläche (Node.js 22 oder neuer): ESLint und Tests ohne Browser, wie in der CI.
+
+```bash
+cd crates/qross-gui && npx --yes eslint@10.12.0 ui/js ui-tests
+```
+
+```bash
+node --test "crates/qross-gui/ui-tests/*.test.mjs"
+```
+
 Linux-Tests mit virtuellem X-Server (Docker):
 
 ```bash

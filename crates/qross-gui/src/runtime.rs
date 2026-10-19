@@ -112,6 +112,10 @@ pub struct Status {
     /// Client: was der Server für den Cursor-Finder eingestellt hat (`None`: nichts gemeldet, dann
     /// ist er aus, etwa bei einem Server bis Qross 0.7)
     pub cursor_finder: Option<CursorFinder>,
+    /// Client: warum der letzte Versuch scheiterte, solange er es weiter versucht (`None`: verbunden
+    /// oder noch nichts gescheitert). Bleibt über die folgenden Versuche stehen, damit die Anzeige
+    /// nicht zwischen „Verbinde …“ und dem Fehler hin- und herspringt.
+    pub retry_reason: Option<String>,
 }
 
 impl Status {
@@ -199,6 +203,8 @@ pub struct Runtime {
     pub profiles: Mutex<Profiles>,
     status: Mutex<Status>,
     running: tokio::sync::Mutex<Option<Running>>,
+    /// Solange eine Instanz läuft, bremst das System Qross nicht aus (macOS: App Nap aus)
+    responsive: Mutex<Option<qross_platform::Responsive>>,
     capture: Mutex<Option<CaptureHub>>,
     /// Jede gestartete Instanz bekommt eine neue Nummer; Meldungen alter Instanzen werden ignoriert.
     generation: AtomicU64,
@@ -226,6 +232,7 @@ impl Runtime {
             profiles: Mutex::new(profiles),
             status: Mutex::new(Status::default()),
             running: tokio::sync::Mutex::new(None),
+            responsive: Mutex::new(None),
             capture: Mutex::new(None),
             generation: AtomicU64::new(0),
             dismissed: Mutex::new(Vec::new()),
@@ -288,7 +295,7 @@ impl Runtime {
             status.secure_input = secure_input::hint(status.secure_holder.as_ref(), status.clients.len());
             status.clone()
         };
-        crate::tray::update(&self.app, &status);
+        crate::tray::update(&self.app);
         let _ = self.app.emit("status", status);
     }
 
@@ -313,6 +320,8 @@ impl Runtime {
         self.update(|s| {
             *s = Status { role: Some(settings.role), phase: Phase::Starting, message: "Startet …".into(), ..Status::default() }
         });
+        // Schon vor dem Start, damit auch die ersten Eingaben nicht gebremst ankommen
+        let responsive = qross_platform::keep_responsive();
         let result = match settings.role {
             Role::Server => self.start_server(&settings, generation).await,
             Role::Client => self.start_client(&settings, generation),
@@ -320,10 +329,12 @@ impl Runtime {
         match result {
             Ok(r) => {
                 *running = Some(r);
+                *self.responsive.lock().unwrap() = Some(responsive);
                 self.update_app_state(|s| s.last_running = Some(settings.role));
                 Ok(None)
             }
             Err(e) => {
+                *self.responsive.lock().unwrap() = None;
                 warn!("Start fehlgeschlagen: {e:#}");
                 let message = format!("{e:#}");
                 self.update(|s| *s = Status { phase: Phase::Error, message, ..Status::default() });
@@ -346,6 +357,7 @@ impl Runtime {
             self.shutdown(old).await;
             info!("gestoppt");
         }
+        *self.responsive.lock().unwrap() = None;
         self.update(|s| *s = Status::default());
     }
 
@@ -819,6 +831,7 @@ impl Runtime {
             ClientNotice::Connected { server_name, addr } => self.update(|s| {
                 s.phase = Phase::Connected;
                 s.message = format!("Verbunden mit „{server_name}“ ({addr})");
+                s.retry_reason = None;
                 s.server_name = Some(server_name);
                 // Die Rechte meldet ein Server ab Qross 0.7 gleich danach, den Cursor-Finder ab 0.8.
                 s.sharing = None;
@@ -827,6 +840,7 @@ impl Runtime {
             ClientNotice::Disconnected { reason } => self.update(|s| {
                 s.phase = Phase::Connecting;
                 s.message = format!("{reason} – neuer Versuch in Kürze");
+                s.retry_reason = Some(reason);
                 s.server_name = None;
                 s.cursor_here = false;
                 s.sharing = None;
@@ -926,6 +940,7 @@ impl Runtime {
             }
         };
         // Die Instanz läuft nicht mehr; ein erneuter Start räumt `running` auf.
+        *self.responsive.lock().unwrap() = None;
         self.update(|s| *s = Status { phase, message, ..Status::default() });
     }
 }
