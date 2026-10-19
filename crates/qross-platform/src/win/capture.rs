@@ -10,13 +10,24 @@
 //!
 //! Im Remote-Modus liest der Hook zu jeder Zeichentaste, was sie im Tastaturlayout des
 //! Vordergrundfensters ergibt (`CaptureEvent::Typed`, für Clients im Zeichenmodus).
+//!
+//! Windows entfernt Low-Level-Hooks ohne jede Meldung, wenn ein Aufruf länger als
+//! `LowLevelHooksTimeout` braucht. Deshalb tut der Hook so wenig wie möglich: kein Lock, kein Kanal
+//! von tokio (der sperrt beim Aufwecken des Empfängers und legt Speicher an), nichts Langsames.
+//! Ereignisse gehen über eine sperrfreie Warteschlange an einen eigenen Thread (`forward`), der sie
+//! an den Server-Kern weiterreicht; Tastenoptionen kommen per Nachricht statt über ein Lock. Im Hook
+//! bleiben nur kurze Systemaufrufe ohne Warten (Monitor an der Kante, Cursorposition, Tastaturlayout)
+//! und kleine Zeichenketten für den Zeichenmodus. Gehen die Hooks trotzdem verloren, merkt das der
+//! Wächter (`watchdog`) und lässt sie auf ihrem Thread neu setzen (`Hooks::reinstall`).
 
 use std::cell::RefCell;
+use std::mem::size_of;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
+use std::sync::{Arc, OnceLock};
+use std::thread::{self, Thread};
 
 use anyhow::{anyhow, bail, Context};
 use qross_core::chars::is_typing_key;
@@ -30,7 +41,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+    GetCurrentThread, GetCurrentThreadId, SetThreadInformation, SetThreadPriority, ThreadPowerThrottling,
+    THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
+    THREAD_PRIORITY_HIGHEST, THREAD_PRIORITY_TIME_CRITICAL,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, VK_CAPITAL, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
@@ -38,25 +51,54 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetMessageW, PostThreadMessageW, SetCursorPos,
-    SetWindowsHookExW, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP, MSG, MSLLHOOKSTRUCT,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
+    SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP, MSG, MSLLHOOKSTRUCT,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    XBUTTON1,
 };
 
-use super::{cursor, dnd, inject, layout, primary_center, INJECT_MAGIC};
+use super::{cursor, dnd, inject, layout, primary_center, watchdog, INJECT_MAGIC};
+use crate::hook_watch::Calls;
 use crate::keymap_windows::{hid_from_windows, WinModifiers};
+use crate::spsc::{self, Consumer, Producer};
 use crate::Capture;
 
 struct Shared {
     remote: AtomicBool,
+    /// Für Antworten von anderen Threads; der Hook selbst meldet über `emit`.
     events: UnboundedSender<CaptureEvent>,
-    keys: Mutex<KeyOptions>,
     /// Dateien vom Client warten: das nächste Loslassen einer Maustaste meldet `LocalDrop`
     await_drop: AtomicBool,
 }
 
 /// Hook-Prozeduren sind freie Funktionen ohne Kontext – daher ein prozessweiter Zustand.
 static SHARED: OnceLock<Shared> = OnceLock::new();
+
+/// Jeder Aufruf der Hooks, auch für eigene Eingaben: Daran sieht der Wächter, dass sie leben.
+static MOUSE_CALLS: AtomicU32 = AtomicU32::new(0);
+static KEY_CALLS: AtomicU32 = AtomicU32::new(0);
+/// Wie oft die Hooks neu gesetzt wurden
+static REHOOKS: AtomicU32 = AtomicU32::new(0);
+/// Der Hook-Thread läuft (solange arbeitet der Wächter)
+static HOOKS_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Verworfen, weil die Warteschlange voll war (meldet `forward`)
+static DROPPED: AtomicU32 = AtomicU32::new(0);
+
+/// An den Hook-Thread: Hooks neu setzen
+const WM_REHOOK: u32 = WM_APP + 0x51;
+/// An den Hook-Thread: neue Tastenoptionen, lParam ist eine `Box<KeyOptions>`
+const WM_KEY_OPTIONS: u32 = WM_APP + 0x52;
+/// Plätze der Warteschlange zum Server-Kern: einige Sekunden Mausbewegung
+const QUEUE_LEN: usize = 4096;
+
+/// Was der Hook loswerden will, ohne selbst zu warten
+enum FromHook {
+    Event(CaptureEvent),
+    /// Systemcursor wieder einblenden: lädt das Schema aus der Registry, das dauert.
+    RestoreCursor,
+    /// Taste ohne Zuordnung, fürs Debug-Log
+    Unmapped { vk: u32, scan: u32 },
+}
 
 /// Nur vom Hook-Thread benutzt.
 struct HookState {
@@ -75,6 +117,10 @@ struct HookState {
     /// Layout des Servers soll sie für den Zeichenmodus aber berücksichtigen.
     caps: bool,
     was_remote: bool,
+    /// Als gedrückt an den Client gemeldete Tasten (nach Virtual-Key) und Maustasten: Gehen die
+    /// Hooks verloren, lässt `resync` sie dort los.
+    sent: [Option<KeyCode>; 256],
+    sent_buttons: [bool; 5],
 }
 
 thread_local! {
@@ -87,8 +133,17 @@ thread_local! {
             altgr: false,
             caps: false,
             was_remote: false,
+            sent: [None; 256],
+            sent_buttons: [false; 5],
         })
     };
+}
+
+thread_local! {
+    /// Warteschlange zu `forward` und dessen Thread zum Wecken; nur auf dem Hook-Thread gesetzt.
+    static OUT: RefCell<Option<(Producer<FromHook>, Thread)>> = const { RefCell::new(None) };
+    /// Kommt per `WM_KEY_OPTIONS` statt über ein Lock, denn der Hook darf nie warten.
+    static KEY_OPTIONS: RefCell<Rc<KeyOptions>> = RefCell::new(Rc::new(KeyOptions::default()));
 }
 
 impl HookState {
@@ -120,51 +175,238 @@ impl HookState {
 }
 
 pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Arc<dyn Capture>> {
-    let shared =
-        Shared { remote: AtomicBool::new(false), events, keys: Mutex::new(KeyOptions::default()), await_drop: AtomicBool::new(false) };
+    Ok(Arc::new(start(events)?))
+}
+
+fn start(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<WinCapture> {
+    let shared = Shared { remote: AtomicBool::new(false), events: events.clone(), await_drop: AtomicBool::new(false) };
     if SHARED.set(shared).is_err() {
         bail!("die Eingabe-Erfassung läuft in diesem Prozess bereits");
     }
     // Falls ein früherer Lauf im Remote-Modus abgestürzt ist
     cursor::restore();
+    let (queue, from_hook) = spsc::queue(QUEUE_LEN);
+    let forwarder = thread::Builder::new().name("qross-hook-events".into()).spawn(move || forward(from_hook, events))?;
+    let forwarder = forwarder.thread().clone();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     thread::Builder::new()
         .name("qross-hooks".into())
-        .spawn(move || unsafe { run_hook_thread(ready_tx) })?;
+        .spawn(move || unsafe { run_hook_thread(queue, forwarder, ready_tx) })?;
     let thread_id = ready_rx
         .recv()
         .context("Hook-Thread hat sich unerwartet beendet")?
         .map_err(|code| anyhow!("SetWindowsHookExW fehlgeschlagen (Fehlercode {code})"))?;
+    let rehook = move || unsafe {
+        PostThreadMessageW(thread_id, WM_REHOOK, 0, 0);
+    };
+    if let Err(e) = watchdog::spawn(hook_calls, &HOOKS_RUNNING, rehook) {
+        tracing::warn!("Wächter für die Eingabe-Hooks läuft nicht: {e}");
+    }
     if let Err(e) = dnd::start() {
         tracing::warn!("{e:#} – Dateien lassen sich nicht über die Kante ziehen");
     }
-    Ok(Arc::new(WinCapture { thread_id }))
+    Ok(WinCapture { thread_id })
 }
 
-unsafe fn run_hook_thread(ready: Sender<Result<u32, u32>>) {
-    // Hooks blockieren die gesamte Eingabe des Systems, bis sie zurückkehren.
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-    let module = GetModuleHandleW(null());
-    let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), module, 0);
-    let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), module, 0);
-    if mouse.is_null() || keyboard.is_null() {
-        let code = GetLastError();
-        for hook in [mouse, keyboard] {
+unsafe fn run_hook_thread(queue: Producer<FromHook>, forwarder: Thread, ready: Sender<Result<u32, u32>>) {
+    OUT.set(Some((queue, forwarder)));
+    hook_loop(ready);
+    HOOKS_RUNNING.store(false, Ordering::Release);
+    // Warteschlange schließen: `forward` gibt den Rest weiter und endet.
+    if let Some((queue, forwarder)) = OUT.take() {
+        drop(queue);
+        forwarder.unpark();
+    }
+}
+
+unsafe fn hook_loop(ready: Sender<Result<u32, u32>>) {
+    // Hooks blockieren die gesamte Eingabe des Systems, bis sie zurückkehren, und Windows entfernt
+    // sie, wenn das zu lange dauert: höchste Priorität, auch wenn Qross im Hintergrund läuft.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    full_speed();
+    // Hier anlegen, nicht beim ersten Tastendruck im Hook
+    KEY_OPTIONS.with(|_| ());
+    let mut hooks = match Hooks::install() {
+        Ok(hooks) => hooks,
+        Err(code) => {
+            let _ = ready.send(Err(code));
+            return;
+        }
+    };
+    HOOKS_RUNNING.store(true, Ordering::Release);
+    let _ = ready.send(Ok(GetCurrentThreadId()));
+
+    // Auch hier nichts Langsames: Solange eine Nachricht läuft, warten die Hooks.
+    let mut msg: MSG = std::mem::zeroed();
+    while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+        match msg.message {
+            WM_REHOOK => hooks.reinstall(),
+            WM_KEY_OPTIONS => {
+                let options = Box::from_raw(msg.lParam as *mut KeyOptions);
+                KEY_OPTIONS.set(Rc::new(*options));
+            }
+            #[cfg(test)]
+            tests::WM_DROP_HOOKS => hooks.remove(),
+            _ => {
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+    hooks.remove();
+}
+
+/// Nimmt den Thread von der Drosselung im Hintergrund aus (EcoQoS: langsame Kerne, wenig Takt).
+/// Ältere Windows-Versionen kennen das nicht und lehnen ab, das schadet nicht.
+unsafe fn full_speed() {
+    let state = THREAD_POWER_THROTTLING_STATE {
+        Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    let size = size_of::<THREAD_POWER_THROTTLING_STATE>() as u32;
+    SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, (&state as *const THREAD_POWER_THROTTLING_STATE).cast(), size);
+}
+
+/// Die beiden Low-Level-Hooks des Hook-Threads
+struct Hooks {
+    mouse: HHOOK,
+    keyboard: HHOOK,
+}
+
+impl Hooks {
+    /// Setzt beide oder keinen; sonst der Fehlercode.
+    unsafe fn install() -> Result<Self, u32> {
+        let module = GetModuleHandleW(null());
+        let hooks = Hooks {
+            mouse: SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), module, 0),
+            keyboard: SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), module, 0),
+        };
+        if hooks.mouse.is_null() || hooks.keyboard.is_null() {
+            let code = GetLastError();
+            hooks.remove();
+            return Err(code);
+        }
+        Ok(hooks)
+    }
+
+    /// Für einen Hook, den Windows schon entfernt hat, schlägt das fehl – ohne Folgen.
+    unsafe fn remove(&self) {
+        for hook in [self.mouse, self.keyboard] {
             if !hook.is_null() {
                 UnhookWindowsHookEx(hook);
             }
         }
-        let _ = ready.send(Err(code));
-        return;
     }
-    let _ = ready.send(Ok(GetCurrentThreadId()));
 
-    let mut msg: MSG = std::mem::zeroed();
-    while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-        DispatchMessageW(&msg);
+    /// Setzt beide neu, nachdem Windows (mindestens) einen stillschweigend entfernt hat. Erst beide
+    /// entfernen: Der übrige liefe sonst doppelt.
+    unsafe fn reinstall(&mut self) {
+        self.remove();
+        match Hooks::install() {
+            Ok(hooks) => {
+                *self = hooks;
+                REHOOKS.fetch_add(1, Ordering::Relaxed);
+                resync();
+            }
+            Err(code) => {
+                *self = Hooks { mouse: null_mut(), keyboard: null_mut() };
+                // Ohne Hooks wartet hier nichts auf das Log; der Wächter versucht es wieder.
+                tracing::error!("Eingabe-Hooks lassen sich nicht neu setzen (Fehlercode {code})");
+            }
+        }
     }
-    UnhookWindowsHookEx(mouse);
-    UnhookWindowsHookEx(keyboard);
+}
+
+/// Nach dem Neusetzen: Was in der Lücke geschah, hat der Hook nicht gesehen. Was der Client noch
+/// gedrückt glaubt, dort loslassen, und den eigenen Stand neu aus dem System lesen. Was jetzt
+/// gedrückt ist, ging in der Lücke lokal durch – sein Loslassen muss es auch.
+fn resync() {
+    const BUTTONS: [(MouseButton, u16); 5] = [
+        (MouseButton::Left, VK_LBUTTON),
+        (MouseButton::Right, VK_RBUTTON),
+        (MouseButton::Middle, VK_MBUTTON),
+        (MouseButton::Back, VK_XBUTTON1),
+        (MouseButton::Forward, VK_XBUTTON2),
+    ];
+    let remote = SHARED.get().is_some_and(|shared| shared.remote.load(Ordering::Acquire));
+    let down = |vk: usize| unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0;
+    STATE.with_borrow_mut(|st| {
+        for vk in 0..256 {
+            if let Some(key) = st.sent[vk].take() {
+                emit(CaptureEvent::Key { key, down: false });
+            }
+            st.pressed[vk] = down(vk);
+            st.local_down[vk] = st.pressed[vk];
+        }
+        for (button, vk) in BUTTONS {
+            let slot = button as usize;
+            if std::mem::take(&mut st.sent_buttons[slot]) {
+                emit(CaptureEvent::Button { button, down: false });
+            }
+            let now_down = down(usize::from(vk));
+            if st.buttons_down[slot] && !now_down {
+                // Lokal gedrückt und in der Lücke losgelassen: wie `local_release` in `handle_mouse`
+                dnd::BUTTON_RELEASES.fetch_add(1, Ordering::AcqRel);
+                if remote {
+                    emit(CaptureEvent::Button { button, down: false });
+                }
+            }
+            st.buttons_down[slot] = now_down;
+        }
+        st.hotkey = HotkeyTracker::new();
+        st.altgr = false;
+    });
+    if remote {
+        // In der Lücke lief der versteckte Cursor frei herum: zurück in die Mitte, damit Bewegungen
+        // in alle Richtungen messbar bleiben.
+        let (x, y) = primary_center();
+        unsafe { SetCursorPos(x, y) };
+    }
+}
+
+fn hook_calls() -> Calls {
+    Calls { mouse: MOUSE_CALLS.load(Ordering::Relaxed), keyboard: KEY_CALLS.load(Ordering::Relaxed) }
+}
+
+/// Meldet ein Ereignis an den Server-Kern, ohne zu warten. Nur auf dem Hook-Thread.
+fn emit(event: CaptureEvent) {
+    pass(FromHook::Event(event));
+}
+
+fn pass(item: FromHook) {
+    OUT.with_borrow_mut(|out| {
+        if let Some((queue, forwarder)) = out {
+            if queue.push(item).is_err() {
+                DROPPED.fetch_add(1, Ordering::Relaxed);
+            }
+            forwarder.unpark();
+        }
+    });
+}
+
+/// Eigener Thread: gibt weiter, was der Hook meldet. Hier darf es warten und dauern.
+fn forward(mut queue: Consumer<FromHook>, events: UnboundedSender<CaptureEvent>) {
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
+    loop {
+        let closed = queue.is_closed();
+        while let Some(item) = queue.pop() {
+            match item {
+                FromHook::Event(event) => {
+                    let _ = events.send(event);
+                }
+                FromHook::RestoreCursor => cursor::restore(),
+                FromHook::Unmapped { vk, scan } => tracing::debug!(vk, scan, "Taste ohne Zuordnung"),
+            }
+        }
+        let dropped = DROPPED.swap(0, Ordering::Relaxed);
+        if dropped > 0 {
+            tracing::warn!("{dropped} Eingaben verworfen: Der Server-Kern kam nicht hinterher");
+        }
+        if closed {
+            return;
+        }
+        thread::park();
+    }
 }
 
 struct WinCapture {
@@ -173,8 +415,9 @@ struct WinCapture {
 
 impl Capture for WinCapture {
     fn set_key_options(&self, options: KeyOptions) {
-        if let Some(shared) = SHARED.get() {
-            *shared.keys.lock().unwrap_or_else(|e| e.into_inner()) = options;
+        let options = Box::into_raw(Box::new(options));
+        if unsafe { PostThreadMessageW(self.thread_id, WM_KEY_OPTIONS, 0, options as LPARAM) } == 0 {
+            drop(unsafe { Box::from_raw(options) });
         }
     }
 
@@ -233,6 +476,7 @@ impl Drop for WinCapture {
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    MOUSE_CALLS.fetch_add(1, Ordering::Relaxed);
     if code >= 0 {
         if let Some(shared) = SHARED.get() {
             let info = &*(lparam as *const MSLLHOOKSTRUCT);
@@ -245,6 +489,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    KEY_CALLS.fetch_add(1, Ordering::Relaxed);
     if code >= 0 {
         if let Some(shared) = SHARED.get() {
             let info = &*(lparam as *const KBDLLHOOKSTRUCT);
@@ -262,15 +507,18 @@ fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
     if let Some((button, down)) = button_of(msg, info) {
         if !remote && !down && shared.await_drop.swap(false, Ordering::AcqRel) {
             // Dateien vom Client: hier losgelassen = hier ablegen
-            let _ = shared.events.send(CaptureEvent::LocalDrop { x: info.pt.x, y: info.pt.y });
+            emit(CaptureEvent::LocalDrop { x: info.pt.x, y: info.pt.y });
         }
         let slot = button as usize;
         let local_release = STATE.with_borrow_mut(|st| {
             if !remote {
                 st.buttons_down[slot] = down;
+                st.sent_buttons[slot] = false;
             } else if !down && st.buttons_down[slot] {
                 st.buttons_down[slot] = false;
                 return true;
+            } else {
+                st.sent_buttons[slot] = down;
             }
             false
         });
@@ -280,7 +528,7 @@ fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
         if local_release {
             // Lokal gedrückt (z. B. beim Ziehen über die Kante): das Loslassen braucht das
             // lokale System, und der Server-Kern macht daraus ggf. den Drop.
-            let _ = shared.events.send(CaptureEvent::Button { button, down: false });
+            emit(CaptureEvent::Button { button, down: false });
             return false;
         }
     }
@@ -289,7 +537,7 @@ fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
         if msg == WM_MOUSEMOVE {
             let (x, y) = (info.pt.x, info.pt.y);
             if let Some(edge) = outer_edge_at(x, y) {
-                let _ = shared.events.send(CaptureEvent::EdgeHit { edge, x, y, buttons_down: buttons_down() });
+                emit(CaptureEvent::EdgeHit { edge, x, y, buttons_down: buttons_down() });
             }
         }
         return false;
@@ -321,7 +569,7 @@ fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
         WM_MOUSEHWHEEL => CaptureEvent::Wheel { dx: wheel, dy: 0 },
         _ => return true,
     };
-    let _ = shared.events.send(event);
+    emit(event);
     true
 }
 
@@ -332,7 +580,7 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
     let fake_ctrl = info.scanCode & 0x200 != 0;
     let extended = info.flags & LLKHF_EXTENDED != 0;
     let key = if fake_ctrl { None } else { hid_from_windows(info.scanCode, extended, info.vkCode) };
-    let options = shared.keys.lock().unwrap_or_else(|e| e.into_inner());
+    let options = KEY_OPTIONS.with_borrow(Rc::clone);
     STATE.with_borrow_mut(|st| {
         let was_down = std::mem::replace(&mut st.pressed[vk], !up);
         if fake_ctrl {
@@ -355,13 +603,14 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
                         // Loslassen von Alt bzw. der Windows-Taste.
                         inject::tap_menu_mask();
                     }
-                    let _ = shared.events.send(event);
+                    emit(event);
                 }
                 return swallow;
             }
         }
         if !remote {
             st.local_down[vk] = !up;
+            st.sent[vk] = None;
             return false;
         }
         if st.local_down[vk] {
@@ -377,8 +626,8 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
             shared.remote.store(false, Ordering::Release);
             let (x, y) = primary_center();
             unsafe { SetCursorPos(x, y) };
-            cursor::restore();
-            let _ = shared.events.send(CaptureEvent::PanicReturn);
+            pass(FromHook::RestoreCursor);
+            emit(CaptureEvent::PanicReturn);
             return true;
         }
         if fake_ctrl {
@@ -396,12 +645,14 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
             Some(key) if !up && is_typing_key(key) => {
                 // Zeichenmodus: was die Taste im Layout des Vordergrundfensters ergibt
                 let chars = layout::key_chars(info.vkCode, info.scanCode & 0xFF, st.modifiers(), layout::foreground_layout());
-                let _ = shared.events.send(CaptureEvent::Typed { key, chars });
+                st.sent[vk] = Some(key);
+                emit(CaptureEvent::Typed { key, chars });
             }
             Some(key) => {
-                let _ = shared.events.send(CaptureEvent::Key { key, down: !up });
+                st.sent[vk] = (!up).then_some(key);
+                emit(CaptureEvent::Key { key, down: !up });
             }
-            None => tracing::debug!(vk = info.vkCode, scan = info.scanCode, "Taste ohne Zuordnung"),
+            None => pass(FromHook::Unmapped { vk: info.vkCode, scan: info.scanCode }),
         }
         true
     })
@@ -457,4 +708,159 @@ fn buttons_down() -> bool {
     [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2]
         .iter()
         .any(|&vk| unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
+    };
+
+    use super::*;
+
+    /// Entfernt die Hooks so, wie Windows es nach einer Zeitüberschreitung tut: Der Hook-Thread merkt
+    /// nichts davon und behält die alten Handles.
+    pub(super) const WM_DROP_HOOKS: u32 = WM_APP + 0x5F;
+
+    /// Eigene Eingabe für beide Hooks (die Probe des Wächters)
+    fn nudge() {
+        assert!(
+            watchdog::probe(),
+            "Windows lehnt SendInput ab – der Test braucht eine aktive Sitzung (nicht gesperrt, RDP-Fenster nicht \
+             minimiert)"
+        );
+    }
+
+    /// Erzeugt eigene Eingaben, bis `done` gilt
+    fn wait_for(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) -> Duration {
+        let start = Instant::now();
+        while !done() {
+            assert!(
+                start.elapsed() < timeout,
+                "{what}: nach {timeout:?} nicht eingetreten (vorne ein Fenster mit Administratorrechten? Dann wartet \
+                 der Wächter absichtlich)"
+            );
+            nudge();
+            thread::sleep(Duration::from_millis(50));
+        }
+        start.elapsed()
+    }
+
+    /// Beide Hooks wurden seit `before` aufgerufen.
+    fn both_called_since(before: Calls) -> impl Fn() -> bool {
+        move || {
+            let now = hook_calls();
+            now.mouse != before.mouse && now.keyboard != before.keyboard
+        }
+    }
+
+    /// Ein Punkt an einer äußeren Kante des primären Monitors
+    fn outer_edge_point() -> Option<(i32, i32)> {
+        let (cx, cy) = primary_center();
+        let m = monitor_rect(cx, cy)?;
+        [(m.left, cy), (m.right - 1, cy), (cx, m.top), (cx, m.bottom - 1)]
+            .into_iter()
+            .find(|&(x, y)| outer_edge_at(x, y).is_some())
+    }
+
+    /// Steht der Cursor kurz an der Kante, meldet der Hook `EdgeHit`: Der ganze Weg bis zum Server-Kern
+    /// geht, über Warteschlange und `forward`.
+    fn edge_hit_arrives(events: &mut tokio::sync::mpsc::UnboundedReceiver<CaptureEvent>) {
+        let Some((x, y)) = outer_edge_point() else {
+            return eprintln!("keine äußere Kante am primären Monitor – Weg zum Server-Kern ungeprüft");
+        };
+        // Wie eine echte Maus (nicht markiert): ein Pixel hin und zurück an die Kante
+        let shake = |dx| INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT { dx, dy: 0, mouseData: 0, dwFlags: MOUSEEVENTF_MOVE, time: 0, dwExtraInfo: 0 },
+            },
+        };
+        let mut was = POINT { x: 0, y: 0 };
+        unsafe { GetCursorPos(&mut was) };
+        while events.try_recv().is_ok() {}
+        unsafe { SetCursorPos(x, y) };
+        let start = Instant::now();
+        let mut hit = false;
+        while !hit && start.elapsed() < Duration::from_secs(2) {
+            let inputs = [shake(1), shake(-1)];
+            unsafe { SendInput(2, inputs.as_ptr(), size_of::<INPUT>() as i32) };
+            thread::sleep(Duration::from_millis(30));
+            while let Ok(event) = events.try_recv() {
+                hit |= matches!(event, CaptureEvent::EdgeHit { .. });
+            }
+        }
+        unsafe { SetCursorPos(was.x, was.y) };
+        assert!(hit, "kein EdgeHit bei ({x}, {y})");
+    }
+
+    /// Echte Hooks, echter Wächter: Windows entfernt die Hooks (hier nachgestellt), der Wächter merkt es
+    /// und lässt sie neu setzen. Erzeugt echte Eingaben (die Probe des Wächters; der Cursor steht kurz an
+    /// einer Bildschirmkante), deshalb nur mit `QROSS_INPUT_TEST=1`; braucht eine aktive Sitzung.
+    #[test]
+    fn lost_hooks_are_set_again_by_the_watchdog() {
+        if std::env::var_os("QROSS_INPUT_TEST").is_none() {
+            return eprintln!("erzeugt echte Eingaben – nur mit QROSS_INPUT_TEST=1, übersprungen");
+        }
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let capture = start(tx).unwrap();
+        wait_for("Hooks sehen Eingaben", Duration::from_secs(2), both_called_since(hook_calls()));
+        edge_hit_arrives(&mut events);
+
+        // Lebende Hooks und eigene Eingaben: kein Fehlalarm
+        let rehooks = REHOOKS.load(Ordering::Relaxed);
+        let calm = Instant::now();
+        while calm.elapsed() < Duration::from_secs(3) {
+            nudge();
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(REHOOKS.load(Ordering::Relaxed), rehooks, "Fehlalarm bei lebenden Hooks");
+
+        unsafe { PostThreadMessageW(capture.thread_id, WM_DROP_HOOKS, 0, 0) };
+        thread::sleep(Duration::from_millis(200));
+        let dead = hook_calls();
+        for _ in 0..5 {
+            nudge();
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(hook_calls(), dead, "die Hooks sind noch da");
+
+        let took = wait_for("Wächter setzt die Hooks neu", Duration::from_secs(10), || {
+            REHOOKS.load(Ordering::Relaxed) > rehooks
+        });
+        eprintln!("neu gesetzt nach {took:?}");
+        wait_for("Hooks sehen wieder Eingaben", Duration::from_secs(2), both_called_since(hook_calls()));
+        edge_hit_arrives(&mut events);
+        assert_eq!(REHOOKS.load(Ordering::Relaxed), rehooks + 1, "genau einmal neu gesetzt");
+        drop(capture);
+    }
+
+    #[test]
+    fn resync_releases_what_the_client_still_holds() {
+        thread::spawn(|| {
+            let (queue, mut from_hook) = spsc::queue(16);
+            OUT.set(Some((queue, thread::current())));
+            STATE.with_borrow_mut(|st| {
+                st.sent[0x41] = Some(KeyCode::A);
+                st.sent_buttons[MouseButton::Right as usize] = true;
+                st.altgr = true;
+            });
+            resync();
+            let mut released = Vec::new();
+            while let Some(FromHook::Event(event)) = from_hook.pop() {
+                released.push(event);
+            }
+            assert!(released.contains(&CaptureEvent::Key { key: KeyCode::A, down: false }), "{released:?}");
+            assert!(released.contains(&CaptureEvent::Button { button: MouseButton::Right, down: false }), "{released:?}");
+            STATE.with_borrow(|st| {
+                assert!(st.sent.iter().all(Option::is_none) && !st.sent_buttons.contains(&true) && !st.altgr);
+            });
+            resync();
+            assert!(from_hook.pop().is_none(), "nichts doppelt loslassen");
+        })
+        .join()
+        .unwrap();
+    }
 }

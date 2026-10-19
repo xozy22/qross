@@ -30,6 +30,12 @@ mod mac;
 #[cfg(target_os = "macos")]
 use mac as imp;
 
+// Für die Hooks unter Windows, ohne Systemaufrufe und deshalb überall getestet
+#[cfg(any(windows, test))]
+mod hook_watch;
+#[cfg(any(windows, test))]
+mod spsc;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod arboard_clipboard;
 #[cfg(target_os = "linux")]

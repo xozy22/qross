@@ -6,6 +6,7 @@ mod game;
 mod inject;
 mod layout;
 mod shell;
+mod watchdog;
 
 use std::ptr::{null, null_mut};
 

@@ -50,7 +50,8 @@ if-addrs.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # IpHelper: Netzwerkkarten, Gateway und dessen MAC für Profile je Ort
-windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+# Security, StationsAndDesktops, SystemInformation: Wächter für die Eingabe-Hooks
+windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation"] }
 # COM (Drag & Drop, Shell) – mit windows-sys nicht umsetzbar
 windows = { version = "0.62", features = [
     "Win32_Foundation",
