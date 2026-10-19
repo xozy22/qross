@@ -8,6 +8,28 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.9.0] - 2026-10-19
+
+### Verbessert
+
+- **Aufgeräumte Server-Ansicht:** Die Anordnung füllt die ganze Fläche. Die Seitenleiste zeigt nur noch die
+  Rechner und die Details des ausgewählten, in drei Reitern: Verbindung (Latenz, Verlauf, Verzögerung der
+  Eingabe), Rechte und Info mit Umbenennen und Entfernen. Ausgewählt wird per Klick in der Liste oder in der
+  Anordnung; der Server selbst zeigt dort Fläche, Port und Fingerprint. Bei mehreren Monitoren steht die Skizze
+  klein unter der Beschriftung statt dahinter.
+- **Eine Stelle für Verbindungsanfragen:** Eine Anfrage steht als schmale Zeile über den Rechnern. „Prüfen“
+  öffnet den Dialog mit dem Fingerprint, das × ignoriert sie.
+- **Einstellungen nach Geltung sortiert:** Oben die Bereiche „Server“ und „Client“ für das aktive Profil mit
+  allem, was bisher in der Hauptansicht stand: Name, Port, Auffindbarkeit, Ecken-Totzone, Verzögerung, Rechte
+  für neue Rechner, Fingerprints, Testmodus und die Konfiguration als Datei. Darunter, was für alle Profile gilt.
+- **Ruhigere Tastaturseite:** Die Kürzel stehen als Liste, jedes mit einem Menü für Ändern und Entfernen,
+  unbelegte mit „Belegen“. Standard und Aus der Fang-Taste liegen im selben Menü.
+- **Kompakte Client-Ansicht:** Oben der Status mit Latenz, darunter die Verbindungsqualität wie beim Server und
+  der eingestellte Server. Die Suche nach anderen Servern ist eingeklappt, solange eine Verbindung besteht; Name
+  und Testmodus stehen unter Einstellungen → Client.
+- **Kleinigkeiten:** Das Zahnrad für die Einstellungen sitzt rechts neben Start und Stopp. Lange Erklärungen
+  stehen hinter einem „?“.
+
 ## [0.8.3] - 2026-10-19
 
 ### Behoben
@@ -410,6 +432,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.9.0]: https://github.com/xozy22/qross/compare/v0.8.3...v0.9.0
 [0.8.3]: https://github.com/xozy22/qross/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/xozy22/qross/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/xozy22/qross/compare/v0.8.0...v0.8.1
