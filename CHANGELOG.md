@@ -8,7 +8,7 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
-## [Unreleased]
+## [0.8.0] - 2026-10-19
 
 ### Neu
 
@@ -64,8 +64,8 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
 
 ### Verbessert
 
-- **Einstellungen mit Bereichen:** Allgemein, Profile, Tastatur, Spielemodus, Updates, Zwischenablage und Info
-  sind jetzt je eine eigene Seite statt einer langen Liste zum Scrollen. Bei schmalem Fenster stehen die Bereiche
+- **Einstellungen mit Bereichen:** Allgemein, Profile, Tastatur, Spielemodus, Bildschirmschoner, Updates,
+  Zwischenablage und Info sind jetzt je eine eigene Seite statt einer langen Liste zum Scrollen. Bei schmalem Fenster stehen die Bereiche
   als Zeile oben; Pfeiltasten wechseln zwischen ihnen, und beim nächsten Öffnen kommt der zuletzt gewählte.
 - **Autostart auf allen Systemen überarbeitet:** Qross verwaltet den Eintrag jetzt selbst, an denselben Orten
   wie bisher (Windows: Autostart-Liste, macOS: Anmeldeobjekte, Linux: `~/.config/autostart`). Verschiebst du
@@ -361,6 +361,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.8.0]: https://github.com/xozy22/qross/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/xozy22/qross/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/xozy22/qross/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/xozy22/qross/compare/v0.4.0...v0.5.0
