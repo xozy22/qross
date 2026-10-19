@@ -8,6 +8,36 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.11.0] - 2026-10-20
+
+### Neu
+
+- **Eigene Titelleiste:** Minimieren, Maximieren und Schließen sitzen jetzt rechts in der Kopfzeile von Qross,
+  im selben Stil wie der Rest der Oberfläche, statt in der Leiste des Systems darüber. An der Kopfzeile lässt
+  sich das Fenster verschieben, ein Doppelklick maximiert es. Unter macOS bleiben die gewohnten Ampelknöpfe,
+  eingebettet in die Kopfzeile.
+
+### Verbessert
+
+- **Windows: Ruhe im Hintergrund:** Liegt Qross im Tray oder ist das Fenster minimiert, ruht die Oberfläche
+  jetzt ganz. Bisher liefen ihre Animationen unsichtbar weiter, solange Server oder Client liefen, und kosteten
+  dauerhaft Rechenzeit: in der Messung rund 10 % eines Prozessorkerns, jetzt unter 0,5 %.
+- **Ruhe hinter Dialogen:** Hinter offenen Einstellungen, Neuigkeiten und Abfragen halten die Animationen der
+  Oberfläche an. Ohne Grafikkarte, etwa in einer VM oder über Remotedesktop, kostete der weichgezeichnete
+  Hintergrund sonst fast einen ganzen Prozessorkern.
+- **Weniger Arbeit bei jedem Wechsel:** Das Tray-Symbol ändert nur noch, was sich wirklich geändert hat, und
+  hält die Verbindung dabei nicht auf. Die Oberfläche baut sich höchstens einmal pro Bild neu auf und gar nicht,
+  solange das Fenster versteckt ist; beim Öffnen zeigt sie gleich den neuesten Stand.
+- **macOS: App Nap nur im Betrieb:** Qross schaltet App Nap nur noch ab, solange Server oder Client laufen.
+  Gestoppt darf macOS wieder sparen, das schont den Akku.
+
+### Behoben
+
+- **Unruhige Kopfzeile ohne Server:** War der Server nicht erreichbar, sprang die Kopfzeile des Clients ständig
+  zwischen „Verbinde …“ und „keine Verbindung“ und verschob dabei ihre Aufteilung. Jetzt steht dort ruhig
+  „Server nicht erreichbar“, der Grund im Tooltip, bis die Verbindung steht; Tray und Client-Ansicht sagen
+  dasselbe.
+
 ## [0.10.0] - 2026-10-19
 
 ### Neu
@@ -443,6 +473,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.11.0]: https://github.com/xozy22/qross/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/xozy22/qross/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/xozy22/qross/compare/v0.8.3...v0.9.0
 [0.8.3]: https://github.com/xozy22/qross/compare/v0.8.2...v0.8.3
