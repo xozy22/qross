@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use qross_core::finder::{self as cursor_finder, Cue};
@@ -14,9 +14,9 @@ use qross_core::sharing::{describe as describe_sharing, SharingRules};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard, FinderOverlay, SecureInput};
 use qross_proto::{
-    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
-    DragMessage, FileEntry, GameState, Input, Platform, Rect, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION,
-    SERVER_VERSION,
+    encode_datagram, is_sampled_input, is_sampled_move, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData,
+    Control, CursorFinder, Datagram, DragMessage, FileEntry, GameState, Input, Latency, LatencySummary, Platform, Rect,
+    SampleId, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -26,6 +26,7 @@ use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Notify, Ready};
 use crate::files::{FileOutcome, Receiver, Staging};
 use crate::game::{self, Detector};
+use crate::latency::{self, Meter};
 use crate::progress::{Direction, Kind, Progress, Transfers};
 use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
@@ -185,6 +186,10 @@ pub enum ServerNotice {
     /// Wegen der sicheren Tastatureingabe bleibt der Cursor hier: vom Client `from` zurückgeholt
     /// bzw. ein Wechsel wurde verhindert (`from: None`, einmal, solange sie an ist).
     SecureInputHold { from: Option<String> },
+    /// Verzögerung der Eingabekette zu einem Client, etwa jede Sekunde, solange sich etwas ändert
+    /// (siehe [`latency`]). Ohne `client_reports` (Client älter als `LATENCY_SINCE`) gibt es nur den
+    /// Server-Anteil.
+    Latency { name: String, summary: LatencySummary, client_reports: bool },
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -222,12 +227,13 @@ enum NetEvent {
 }
 
 /// Angenommen: Name des Servers fürs `Welcome`, die Rechte des Clients, die sich mit den Regeln ändern,
-/// der Cursor-Finder und weitere Nachrichten an ihn auf dem Control-Stream
+/// der Cursor-Finder, weitere Nachrichten an ihn auf dem Control-Stream und die Messung der Eingabekette
 struct Admitted {
     server_name: String,
     sharing: watch::Receiver<Sharing>,
     cursor_finder: watch::Receiver<CursorFinder>,
     control: mpsc::UnboundedReceiver<Control>,
+    latency: latency::Shared,
 }
 
 /// Zwischenordner für ankommende Dateien
@@ -243,7 +249,7 @@ struct ClientHandle {
     /// Unterscheidet eine neue Verbindung vom selben Client von der alten.
     id: usize,
     conn: Connection,
-    input: mpsc::UnboundedSender<Input>,
+    input: InputTx,
     /// Zuletzt gemeldete Fläche und Monitore (für die Oberfläche)
     screen: Rect,
     monitors: Vec<Rect>,
@@ -259,7 +265,15 @@ struct ClientHandle {
     control: mpsc::UnboundedSender<Control>,
     /// Folgt dem Bildschirmschoner des Servers (`Control::FollowsScreenSaver`)
     follows_saver: bool,
+    /// Verzögerung der Eingabekette; das Ergebnis geht jede Sekunde hinaus, solange er verbunden ist
+    /// (an die Oberfläche und über den Control-Stream an ihn)
+    latency: latency::Shared,
+    _latency_reports: AbortOnDrop,
 }
+
+/// Eingaben an den Input-Stream eines Clients, mit dem Zeitpunkt ihrer Erfassung (Stichproben der
+/// Eingabekette; `None`, wenn sie nicht aus der Erfassung stammen)
+type InputTx = mpsc::UnboundedSender<(Input, Option<Instant>)>;
 
 impl Server {
     pub fn bind(config: ServerConfig, identity: &Identity, trust: TrustStore) -> Result<Self> {
@@ -414,6 +428,32 @@ impl Server {
         }))
     }
 
+    /// Gibt das Ergebnis der Messung der Eingabekette jede Sekunde heraus, wenn sich etwas geändert
+    /// hat: an die Oberfläche und, sobald er mitmisst, an den Client.
+    fn report_latency(&self, name: &str, latency: &latency::Shared, control: mpsc::UnboundedSender<Control>) -> AbortOnDrop {
+        let (notices, name, meter) = (self.notices.clone(), name.to_owned(), latency.clone());
+        AbortOnDrop(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(latency::SUMMARY_EVERY);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let (summary, client_reports) = {
+                    let mut meter = meter.lock().unwrap();
+                    match meter.take_summary(Instant::now()) {
+                        Some(summary) => (summary, meter.client_reports()),
+                        None => continue,
+                    }
+                };
+                if let Some(tx) = &notices {
+                    let _ = tx.send(ServerNotice::Latency { name: name.clone(), summary, client_reports });
+                }
+                if client_reports && control.send(Control::Latency(Latency::Summary(summary))).is_err() {
+                    return;
+                }
+            }
+        }))
+    }
+
     fn notify_action(&self, action: &Action) {
         match action {
             Action::Send { to, input: Input::Enter { .. } } => self.notify(ServerNotice::CursorOn { screen: to.clone() }),
@@ -523,9 +563,12 @@ impl Server {
         self.notify(ServerNotice::LocalScreenChanged { screen: local_screen, monitors: local_monitors.clone() });
 
         loop {
+            // Wann das auslösende Ereignis aus der Erfassung abgeholt wurde (Eingabekette)
+            let mut captured = None;
             let actions = tokio::select! {
                 event = events.recv() => match event {
                     Some(CaptureEvent::MouseDelta { mut dx, mut dy }) => {
+                        captured = Some(Instant::now());
                         // Schon wartende Bewegungen zusammenfassen (z. B. 8-kHz-Mäuse oder kurz
                         // ausgelasteter Rechner): ein Datagramm statt vieler, ohne Wartezeit.
                         let mut next = None;
@@ -547,7 +590,10 @@ impl Server {
                         }
                         actions
                     }
-                    Some(event) => self.on_capture(&mut state, event),
+                    Some(event) => {
+                        captured = Some(Instant::now());
+                        self.on_capture(&mut state, event)
+                    }
                     None => bail!("Eingabe-Erfassung wurde beendet"),
                 },
                 Some(event) = net_rx.recv() => match event {
@@ -567,11 +613,13 @@ impl Server {
                                     actions = state.handle(ServerEvent::ClientDisconnected { name: name.clone() });
                                 }
                                 self.notify(ServerNotice::ClientConnected { name: name.clone(), addr, screen });
-                                let input = spawn_input_writer(conn.clone(), name.clone());
+                                let latency = Meter::shared(Instant::now());
+                                let input = spawn_input_writer(conn.clone(), name.clone(), latency.clone());
                                 let quality = self.monitor_quality(&conn, &name);
                                 let sharing = rules.borrow().for_client(&name);
                                 let (sharing_tx, sharing_rx) = watch::channel(sharing);
                                 let (control_tx, control_rx) = mpsc::unbounded_channel();
+                                let latency_reports = self.report_latency(&name, &latency, control_tx.clone());
                                 let handle = ClientHandle {
                                     id: conn.stable_id(),
                                     conn,
@@ -584,6 +632,8 @@ impl Server {
                                     told_positions: Default::default(),
                                     control: control_tx,
                                     follows_saver: false,
+                                    latency: latency.clone(),
+                                    _latency_reports: latency_reports,
                                 };
                                 clients.insert(name.clone(), handle);
                                 clip_synced.lock().unwrap().remove(&name);
@@ -592,6 +642,7 @@ impl Server {
                                     sharing: sharing_rx,
                                     cursor_finder: self.cursor_finder.0.subscribe(),
                                     control: control_rx,
+                                    latency,
                                 }));
                                 info!("Client „{name}“ verbunden ({}×{})", screen.width, screen.height);
                                 if sharing != Sharing::ALL {
@@ -708,7 +759,12 @@ impl Server {
                         Vec::new()
                     }
                     NetEvent::Closed { name, id } if is_current(&clients, &name, id) => {
-                        clients.remove(&name);
+                        if let Some(client) = clients.remove(&name) {
+                            let summary = client.latency.lock().unwrap().summary(Instant::now());
+                            if summary.mouse.is_some() || summary.keys.is_some() {
+                                info!("Verzögerung der Eingabekette zu „{name}“: {}", latency::describe(&summary));
+                            }
+                        }
                         info!("Client „{name}“ getrennt");
                         transfers.abort_receiving(Some(&name), "Verbindung getrennt");
                         self.notify(ServerNotice::ClientDisconnected { name: name.clone() });
@@ -791,7 +847,7 @@ impl Server {
                     }
                 }
                 let files = FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers };
-                apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops);
+                apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops, captured);
             }
             self.report_hold(&state, &mut hold);
         }
@@ -971,6 +1027,8 @@ fn deliver_files(ready: Ready, clipboard: &ClipboardHub, clip_synced: &ClipSynce
     });
 }
 
+/// `captured`: wann das auslösende Ereignis aus der Erfassung kam (Stichproben der Eingabekette)
+#[allow(clippy::too_many_arguments)]
 fn apply(
     action: Action,
     capture: &dyn Capture,
@@ -979,6 +1037,7 @@ fn apply(
     clip_synced: &ClipSynced,
     files: FileSide<'_>,
     drops: &mut Receiver,
+    captured: Option<Instant>,
 ) {
     match action {
         Action::CaptureRemote => capture.capture_remote(),
@@ -992,7 +1051,7 @@ fn apply(
                 _ => debug!(?input, "→ „{to}“"),
             }
             if let Some(client) = clients.get(&to) {
-                let _ = client.input.send(input);
+                let _ = client.input.send((input, captured));
             }
         }
         Action::SyncLocks { to } => {
@@ -1000,11 +1059,11 @@ fn apply(
             let locks = capture.locks();
             if let (true, Some(client)) = (locks.is_known(), clients.get(&to)) {
                 debug!("Sperrtasten → „{to}“: {}", locks.describe());
-                let _ = client.input.send(Input::Locks(locks));
+                let _ = client.input.send((Input::Locks(locks), None));
             }
         }
-        Action::Move { to, mv } => send_datagram(clients, &to, Datagram::MouseMove(mv)),
-        Action::MoveBy { to, delta } => send_datagram(clients, &to, Datagram::MouseDelta(delta)),
+        Action::Move { to, mv } => send_datagram(clients, &to, Datagram::MouseMove(mv), captured),
+        Action::MoveBy { to, delta } => send_datagram(clients, &to, Datagram::MouseDelta(delta), captured),
         Action::SyncClipboard { to } => {
             let Some(client) = clients.get(&to) else { return };
             let rights = *client.sharing.borrow();
@@ -1077,18 +1136,24 @@ fn apply(
     }
 }
 
-fn send_datagram(clients: &HashMap<String, ClientHandle>, to: &str, datagram: Datagram) {
-    if let Some(client) = clients.get(to) {
-        if let Err(e) = client.conn.send_datagram(encode_datagram(&datagram).into()) {
-            debug!("Datagramm an „{to}“ nicht gesendet: {e}");
-        }
+fn send_datagram(clients: &HashMap<String, ClientHandle>, to: &str, datagram: Datagram, captured: Option<Instant>) {
+    let Some(client) = clients.get(to) else { return };
+    if let Err(e) = client.conn.send_datagram(encode_datagram(&datagram).into()) {
+        return debug!("Datagramm an „{to}“ nicht gesendet: {e}");
+    }
+    let (epoch, seq) = match datagram {
+        Datagram::MouseMove(mv) => (mv.epoch, mv.seq),
+        Datagram::MouseDelta(delta) => (delta.epoch, delta.seq),
+    };
+    if let Some(captured) = captured.filter(|_| is_sampled_move(seq)) {
+        client.latency.lock().unwrap().sent(SampleId::Mouse { epoch, seq }, captured, Instant::now());
     }
 }
 
 /// Dateien auflisten, `DragStart` senden und die Inhalte übertragen.
 async fn start_file_drag(
     conn: Connection,
-    input: mpsc::UnboundedSender<Input>,
+    input: InputTx,
     to: String,
     transfer: u64,
     roots: Vec<PathBuf>,
@@ -1101,7 +1166,7 @@ async fn start_file_drag(
     };
     let total: u64 = entries.iter().map(|e| e.entry.size).sum();
     info!("übertrage {} Einträge ({}) an „{to}“", entries.len(), files::human_size(total));
-    let _ = input.send(Input::DragStart { transfer, entries: entries.iter().map(|e| e.entry.clone()).collect() });
+    let _ = input.send((Input::DragStart { transfer, entries: entries.iter().map(|e| e.entry.clone()).collect() }, None));
     let started = std::time::Instant::now();
     match files::send_tracked(conn, StreamKind::File, transfer, entries, &to, &transfers).await {
         Ok(()) => {
@@ -1115,13 +1180,20 @@ async fn start_file_drag(
     }
 }
 
-fn spawn_input_writer(conn: Connection, name: String) -> mpsc::UnboundedSender<Input> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<Input>();
+/// Schreibt die Eingaben auf den Input-Stream. Ihre laufende Nummer dort kennt auch der Client; daran
+/// ordnet die Messung der Eingabekette seine Rückmeldungen zu.
+fn spawn_input_writer(conn: Connection, name: String, latency: latency::Shared) -> InputTx {
+    let (tx, mut rx) = mpsc::unbounded_channel::<(Input, Option<Instant>)>();
     tokio::spawn(async move {
         let result: Result<()> = async {
             let mut stream = open_input(&conn).await?;
-            while let Some(input) = rx.recv().await {
+            let mut index = 0u64;
+            while let Some((input, captured)) = rx.recv().await {
+                index += 1;
                 write_frame(&mut stream, &input).await?;
+                if let Some(captured) = captured.filter(|_| is_sampled_input(&input)) {
+                    latency.lock().unwrap().sent(SampleId::Input { index }, captured, Instant::now());
+                }
             }
             Ok(())
         }
@@ -1166,8 +1238,8 @@ async fn handle_connection(
         tx.send(hello).map_err(|_| anyhow!("Server wurde beendet"))?;
         reply_rx.await.map_err(|_| anyhow!("Server wurde beendet"))?
     };
-    let sharing = match verdict {
-        Ok(Admitted { server_name, sharing, cursor_finder, control }) => {
+    let (sharing, latency) = match verdict {
+        Ok(Admitted { server_name, sharing, cursor_finder, control, latency }) => {
             debug!("„{name}“ läuft unter {platform:?}");
             // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore,
             // ob sie Zeichen eingeben, die Sperrtasten setzen und dem Bildschirmschoner folgen können
@@ -1175,7 +1247,7 @@ async fn handle_connection(
             let welcome = Control::Welcome { version: SERVER_VERSION, server_name, platform: Platform::current() };
             write_frame(&mut send, &welcome).await?;
             tokio::spawn(send_control(send, sharing.clone(), cursor_finder, control, name.clone()));
-            sharing
+            (sharing, latency)
         }
         Err(reason) => {
             write_frame(&mut send, &Control::Reject { reason }).await?;
@@ -1209,6 +1281,9 @@ async fn handle_connection(
             Ok(Some(Control::FollowsScreenSaver)) => {
                 let _ = tx.send(NetEvent::FollowsScreenSaver { name: name.clone(), id });
             }
+            Ok(Some(Control::Latency(Latency::Report(report)))) => {
+                latency.lock().unwrap().report(&report, Instant::now());
+            }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht"),
             Ok(None) | Err(_) => break,
         }
@@ -1219,9 +1294,9 @@ async fn handle_connection(
 }
 
 /// Schickt dem Client nach dem `Welcome` seine Rechte und den Cursor-Finder (diesen nur, wenn er
-/// eingeschaltet ist), danach jede Änderung und was sonst ansteht (Bildschirmschoner). Clients bis
-/// Qross 0.6 lesen den Control-Stream nach dem `Welcome` nicht mehr, bei ihnen bleibt das ungelesen
-/// liegen; Clients aus 0.7 überspringen, was sie nicht kennen.
+/// eingeschaltet ist), danach jede Änderung und was sonst ansteht (Bildschirmschoner, Ergebnis der
+/// Messung der Eingabekette). Clients bis Qross 0.6 lesen den Control-Stream nach dem `Welcome` nicht
+/// mehr, bei ihnen bleibt das ungelesen liegen; Clients aus 0.7 überspringen, was sie nicht kennen.
 async fn send_control(
     mut control: SendStream,
     mut sharing: watch::Receiver<Sharing>,

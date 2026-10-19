@@ -3,7 +3,8 @@
 Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischenablage, seit Qross 0.4 um
 Drag & Drop vom Client zum Server, seit Qross 0.5 um die einzelnen Monitore eines Clients, seit Qross 0.6
 um den Spielemodus, seit Qross 0.7 um Zeichen statt Tastenpositionen und Rechte je Rechner und seit Qross 0.8
-um den Abgleich von Feststelltaste, Num und Rollen (siehe unten).
+um den Abgleich von Feststelltaste, Num und Rollen, den Cursor-Finder, den Bildschirmschoner und die Messung
+der Eingabekette (siehe unten).
 
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
@@ -30,7 +31,7 @@ Implementierung: `crates/qross-proto`.
 
 | Kanal | Richtung | Zuverlässig | Inhalt |
 |---|---|---|---|
-| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing`, `SyncsLocks`, `CursorFinder`, `FollowsScreenSaver`, `ScreenSaver` |
+| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing`, `SyncsLocks`, `CursorFinder`, `FollowsScreenSaver`, `ScreenSaver`, `Latency` |
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel`, im Zeichenmodus `Text`, `Shortcut`, `Locks` |
 | Datagramm | Server → Client | **nein** | `MouseMove`, im Spielemodus `MouseDelta` |
@@ -73,6 +74,8 @@ große Schwachpunkt von Synergy.
    Cursor-Finder (`CursorFinder`, sofern eingeschaltet).
    Ab Version 10 meldet der Client mit `FollowsScreenSaver` direkt nach dem `Welcome`, dass er dem
    Bildschirmschoner des Servers folgen kann (siehe Bildschirmschoner).
+   Ab Version 11 meldet der Client mit einer leeren `Latency::Report`, dass er die Eingabekette mitmisst (siehe
+   Verzögerung der Eingabekette).
 3. Der Server öffnet den Input-Stream.
 4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`, bei Clients mit
    `SyncsLocks` gleich gefolgt von `Locks`. Danach folgen `MouseMove`-Datagramme (im Spielemodus `MouseDelta`)
@@ -439,6 +442,68 @@ Die Stufe richtet sich nach dem schlechtesten der drei Werte (Grenzen jeweils au
 | Mäßig | unter 80 ms | unter 25 ms | unter 5 % |
 | Schlecht | darüber | darüber | darüber |
 
+## Verzögerung der Eingabekette
+
+Ab Welcome-Version 11 misst Qross nebenbei, wie lange eine Eingabe vom Server bis zum Einspeisen am Client
+braucht, aufgeteilt in drei Teile und für Mausbewegungen und Tasten getrennt, als Median und 95. Perzentil der
+letzten Minute. Die Oberfläche zeigt das im aufgeklappten Panel der Verbindungsqualität (Server: je Client, Client:
+im Status). Implementierung: `crates/qross-net/src/latency.rs`, Wire-Typen in `crates/qross-proto/src/latency.rs`.
+
+| Teil | Von | Bis | Gemessen mit |
+|---|---|---|---|
+| Server | Ereignis aus der Erfassung abgeholt | an QUIC übergeben (`send_datagram` bzw. `write_frame` zurück) | Uhr des Servers |
+| Netz | an QUIC übergeben | beim Client gelesen (Datagramm bzw. Nachricht) | beide Uhren, Versatz geschätzt |
+| Client | beim Client gelesen | Einspeisen im Einspeise-Thread erledigt | Uhr des Clients |
+
+**Stichproben ohne zusätzliche Bytes auf dem Eingabeweg.** Beide Seiten erkennen dieselben Eingaben ohne Absprache:
+Maus-Datagramme (`MouseMove`, `MouseDelta`), deren `seq` durch 32 teilbar ist (bei 125 Hz etwa 4, bei 1000 Hz
+etwa 30 je Sekunde), und jeder Druck einer Taste oder Maustaste auf dem Input-Stream (`Key` und `Button` mit
+`down`, `Text`, `Shortcut`), erkannt an ihrer laufenden Nummer dort (ab 1). Der Server merkt sich für jede
+Stichprobe, wann er sie erfasst und gesendet hat; der Client nimmt beim Lesen die Zeit und reiht hinter die
+Einspeise-Aufträge eine Markierung ein, die der Einspeise-Thread mit der Zeit nach dem letzten Auftrag beantwortet.
+
+**Rückmeldung.** Der Client sammelt höchstens 200 ms und schickt dann auf dem Control-Stream
+`Latency::Report { sent_us, samples }`: seine Uhr beim Absenden und je Stichprobe `id` (`Mouse { epoch, seq }`
+bzw. `Input { index }`), `age_us` (so lange vor `sent_us` kam sie an) und `client_us`. Eine Rückmeldung mit bis
+zu acht Stichproben ist etwa 100 Bytes groß. Gleich nach dem `Welcome` schickt er eine leere; daran erkennt der
+Server, dass der Client mitmisst. Der Server rechnet und schickt etwa jede Sekunde, wenn sich etwas geändert hat,
+`Latency::Summary` mit dem Ergebnis zurück (`Chain` je Art: Server-, Netz-, Client-Anteil und Summe je Stichprobe
+als `Spread { p50_us, p95_us }`, dazu `uncertainty_us`).
+
+**Uhren.** Die Uhren der beiden Rechner haben verschiedene Nullpunkte und laufen leicht verschieden schnell. Jede
+Stichprobe ergibt mit ihrer Rückmeldung einen Austausch wie bei NTP: Versand am Server T1, Empfang am Client T2,
+Rückmeldung T3 = `sent_us`, Ankunft beim Server T4, mit T2 = T3 − `age_us`. Daraus folgen die Umlaufzeit
+δ = (T4 − T1) − (T3 − T2) und der Versatz θ = ((T2 − T1) + (T3 − T4)) / 2. Es gilt der Versatz des Austauschs der
+letzten 10 s mit dem kleinsten δ / 2 + 15 µs je Sekunde Alter (wie `PHI` bei NTP: so weit können Quarzuhren je
+Sekunde auseinanderlaufen). Der Netzanteil einer Stichprobe ist T2 − T1 − θ, begrenzt auf 0 bis δ.
+
+**Genauigkeit und Grenzen:**
+
+- Server- und Client-Anteil messen je eine Uhr (monoton, unter Windows QueryPerformanceCounter) und sind auf etwa
+  eine Mikrosekunde genau.
+- Den Netzanteil kann ohne gemeinsame Uhr niemand genau kennen. Für den besten Austausch ist er δ / 2, richtig nur,
+  wenn Hin- und Rückweg gleich lang dauern. Er liegt höchstens um diesen Wert daneben; die Oberfläche zeigt ihn als
+  „Netzanteil auf ± … genau“ (auf Loopback rund 0,2 ms, im LAN einige zehntel Millisekunden, im WLAN mehr).
+  Schwankungen einzelner Stichproben, etwa ein voller Puffer im WLAN, erscheinen dagegen in voller Höhe, denn
+  sie bleiben im Unterschied T2 − T1 erhalten.
+- Die Wartezeit beim Client bis zur Rückmeldung (bis 200 ms) geht mit der Gangabweichung der Uhren ein, bei 50 ppm
+  also mit höchstens 10 µs.
+- Nicht enthalten: der Weg vom Eingabegerät durch das Betriebssystem bis zum Hook und der Thread-Wechsel vom Hook
+  bis zur Ereignisschleife des Servers (dafür müsste jede Erfassung selbst Zeitstempel setzen), außerdem alles nach
+  dem Einspeisen bis zum Bildschirm. In der Oberfläche als Server zählt die Weitergabe der Erfassung an den
+  laufenden Server mit, sie geschieht vor dem Abholen.
+- Bei zusammengefassten Mausbewegungen (mehrere warten schon) zählt die Zeit der ersten. Verlorene oder vom Client
+  verworfene Datagramme fehlen in Netz- und Client-Anteil, im Server-Anteil zählen sie mit.
+
+Messen auf einem Rechner ohne echte Erfassung und Einspeisung: `cargo run -p qross-net --example latency_probe`
+(Client im selben Prozess) bzw. mit `server` und `qross client … --dry-run` in einem zweiten Fenster.
+
+**Kompatibilität:** Ein neuer Server meldet im `Welcome` die Version 11. Nur dann schickt der Client `Latency`;
+ältere Server bekommen die Nachricht nie (sie trennten bei unbekannten Control-Nachrichten). Das Ergebnis schickt
+der Server nur Clients, die sich gemeldet haben; Clients aus 0.7 lesen den Control-Stream zwar, bekommen es aber
+nie. Für ältere Clients misst der Server nur seinen eigenen Anteil, die Oberfläche zeigt dann nur ihn. Ein neuer
+Client an einem älteren Server misst nichts, dort entfällt die Anzeige.
+
 ## Noch offen
 
 - Drag & Drop mit Linux als Quelle (XDND) und vom Mac-Server aus
@@ -447,6 +512,8 @@ Die Stufe richtet sich nach dem schlechtesten der drei Werte (Grenzen jeweils au
 - Zwischenablage: RTF; virtuelle Dateien (z. B. Outlook-Anhänge) und Dateien erst beim Einfügen übertragen
 - Strg+Alt+Entf, Secure Desktop (UAC)
 - Wayland (libei/InputCapture-Portal)
+- Verzögerung der Eingabekette: Zeitstempel schon im Hook der Erfassung setzen, damit der Thread-Wechsel bis zur
+  Ereignisschleife mitzählt
 
 ## Feststelltaste, Num und Rollen
 

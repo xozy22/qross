@@ -44,6 +44,13 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
   unter Einstellungen → Bildschirmschoner bzw. mit `[screensaver]` in `qross.toml`.
 - **Clients mitsperren** (Standard aus): Beginnt der Bildschirmschoner des Servers, sperren sich die Clients,
   statt nur ihren eigenen zu starten.
+- **Verzögerung der Eingabe messen:** Die Verbindungsqualität zeigt jetzt auch, wie lange eine Eingabe wirklich
+  braucht, vom Server bis sie am Client eingespeist ist – für Mausbewegungen und Tasten getrennt, als Median und
+  95. Perzentil der letzten Minute, aufgeteilt in Server, Netz und Client. Ein Balken zeigt, wo die Zeit bleibt,
+  der Tooltip erklärt die Teile. Gemessen wird an Stichproben (jede 32. Mausbewegung, jeder Tastendruck und
+  Klick), ohne ein Byte mehr auf dem Eingabeweg; der Client meldet seine Zeiten alle 200 ms zurück. Den
+  Unterschied der Uhren beider Rechner schätzt Qross wie NTP; wie genau der Netzanteil damit ist, steht dabei. Mit
+  einem älteren Client zeigt der Server nur seinen eigenen Anteil. Beschreibung in `docs/protokoll.md`.
 
 ### Verbessert
 

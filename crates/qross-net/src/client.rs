@@ -17,9 +17,9 @@ use qross_core::Inject;
 use qross_platform::{Clipboard, FinderOverlay, Injector};
 use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
-    DragMessage, FileEntry, FrameError, GameState, Input, MouseDelta, MouseMove, Platform, Rect, ScreenInfo, Sharing,
-    StreamKind, DEFAULT_PORT, GAME_MODE_SINCE, LOCKS_SINCE, MONITORS_SINCE, PROTOCOL_VERSION, SCREEN_SAVER_SINCE,
-    SHARING_SINCE, TEXT_SINCE,
+    DragMessage, FileEntry, FrameError, GameState, Input, Latency, LatencySummary, MouseDelta, MouseMove, Platform, Rect,
+    ScreenInfo, Sharing, StreamKind, DEFAULT_PORT, GAME_MODE_SINCE, LATENCY_SINCE, LOCKS_SINCE, MONITORS_SINCE,
+    PROTOCOL_VERSION, SCREEN_SAVER_SINCE, SHARING_SINCE, TEXT_SINCE,
 };
 use quinn::{Connection, ConnectionError, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -29,6 +29,7 @@ use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Incoming, Notify, Ready};
 use crate::files::{self, FileOutcome, Receiver, Staging};
 use crate::game::{self, Detector};
+use crate::latency::{self, Collector, Measured, Stamp};
 use crate::progress::{Progress, Transfers};
 use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
@@ -152,11 +153,12 @@ struct Reconnect {
 /// Lebendprüfung nach dem Aufwachen oder einem Netzwechsel (siehe [`wake::answers`])
 type Probe = Pin<Box<dyn Future<Output = bool> + Send>>;
 
+/// Was vom Server kommt; Stichproben der Eingabekette mit dem Zeitpunkt ihres Empfangs
 enum FromServer {
-    Move(MouseMove),
+    Move(MouseMove, Option<Stamp>),
     /// Relative Bewegung (Spielemodus)
-    Delta(MouseDelta),
-    Input(Input),
+    Delta(MouseDelta, Option<Stamp>),
+    Input(Input, Option<Stamp>),
     Clipboard(ClipboardData),
     File(FileOutcome),
     ClipboardFiles { transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
@@ -169,6 +171,8 @@ enum FromServer {
     CursorFinder(CursorFinder),
     /// Bildschirmschoner des Servers begonnen bzw. beendet (seit Qross 0.8)
     ScreenSaver { active: bool, lock: bool },
+    /// Ergebnis der Messung der Eingabekette (ab `LATENCY_SINCE`)
+    Latency(LatencySummary),
 }
 
 /// Zwischenablage dieses Clients: Zugriff, ankommende kopierte Dateien, Meldungen dazu.
@@ -189,6 +193,8 @@ enum ToInjector {
     TakeDragged { x: i32, y: i32, reply: oneshot::Sender<Vec<PathBuf>> },
     /// Dem Bildschirmschoner des Servers folgen
     ScreenSaver { active: bool, lock: bool },
+    /// Stichprobe der Eingabekette: Alles davor ist eingespeist, jetzt die Zeit nehmen.
+    Measured { stamp: Stamp, done: mpsc::UnboundedSender<Measured> },
 }
 
 fn inject_all(inject: &Sender<ToInjector>, events: impl IntoIterator<Item = Inject>) {
@@ -222,6 +228,9 @@ pub enum ClientNotice {
     /// Was der Server für den Cursor-Finder eingestellt hat: nach dem Verbinden, sofern er etwas
     /// zeigt, und bei jeder Änderung. Server bis Qross 0.7 melden das nie; dort bleibt er aus.
     CursorFinder(CursorFinder),
+    /// Verzögerung der Eingabekette vom Server bis hier, etwa jede Sekunde, solange sich etwas ändert
+    /// (siehe [`latency`]). Server vor `LATENCY_SINCE` melden das nie.
+    Latency(LatencySummary),
 }
 
 type Notices<'a> = Option<&'a mpsc::UnboundedSender<ClientNotice>>;
@@ -354,6 +363,9 @@ async fn run_inner(
                 }
                 ToInjector::ScreenSaver { active, lock } => {
                     screensaver::report(active, &injector.screen_saver(active, lock));
+                }
+                ToInjector::Measured { stamp, done } => {
+                    let _ = done.send(Measured { id: stamp.id, received: stamp.received, done: Instant::now() });
                 }
             }
         }
@@ -524,6 +536,17 @@ async fn session(
         info!("Spielemodus: {} im Vordergrund, an den Server gemeldet", game::describe(game));
         write_frame(&mut control, &Control::Game(game)).await?;
     }
+    // Verzögerung der Eingabekette: nur mit Servern, die die Rückmeldung kennen (ältere trennen bei
+    // unbekannten Nachrichten). Die erste, leere sagt ihm, dass dieser Client mitmisst.
+    let measure = server_version >= LATENCY_SINCE;
+    let mut collector = Collector::new(Instant::now());
+    if measure {
+        write_frame(&mut control, &Control::Latency(Latency::Report(collector.report(Instant::now())))).await?;
+    }
+    let (measured_tx, mut measured_rx) = mpsc::unbounded_channel();
+    let marks = measure.then_some(measured_tx);
+    let flush = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(flush);
     // Läuft bis zum Ende dieser Sitzung
     let _quality = notices.cloned().map(|tx| {
         quality::monitor(conn.clone(), move |q| {
@@ -568,20 +591,22 @@ async fn session(
         loop {
             tokio::select! {
                 Some(msg) = rx.recv() => match msg {
-                    FromServer::Move(mv) => {
+                    FromServer::Move(mv, stamp) => {
                         if let Some(event) = state.on_move(mv) {
                             moves += 1;
                             last_pos = (mv.x, mv.y);
                             let _ = inject.send(ToInjector::Inject(event));
+                            mark(inject, stamp, marks.as_ref());
                         }
                     }
-                    FromServer::Delta(delta) => {
+                    FromServer::Delta(delta, stamp) => {
                         if let Some(event) = state.on_delta(delta) {
                             moves += 1;
                             let _ = inject.send(ToInjector::Inject(event));
+                            mark(inject, stamp, marks.as_ref());
                         }
                     }
-                    FromServer::Input(input) => {
+                    FromServer::Input(input, stamp) => {
                         let dropped = match &input {
                             Input::Enter { x, y, .. } => {
                                 (moves, last_pos) = (0, (*x, *y));
@@ -595,7 +620,11 @@ async fn session(
                             _ => None,
                         };
                         let (events, transition) = state.on_input(input);
+                        let injects = !events.is_empty();
                         inject_all(inject, events);
+                        if injects {
+                            mark(inject, stamp, marks.as_ref());
+                        }
                         if let Some((transfer, x, y)) = dropped {
                             let (reply, folder) = oneshot::channel();
                             let _ = inject.send(ToInjector::DropFolder { x, y, reply });
@@ -701,7 +730,17 @@ async fn session(
                     FromServer::ScreenSaver { active, lock } => {
                         let _ = inject.send(ToInjector::ScreenSaver { active, lock });
                     }
+                    FromServer::Latency(summary) => notify(notices, ClientNotice::Latency(summary)),
                 },
+                Some(measured) = measured_rx.recv(), if measure => {
+                    if collector.add(measured) {
+                        flush.as_mut().reset(tokio::time::Instant::now() + latency::REPORT_AFTER);
+                    }
+                }
+                _ = &mut flush, if !collector.is_empty() => {
+                    let report = collector.report(Instant::now());
+                    write_frame(&mut control, &Control::Latency(Latency::Report(report))).await?;
+                }
                 _ = screen_poll.tick() => {
                     let now = (screen.bounds)();
                     if now != bounds {
@@ -779,6 +818,14 @@ fn closed(reason: ConnectionError) -> anyhow::Error {
         // im Ruhezustand dieses Rechners aufgegeben oder wurde neu gestartet). Gleich neu anmelden.
         ConnectionError::Reset => Break::Now(Some("Server kennt die Verbindung nicht mehr – verbinde neu".into())).into(),
         _ => anyhow!("Verbindung getrennt: {reason}"),
+    }
+}
+
+/// Stichprobe der Eingabekette: Hinter den Einspeise-Aufträgen der Eingabe meldet der Einspeise-Thread,
+/// wann sie erledigt waren (nur, wenn der Server mitmisst).
+fn mark(inject: &Sender<ToInjector>, stamp: Option<Stamp>, marks: Option<&mpsc::UnboundedSender<Measured>>) {
+    if let (Some(stamp), Some(done)) = (stamp, marks) {
+        let _ = inject.send(ToInjector::Measured { stamp, done: done.clone() });
     }
 }
 
@@ -869,6 +916,9 @@ async fn receive_control(mut control: RecvStream, tx: mpsc::UnboundedSender<From
             Ok(Some(Control::ScreenSaver { active, lock })) => {
                 let _ = tx.send(FromServer::ScreenSaver { active, lock });
             }
+            Ok(Some(Control::Latency(Latency::Summary(summary)))) => {
+                let _ = tx.send(FromServer::Latency(summary));
+            }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht vom Server"),
             // Von einer neueren Version: überspringen, der Frame ist gelesen
             Err(FrameError::Codec(e)) => debug!("unbekannte Control-Nachricht vom Server: {e}"),
@@ -879,12 +929,13 @@ async fn receive_control(mut control: RecvStream, tx: mpsc::UnboundedSender<From
 
 async fn receive_datagrams(conn: Connection, tx: mpsc::UnboundedSender<FromServer>) {
     while let Ok(bytes) = conn.read_datagram().await {
+        let received = Instant::now();
         match decode_datagram(&bytes) {
             Ok(Datagram::MouseMove(mv)) => {
-                let _ = tx.send(FromServer::Move(mv));
+                let _ = tx.send(FromServer::Move(mv, Stamp::mouse(mv.epoch, mv.seq, received)));
             }
             Ok(Datagram::MouseDelta(delta)) => {
-                let _ = tx.send(FromServer::Delta(delta));
+                let _ = tx.send(FromServer::Delta(delta, Stamp::mouse(delta.epoch, delta.seq, received)));
             }
             Err(e) => debug!("ungültiges Datagramm: {e}"),
         }
@@ -948,8 +999,13 @@ async fn read_server_stream(
 ) -> Result<()> {
     match read_kind(stream).await? {
         StreamKind::Input => {
+            // Laufende Nummer wie beim Server: daran erkennt er die Stichproben wieder
+            let mut index = 0u64;
             while let Some(input) = read_frame::<_, Input>(stream).await? {
-                let _ = tx.send(FromServer::Input(input));
+                let received = Instant::now();
+                index += 1;
+                let stamp = Stamp::input(&input, index, received);
+                let _ = tx.send(FromServer::Input(input, stamp));
             }
         }
         StreamKind::Clipboard => match read_frame(stream).await? {

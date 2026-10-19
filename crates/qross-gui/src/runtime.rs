@@ -22,7 +22,7 @@ use qross_net::server::{CursorFinderHandle, Server, ServerConfig, ServerNotice, 
 use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{LogInjector, MemoryClipboard};
 use qross_platform::{Capture, FinderOverlay, SecureInput};
-use qross_proto::{CursorFinder, GameState, Platform, Rect, Sharing, DEFAULT_PORT};
+use qross_proto::{CursorFinder, GameState, LatencySummary, Platform, Rect, Sharing, DEFAULT_PORT};
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
 use tauri::{AppHandle, Emitter};
@@ -156,6 +156,17 @@ pub struct QualityEvent {
     pub label: &'static str,
     #[serde(flatten)]
     pub quality: Quality,
+}
+
+/// Verzögerung der Eingabekette für das Fenster (Ereignis `latency`).
+#[derive(Serialize, Clone, Debug)]
+pub struct LatencyEvent {
+    /// Server: Name des Clients; Client: `None` (die Verbindung zum Server)
+    pub peer: Option<String>,
+    /// Netz- und Client-Anteil werden gemessen; ein älterer Client liefert nur den Server-Anteil.
+    pub client_reports: bool,
+    #[serde(flatten)]
+    pub summary: LatencySummary,
 }
 
 pub fn platform_name(platform: Platform) -> &'static str {
@@ -639,6 +650,7 @@ impl Runtime {
             ServerNotice::ClipboardConcealed => self.on_concealed(),
             ServerNotice::SecureInput { holder } => self.update(|s| s.secure_holder = holder),
             ServerNotice::SecureInputHold { from } => self.on_secure_input_hold(from),
+            ServerNotice::Latency { name, summary, client_reports } => self.emit_latency(Some(name), client_reports, summary),
         }
     }
 
@@ -828,6 +840,7 @@ impl Runtime {
             ClientNotice::Sharing(sharing) => self.update(|s| s.sharing = Some(sharing)),
             ClientNotice::ClipboardConcealed => self.on_concealed(),
             ClientNotice::CursorFinder(finder) => self.update(|s| s.cursor_finder = Some(finder)),
+            ClientNotice::Latency(summary) => self.emit_latency(None, true, summary),
         }
     }
 
@@ -837,6 +850,12 @@ impl Runtime {
     /// nicht über den Status, der jedes Mal auch das Tray neu zeichnet).
     fn emit_quality(&self, peer: Option<String>, quality: Quality) {
         let _ = self.app.emit("quality", QualityEvent { peer, label: quality.level.label(), quality });
+    }
+
+    /// Verzögerung der Eingabekette direkt ans Fenster, wie die Verbindungsqualität (etwa 1×/s je
+    /// Verbindung, solange sich etwas ändert)
+    fn emit_latency(&self, peer: Option<String>, client_reports: bool, summary: LatencySummary) {
+        let _ = self.app.emit("latency", LatencyEvent { peer, client_reports, summary });
     }
 
     /// Stand einer Dateiübertragung direkt ans Fenster (etwa 4×/s, deshalb nicht über den Status).
