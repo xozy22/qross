@@ -262,12 +262,14 @@ fn tooltip(status: &Status, profile: Option<&str>) -> String {
         (_, Phase::Starting) => "startet …".to_owned(),
         _ => status.message.clone(),
     };
-    let lock = if status.locked {
-        " · Cursor gesperrt"
+    let lock = if let Some(hint) = &status.secure_input {
+        qross_gui::secure_input::tray_note(hint)
+    } else if status.locked {
+        " · Cursor gesperrt".to_owned()
     } else if status.game_hold.is_some() {
-        " · Spielemodus hält den Cursor"
+        " · Spielemodus hält den Cursor".to_owned()
     } else {
-        ""
+        String::new()
     };
     format!("Qross {role}{profile} – {detail}{lock}")
 }
@@ -282,6 +284,8 @@ fn icon(status: &Status) -> Image<'static> {
         Phase::Error => Some([220, 38, 38]),
         Phase::Starting | Phase::Connecting => Some([234, 179, 8]),
         Phase::Listening if status.clients.is_empty() => Some([234, 179, 8]),
+        // Sichere Tastatureingabe: Der Cursor kommt nicht zu den Clients
+        Phase::Listening if status.secure_input.is_some() => Some([234, 179, 8]),
         Phase::Listening | Phase::Connected => Some([22, 163, 74]),
     };
     if let Some([r, g, b]) = color {

@@ -33,6 +33,10 @@ pub enum ServerEvent {
     ClientGame { name: String, game: GameState },
     /// Der Client kann Zeichen eingeben (`Control::TypesText`, seit Qross 0.7)
     ClientTypesText { name: String },
+    /// Auf dem Server (macOS) ist die „Sichere Tastatureingabe“ an bzw. wieder aus: Tasten erreichen
+    /// die Erfassung dann nicht, sondern das Programm im Vordergrund des Servers. Der Cursor kommt
+    /// deshalb zurück und bleibt auf dem Server, bis sie endet.
+    LocalSecureInput(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +69,9 @@ pub enum Action {
     CancelIncoming { transfer: u64 },
     /// Als Datagramm senden: relative Bewegung statt Position (Spielemodus)
     MoveBy { to: String, delta: MouseDelta },
+    /// Nur melden: Wegen der sicheren Tastatureingabe bleibt der Cursor auf dem Server. `from`: von
+    /// diesem Client zurückgeholt; `None`: ein Wechsel wurde verhindert (einmal, solange sie an ist)
+    HeldBySecureInput { from: Option<String> },
 }
 
 /// Warum der Cursor gerade auf seinem Bildschirm bleibt
@@ -157,6 +164,10 @@ pub struct ServerState {
     incoming: Option<u64>,
     /// Rechte je Rechner; hier zählt nur Drag & Drop (Zwischenablage und Dateien prüft die Netzschicht)
     sharing: SharingRules,
+    /// Sichere Tastatureingabe auf dem Server: Der Cursor bleibt dort
+    secure_input: bool,
+    /// Seit sie an ist, wurde schon ein Wechsel verhindert und gemeldet
+    secure_refused: bool,
 }
 
 impl ServerState {
@@ -189,6 +200,8 @@ impl ServerState {
             remote_probe_failed: false,
             incoming: None,
             sharing: SharingRules::default(),
+            secure_input: false,
+            secure_refused: false,
         }
     }
 
@@ -335,8 +348,43 @@ impl ServerState {
                     }
                 }
             }
+            ServerEvent::LocalSecureInput(on) => self.set_secure_input(on, &mut out),
         }
         out
+    }
+
+    /// Sichere Tastatureingabe auf dem Server an oder aus. Steht der Cursor dabei auf einem Client,
+    /// kommt er zurück – auch gegen die Fang-Taste und den Spielemodus: Was dort getippt würde,
+    /// landete sonst unbemerkt im Programm im Vordergrund des Servers, schlimmstenfalls in einem
+    /// Terminal oder Chat.
+    fn set_secure_input(&mut self, on: bool, out: &mut Vec<Action>) {
+        if on == self.secure_input {
+            return;
+        }
+        self.secure_input = on;
+        self.secure_refused = false;
+        if !on {
+            return;
+        }
+        // Eine laufende Drag-Prüfung an der Kante wechselt nicht mehr
+        self.probe = None;
+        self.push = None;
+        if let Active::Remote { name, .. } = &self.active {
+            let from = name.clone();
+            self.locked = false;
+            out.push(Action::Send { to: from.clone(), input: Input::Leave });
+            self.go_local(self.local.center(), out);
+            out.push(Action::HeldBySecureInput { from: Some(from) });
+        }
+    }
+
+    /// Ein Wechsel weg vom Server unterbleibt wegen der sicheren Tastatureingabe; einmal melden,
+    /// solange sie an ist.
+    fn refuse_for_secure_input(&mut self, out: &mut Vec<Action>) {
+        if !self.secure_refused {
+            self.secure_refused = true;
+            out.push(Action::HeldBySecureInput { from: None });
+        }
     }
 
     fn on_remote_offer(&mut self, client: String, probe: u32, transfer: u64, has_files: bool, out: &mut Vec<Action>) {
@@ -417,6 +465,9 @@ impl ServerState {
                 }
                 if !self.may_switch(self.local.monitor_at(x, y), edge, x, y, now) {
                     return;
+                }
+                if self.secure_input {
+                    return self.refuse_for_secure_input(out);
                 }
                 if buttons_down {
                     // Mit gedrückter Taste nur wechseln, wenn Dateien gezogen werden
@@ -544,6 +595,12 @@ impl ServerState {
             },
         };
         if name == from {
+            return;
+        }
+        if self.secure_input && name != self.me {
+            if self.clients.contains_key(&name) {
+                self.refuse_for_secure_input(out);
+            }
             return;
         }
         let Some(screen) = (if name == self.me { Some(&self.local) } else { self.clients.get(&name) }) else {
@@ -1517,6 +1574,109 @@ mod tests {
         s.handle(switch_to("pc"));
         // Die Mitte der Gesamtfläche liegt auf dem externen Monitor
         assert!(s.handle(switch_to("mac")).contains(&enter_mac(2, 2628, 500)));
+    }
+
+    fn secure_input(on: bool) -> ServerEvent {
+        ServerEvent::LocalSecureInput(on)
+    }
+
+    const REFUSED: Action = Action::HeldBySecureInput { from: None };
+
+    #[test]
+    fn secure_input_pulls_the_cursor_back_from_a_client() {
+        let mut s = state();
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert_eq!(
+            s.handle(secure_input(true)),
+            vec![
+                Action::Send { to: "laptop".into(), input: Input::Leave },
+                Action::ReleaseCapture { x: 960, y: 540 },
+                Action::HeldBySecureInput { from: Some("laptop".into()) },
+            ]
+        );
+        assert_eq!(s.active_screen(), "pc");
+        // Dieselbe Meldung noch einmal ändert nichts
+        assert!(s.handle(secure_input(true)).is_empty());
+    }
+
+    #[test]
+    fn secure_input_keeps_the_cursor_on_the_server_until_it_ends() {
+        let mut s = state();
+        assert!(s.handle(secure_input(true)).is_empty(), "auf dem Server: nichts zu tun");
+        // Der erste verhinderte Wechsel wird gemeldet, weitere nicht
+        assert_eq!(s.handle(edge_hit(Edge::Right, 1919, 540)), vec![REFUSED]);
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).is_empty());
+        assert!(s.handle(held_edge_hit()).is_empty(), "auch nicht mit gedrückter Taste (Drag & Drop)");
+        assert!(s.handle(switch_to("laptop")).is_empty());
+        assert!(s.handle(switch_to("right")).is_empty());
+        assert_eq!(s.active_screen(), "pc");
+        // Kanten ohne Nachbarn oder ohne verbundenen Client sind kein verhinderter Wechsel
+        let mut s = state();
+        s.handle(secure_input(true));
+        assert!(s.handle(edge_hit(Edge::Left, 0, 540)).is_empty());
+        assert!(s.handle(switch_to("tablet")).is_empty());
+        s.handle(ServerEvent::ClientDisconnected { name: "laptop".into() });
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).is_empty());
+
+        // Vorbei: Es wechselt wieder
+        let mut s = state();
+        s.handle(secure_input(true));
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        assert!(s.handle(secure_input(false)).is_empty());
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).contains(&Action::CaptureRemote));
+        assert_eq!(s.active_screen(), "laptop");
+    }
+
+    #[test]
+    fn each_secure_input_phase_reports_one_refusal() {
+        let mut s = state();
+        s.handle(secure_input(true));
+        assert_eq!(s.handle(switch_to("laptop")), vec![REFUSED], "auch per Kürzel");
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).is_empty());
+        s.handle(secure_input(false));
+        s.handle(secure_input(true));
+        assert_eq!(s.handle(edge_hit(Edge::Right, 1919, 540)), vec![REFUSED]);
+    }
+
+    #[test]
+    fn secure_input_refuses_only_once_the_switch_delay_has_passed() {
+        let mut s = state();
+        s.set_switch_options(SwitchOptions { corner_size: 0, delay: Duration::from_millis(300) });
+        s.handle(secure_input(true));
+        let t0 = Instant::now();
+        assert!(s.handle_at(edge_hit(Edge::Right, 1919, 540), t0).is_empty(), "nur kurz an die Kante");
+        let later = t0 + Duration::from_millis(100);
+        assert!(s.handle_at(edge_hit(Edge::Right, 1919, 540), later).is_empty());
+        let pushed = t0 + Duration::from_millis(200);
+        assert!(s.handle_at(edge_hit(Edge::Right, 1919, 540), pushed).is_empty());
+        let long = t0 + Duration::from_millis(320);
+        assert_eq!(s.handle_at(edge_hit(Edge::Right, 1919, 540), long), vec![REFUSED]);
+    }
+
+    #[test]
+    fn secure_input_overrides_lock_key_and_game_mode() {
+        let mut s = state();
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        s.handle(ServerEvent::Capture(CaptureEvent::ToggleLock));
+        assert!(s.is_locked());
+        assert!(s.handle(secure_input(true)).contains(&Action::ReleaseCapture { x: 960, y: 540 }));
+        assert!(!s.is_locked(), "zurück auf dem Server ist die Sperre gelöst");
+
+        let mut s = state();
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        s.handle(laptop_game(CAPTURED));
+        assert!(s.handle(secure_input(true)).contains(&Action::ReleaseCapture { x: 960, y: 540 }));
+        assert_eq!((s.active_screen(), s.hold()), ("pc", Hold::Free));
+    }
+
+    #[test]
+    fn secure_input_drops_a_pending_drag_probe() {
+        let mut s = state();
+        assert_eq!(s.handle(held_edge_hit()), vec![Action::ProbeDrag { x: 1919, y: 540 }]);
+        s.handle(secure_input(true));
+        let files = vec![PathBuf::from("/tmp/a.txt")];
+        assert!(s.handle(ServerEvent::Capture(CaptureEvent::DragProbeResult { files })).is_empty());
+        assert_eq!(s.active_screen(), "pc");
     }
 
     #[test]

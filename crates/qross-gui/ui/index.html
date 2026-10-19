@@ -60,6 +60,16 @@
     </div>
   </section>
 
+  <!-- Nur macOS als Server: Ein Programm hält die „Sichere Tastatureingabe“ (siehe renderSecureInput) -->
+  <section id="secureInput" class="permissions" role="alert" aria-labelledby="secureTitle" hidden>
+    <svg class="ico perm-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><path d="M12 14.5v2"/></svg>
+    <div class="perm-body">
+      <h2 id="secureTitle"></h2>
+      <p class="hint" id="secureText"></p>
+      <ul id="secureSteps" class="secure-steps"></ul>
+    </div>
+  </section>
+
   <main>
     <!-- Server -->
     <section id="serverView" class="view server-view">

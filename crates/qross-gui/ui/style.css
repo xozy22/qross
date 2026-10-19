@@ -250,6 +250,8 @@ main { grid-row: 3; }
 .perm-text { display: grid; min-width: 0; }
 .perm-text .hint { margin-top: 2px; }
 .perm-item .btn { flex: none; }
+/* Sichere Tastatureingabe: was man tun kann */
+.secure-steps { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; color: var(--text); font-size: 13px; }
 
 /* ------------------------------------------------------------ Hauptbereich */
 

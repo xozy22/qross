@@ -11,6 +11,7 @@ use qross_core::sharing::SharingRules;
 use qross_core::CaptureEvent;
 use qross_gui::lifecycle::AppState;
 use qross_gui::profiles::{self, Place, ProfileEdit, Profiles};
+use qross_gui::secure_input::{self, SecureInputHint};
 use qross_gui::transfers::{self, LONG_TRANSFER};
 use qross_gui::{clipboard_files, Role, Settings, EXPORT_FILE};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
@@ -20,7 +21,7 @@ use qross_net::quality::Quality;
 use qross_net::server::{Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle, StopHandle};
 use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{LogInjector, MemoryClipboard};
-use qross_platform::Capture;
+use qross_platform::{Capture, SecureInput};
 use qross_proto::{GameState, Platform, Rect, Sharing, DEFAULT_PORT};
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
@@ -102,6 +103,12 @@ pub struct Status {
     /// Client: was der Server mit diesem Rechner teilt (`None`: noch nicht gemeldet, etwa von
     /// einem Server bis Qross 0.6, der alles erlaubt)
     pub sharing: Option<Sharing>,
+    /// Server (macOS): Hinweis, dass die sichere Tastatureingabe den Cursor auf dem Mac hält
+    /// (nur mit verbundenem Client, siehe [`secure_input::hint`])
+    pub secure_input: Option<SecureInputHint>,
+    /// Server (macOS): wer die sichere Tastatureingabe gerade hält
+    #[serde(skip)]
+    pub secure_holder: Option<SecureInput>,
 }
 
 impl Status {
@@ -243,6 +250,7 @@ impl Runtime {
         let status = {
             let mut status = self.status.lock().unwrap();
             change(&mut status);
+            status.secure_input = secure_input::hint(status.secure_holder.as_ref(), status.clients.len());
             status.clone()
         };
         crate::tray::update(&self.app, &status);
@@ -473,6 +481,9 @@ impl Runtime {
             .with_keys(keys)
             .with_game_mode(settings.game_mode)
             .with_sharing(s.effective_sharing());
+        // Hält ein Programm die sichere Tastatureingabe, bleibt der Cursor auf dem Mac (Hinweis im Fenster)
+        #[cfg(target_os = "macos")]
+        let server = server.with_secure_input(Box::new(qross_platform::secure_input));
         let (stop, sharing) = (server.stop_handle(), server.sharing());
         *self.transfers.lock().unwrap() = Some(server.transfers());
         let platform = ServerPlatform {
@@ -592,6 +603,19 @@ impl Runtime {
                 }
             }),
             ServerNotice::ClipboardConcealed => self.on_concealed(),
+            ServerNotice::SecureInput { holder } => self.update(|s| s.secure_holder = holder),
+            ServerNotice::SecureInputHold { from } => self.on_secure_input_hold(from),
+        }
+    }
+
+    /// Die sichere Tastatureingabe hält den Cursor auf dem Mac (vom Client zurückgeholt oder ein
+    /// Wechsel verhindert, beides einmal je Mal): Systembenachrichtigung, sofern das Fenster mit dem
+    /// Hinweis nicht ohnehin vorn ist.
+    fn on_secure_input_hold(&self, from: Option<String>) {
+        let app = self.status.lock().unwrap().secure_holder.as_ref().and_then(|h| h.app.clone());
+        let (title, body) = secure_input::notification(from.as_deref(), app.as_deref());
+        if !crate::window_in_front(&self.app) {
+            crate::notify(&self.app, &title, &body);
         }
     }
 

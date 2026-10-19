@@ -11,7 +11,7 @@ use qross_core::keys::{KeyConfig, KeyMode};
 use qross_core::server::{Action, Hold, ServerEvent, ServerState, SwitchOptions};
 use qross_core::sharing::{describe as describe_sharing, SharingRules};
 use qross_core::{CaptureEvent, Layout};
-use qross_platform::{Capture, Clipboard};
+use qross_platform::{Capture, Clipboard, SecureInput};
 use qross_proto::{
     encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, Datagram, DragMessage,
     FileEntry, GameState, Input, Platform, Rect, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
@@ -27,6 +27,7 @@ use crate::game::{self, Detector};
 use crate::progress::{Direction, Kind, Progress, Transfers};
 use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
+use crate::secure_input;
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
 use crate::tls::{peer_fingerprint, server_config};
@@ -75,6 +76,8 @@ pub struct Server {
     sharing: SharingHandle,
     /// Ruhezustand, Aufwachen, Netzwechsel; ohne Vorgabe vom Betriebssystem
     system_events: Option<mpsc::UnboundedReceiver<SystemEvent>>,
+    /// Sichere Tastatureingabe abfragen (macOS)
+    secure_input: Option<secure_input::Detector>,
 }
 
 /// Ändert die Rechte je Rechner eines laufenden Servers (siehe [`Server::sharing`]). Sie gelten
@@ -141,6 +144,13 @@ pub enum ServerNotice {
     /// Ein Passwortmanager hat den Inhalt der Zwischenablage als vertraulich markiert; er bleibt
     /// hier (einmal je Inhalt, siehe [`Server::with_share_concealed`]).
     ClipboardConcealed,
+    /// Auf diesem Rechner (macOS) hält ein Programm die „Sichere Tastatureingabe“ (`holder`) bzw.
+    /// wieder keines (`None`); kommt auch, wenn ein anderes Programm sie übernimmt. Solange sie an
+    /// ist, bleibt der Cursor hier (siehe [`Server::with_secure_input`]).
+    SecureInput { holder: Option<SecureInput> },
+    /// Wegen der sicheren Tastatureingabe bleibt der Cursor hier: vom Client `from` zurückgeholt
+    /// bzw. ein Wechsel wurde verhindert (`from: None`, einmal, solange sie an ist).
+    SecureInputHold { from: Option<String> },
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -228,6 +238,7 @@ impl Server {
             transfers: Transfers::new(),
             sharing: SharingHandle(Arc::new(watch::channel(SharingRules::default()).0)),
             system_events: None,
+            secure_input: None,
         })
     }
 
@@ -236,6 +247,15 @@ impl Server {
     /// trennt er jeden, von dem eine Weile nichts mehr kommt.
     pub fn with_system_events(mut self, events: mpsc::UnboundedReceiver<SystemEvent>) -> Self {
         self.system_events = Some(events);
+        self
+    }
+
+    /// Sichere Tastatureingabe abfragen (macOS; üblich: `qross_platform::secure_input`, Standard:
+    /// gar nicht). Solange ein Programm sie hält, erreichen Tasten die Erfassung nicht, sondern
+    /// dieses Programm: Der Cursor kommt dann von einem Client zurück und bleibt hier, bis sie
+    /// endet. Das melden `ServerNotice::SecureInput` und `ServerNotice::SecureInputHold`.
+    pub fn with_secure_input(mut self, detect: secure_input::Detector) -> Self {
+        self.secure_input = Some(detect);
         self
     }
 
@@ -330,6 +350,7 @@ impl Server {
         match action {
             Action::Send { to, input: Input::Enter { .. } } => self.notify(ServerNotice::CursorOn { screen: to.clone() }),
             Action::ReleaseCapture { .. } => self.notify(ServerNotice::CursorOn { screen: self.config.name.clone() }),
+            Action::HeldBySecureInput { from } => self.notify(ServerNotice::SecureInputHold { from: from.clone() }),
             _ => {}
         }
     }
@@ -357,6 +378,10 @@ impl Server {
         let (_no_game, mut local_game) = tokio::sync::watch::channel(GameState::default());
         if self.game_mode {
             local_game = game::watch(game);
+        }
+        let (_no_secure_input, mut secure) = watch::channel(None);
+        if let Some(detect) = self.secure_input.take() {
+            secure = secure_input::watch(detect);
         }
         let clipboard = ClipboardHub::spawn(clipboard, self.share_concealed, {
             let notices = self.notices.clone();
@@ -605,6 +630,20 @@ impl Server {
                 Some(event) = system_events.recv() => {
                     on_system_event(event, &clients);
                     Vec::new()
+                }
+                Ok(()) = secure.changed() => {
+                    let holder = secure.borrow_and_update().clone();
+                    match &holder {
+                        Some(h) => info!(
+                            "Sichere Tastatureingabe ist an ({}) – Tasten erreichen Qross nicht, der Cursor bleibt auf \
+                             diesem Rechner",
+                            h.describe()
+                        ),
+                        None => info!("Sichere Tastatureingabe ist wieder aus"),
+                    }
+                    let on = holder.is_some();
+                    self.notify(ServerNotice::SecureInput { holder });
+                    state.handle(ServerEvent::LocalSecureInput(on))
                 }
                 _ = screen_poll.tick() => {
                     let (now, now_monitors) = (screen(), monitors());
@@ -891,6 +930,10 @@ fn apply(
             debug!("Übertragung {transfer} nicht abgelegt");
             drops.cancel_undropped();
         }
+        Action::HeldBySecureInput { from: Some(from) } => {
+            warn!("Sichere Tastatureingabe: Cursor von „{from}“ zurückgeholt – Tasten wären dort nicht angekommen")
+        }
+        Action::HeldBySecureInput { from: None } => info!("Sichere Tastatureingabe: kein Wechsel, der Cursor bleibt hier"),
     }
 }
 
