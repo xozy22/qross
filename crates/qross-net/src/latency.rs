@@ -52,6 +52,41 @@ const DRIFT_US_PER_S: f64 = 15.0;
 pub const REPORT_AFTER: Duration = Duration::from_millis(200);
 /// So oft gibt der Server ein neues Ergebnis heraus, wenn sich etwas geändert hat
 pub const SUMMARY_EVERY: Duration = Duration::from_secs(1);
+/// Ab so lange gilt eine Stichprobe als Ausreißer und kommt mit ihren Teilen ins Log. Median und
+/// 95. Perzentil zeigen einen kurzen Hänger beim Wechsel sonst nicht.
+const SLOW_US: u32 = 50_000;
+
+/// Die langsamste Stichprobe über [`SLOW_US`] seit der letzten Abfrage, und wie viele es waren
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slow {
+    pub mouse: bool,
+    pub server_us: u32,
+    pub network_us: u32,
+    pub client_us: u32,
+    pub count: u32,
+}
+
+impl Slow {
+    fn total_us(&self) -> u32 {
+        self.server_us.saturating_add(self.network_us).saturating_add(self.client_us)
+    }
+
+    /// Fürs Log, z. B. „Maus 142 ms (Server 0,1 · Netz 138,0 · Client 3,9), 3 Stichproben über 50 ms“
+    pub fn describe(&self) -> String {
+        let ms = |us: u32| format!("{:.1}", f64::from(us) / 1000.0).replace('.', ",");
+        format!(
+            "{} {} ms (Server {} · Netz {} · Client {}), {} {} über {} ms",
+            if self.mouse { "Maus" } else { "Taste" },
+            self.total_us() / 1000,
+            ms(self.server_us),
+            ms(self.network_us),
+            ms(self.client_us),
+            self.count,
+            if self.count == 1 { "Stichprobe" } else { "Stichproben" },
+            SLOW_US / 1000
+        )
+    }
+}
 
 /// Messung einer Verbindung beim Server, geteilt zwischen Ereignisschleife, Input-Stream und Control-Stream
 pub type Shared = Arc<Mutex<Meter>>;
@@ -169,6 +204,8 @@ pub struct Meter {
     reporting: bool,
     /// Seit dem letzten Ergebnis hat sich etwas geändert
     changed: bool,
+    /// Ausreißer seit der letzten Abfrage
+    slow: Option<Slow>,
 }
 
 impl Meter {
@@ -182,7 +219,25 @@ impl Meter {
             exchanges: VecDeque::new(),
             reporting: false,
             changed: false,
+            slow: None,
         }
+    }
+
+    /// Der langsamste Ausreißer seit dem letzten Aufruf
+    pub fn take_slow(&mut self) -> Option<Slow> {
+        self.slow.take()
+    }
+
+    fn note_slow(&mut self, mouse: bool, c: &Complete) {
+        let this = Slow { mouse, server_us: c.server_us, network_us: c.network_us, client_us: c.client_us, count: 1 };
+        if this.total_us() < SLOW_US {
+            return;
+        }
+        self.slow = Some(match self.slow {
+            Some(slow) if slow.total_us() >= this.total_us() => Slow { count: slow.count + 1, ..slow },
+            Some(slow) => Slow { count: slow.count + 1, ..this },
+            None => this,
+        });
     }
 
     pub fn shared(epoch: Instant) -> Shared {
@@ -249,6 +304,7 @@ impl Meter {
             let LatencySample { id, client_us, .. } = sample;
             let network_us = (forward_us - best.offset_us).clamp(0, delay_us) as u32;
             let complete = Complete { at: sent.at, server_us: sent.server_us, network_us, client_us };
+            self.note_slow(matches!(id, SampleId::Mouse { .. }), &complete);
             self.series(id).complete.push_back(complete);
             self.changed = true;
         }
@@ -471,6 +527,27 @@ mod tests {
         assert_eq!(network.p50_us, 300, "der Versatz stammt aus einem schnellen Austausch");
         assert_eq!(network.p95_us, 5_300, "die Spitzen bleiben in voller Höhe sichtbar");
         assert_eq!(chain.total.unwrap().p95_us, 20 + 5_300 + 100);
+    }
+
+    #[test]
+    fn outliers_are_kept_with_their_parts_until_taken() {
+        let start = Instant::now();
+        let link = Link { server_epoch: start, offset_us: -40_000 };
+        let mut meter = Meter::new(start);
+        // Wie beim Wechsel auf einen Mac im WLAN: zwei Stichproben stecken lange im Netz.
+        for (i, forward) in [300, 300, 120_300, 300, 80_300, 300].into_iter().enumerate() {
+            let t0 = start + Duration::from_millis(10 * i as u64);
+            let timing = Timing { server: 20, forward, client: 100, hold: 50_000, back: 300 };
+            link.sample(&mut meter, mouse(32 * (i as u32 + 1)), t0, timing);
+        }
+        let slow = meter.take_slow().expect("Ausreißer");
+        assert_eq!(slow, Slow { mouse: true, server_us: 20, network_us: 120_300, client_us: 100, count: 2 });
+        assert_eq!(slow.describe(), "Maus 120 ms (Server 0,0 · Netz 120,3 · Client 0,1), 2 Stichproben über 50 ms");
+        assert_eq!(meter.take_slow(), None, "einmal abgeholt");
+        // Ein hängender Einspeise-Thread beim Client zählt genauso.
+        let timing = Timing { server: 20, forward: 300, client: 70_000, hold: 50_000, back: 300 };
+        link.sample(&mut meter, SampleId::Input { index: 1 }, start + Duration::from_millis(100), timing);
+        assert_eq!(meter.take_slow().map(|s| (s.mouse, s.client_us, s.count)), Some((false, 70_000, 1)));
     }
 
     #[test]

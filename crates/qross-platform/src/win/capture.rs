@@ -91,6 +91,8 @@ static DROPPED: AtomicU32 = AtomicU32::new(0);
 const WM_REHOOK: u32 = WM_APP + 0x51;
 /// An den Hook-Thread: neue Tastenoptionen, lParam ist eine `Box<KeyOptions>`
 const WM_KEY_OPTIONS: u32 = WM_APP + 0x52;
+/// An den Hook-Thread: Hooks an den Anfang der Kette (siehe `Hooks::move_to_front`)
+const WM_HOOKS_TO_FRONT: u32 = WM_APP + 0x53;
 /// Plätze der Warteschlange zum Server-Kern: einige Sekunden Mausbewegung
 const QUEUE_LEN: usize = 4096;
 
@@ -249,6 +251,7 @@ unsafe fn hook_loop(ready: Sender<Result<u32, u32>>) {
     while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
         match msg.message {
             WM_REHOOK => hooks.reinstall(),
+            WM_HOOKS_TO_FRONT => hooks.move_to_front(),
             WM_KEY_OPTIONS => {
                 let options = Box::from_raw(msg.lParam as *mut KeyOptions);
                 KEY_OPTIONS.set(Rc::new(*options));
@@ -321,6 +324,23 @@ impl Hooks {
                 // Ohne Hooks wartet hier nichts auf das Log; der Wächter versucht es wieder.
                 tracing::error!("Eingabe-Hooks lassen sich nicht neu setzen (Fehlercode {code})");
             }
+        }
+    }
+
+    /// Vor jedem Wechsel auf einen Client: an den Anfang der Hook-Kette. Windows ruft den zuletzt
+    /// gesetzten Hook zuerst. Der Remotedesktop-Client (mstsc) hat einen eigenen, später gesetzten
+    /// und behält im Vordergrund alle Tasten für sich: Sie kämen hier nie an und landeten in der
+    /// RDP-Sitzung statt auf dem Client. Andere Programme mit eigenem Hook (virtuelle Maschinen,
+    /// Tastenkürzel-Werkzeuge) ebenso. Erst die neuen setzen, dann die alten entfernen, ohne Lücke;
+    /// doppelt läuft nichts, denn beide gehören diesem Thread, und er ruft keinen Hook, solange er hier ist.
+    unsafe fn move_to_front(&mut self) {
+        match Hooks::install() {
+            Ok(hooks) => {
+                self.remove();
+                *self = hooks;
+            }
+            // Die bisherigen bleiben; nur der Vorrang fehlt.
+            Err(code) => tracing::debug!("Eingabe-Hooks nicht nach vorn gesetzt (Fehlercode {code})"),
         }
     }
 }
@@ -440,6 +460,7 @@ impl Capture for WinCapture {
     fn capture_remote(&self) {
         if let Some(shared) = SHARED.get() {
             shared.remote.store(true, Ordering::Release);
+            unsafe { PostThreadMessageW(self.thread_id, WM_HOOKS_TO_FRONT, 0, 0) };
             // Weg vom Rand, damit Bewegungen in alle Richtungen messbar bleiben.
             let (x, y) = primary_center();
             unsafe { SetCursorPos(x, y) };
@@ -490,7 +511,7 @@ impl Drop for WinCapture {
         if let Some(shared) = SHARED.get() {
             shared.remote.store(false, Ordering::Release);
         }
-        cursor::restore();
+        cursor::restore_and_wait();
         unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
     }
 }

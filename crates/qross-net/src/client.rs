@@ -197,6 +197,24 @@ enum ToInjector {
     Measured { stamp: Stamp, done: mpsc::UnboundedSender<Measured> },
 }
 
+/// Ab so lange gilt ein Auftrag im Einspeise-Thread als Hänger: Der Cursor stand dann sichtbar still.
+const SLOW_INJECT: Duration = Duration::from_millis(20);
+
+/// Was der Einspeise-Thread gerade erledigt hat, fürs Log, wenn es zu lange dauerte
+enum InjectStep {
+    Inject(Inject),
+    Named(&'static str),
+}
+
+impl fmt::Display for InjectStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inject(event) => write!(f, "{event:?}"),
+            Self::Named(name) => f.write_str(name),
+        }
+    }
+}
+
 fn inject_all(inject: &Sender<ToInjector>, events: impl IntoIterator<Item = Inject>) {
     for event in events {
         let _ = inject.send(ToInjector::Inject(event));
@@ -347,26 +365,36 @@ async fn run_inner(
     let (inject_tx, inject_rx) = std::sync::mpsc::channel::<ToInjector>();
     std::thread::Builder::new().name("qross-inject".into()).spawn(move || {
         while let Ok(job) = inject_rx.recv() {
-            match job {
+            let started = Instant::now();
+            let step = match job {
                 ToInjector::Inject(event) => {
                     match event {
                         Inject::MoveTo { .. } | Inject::MoveBy { .. } => tracing::trace!(?event, "einspeisen"),
                         _ => debug!(?event, "einspeisen"),
                     }
                     injector.inject(&event);
+                    InjectStep::Inject(event)
                 }
                 ToInjector::DropFolder { x, y, reply } => {
                     let _ = reply.send(injector.drop_folder(x, y));
+                    InjectStep::Named("Ablageordner suchen")
                 }
                 ToInjector::TakeDragged { x, y, reply } => {
                     let _ = reply.send(injector.take_dragged_files(x, y));
+                    InjectStep::Named("gezogene Dateien abholen")
                 }
                 ToInjector::ScreenSaver { active, lock } => {
                     screensaver::report(active, &injector.screen_saver(active, lock));
+                    InjectStep::Named("Bildschirmschoner abgleichen")
                 }
                 ToInjector::Measured { stamp, done } => {
                     let _ = done.send(Measured { id: stamp.id, received: stamp.received, done: Instant::now() });
+                    continue;
                 }
+            };
+            let took = started.elapsed();
+            if took >= SLOW_INJECT {
+                warn!("Einspeisen hing {} ms ({step}) – so lange warteten alle folgenden Eingaben", took.as_millis());
             }
         }
     })?;

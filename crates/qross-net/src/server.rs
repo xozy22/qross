@@ -437,13 +437,15 @@ impl Server {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tick.tick().await;
-                let (summary, client_reports) = {
+                let (slow, summary) = {
                     let mut meter = meter.lock().unwrap();
-                    match meter.take_summary(Instant::now()) {
-                        Some(summary) => (summary, meter.client_reports()),
-                        None => continue,
-                    }
+                    (meter.take_slow(), meter.take_summary(Instant::now()).map(|s| (s, meter.client_reports())))
                 };
+                // Höchstens einmal je Sekunde: der langsamste mit seinen Teilen
+                if let Some(slow) = slow {
+                    warn!("Eingabe an „{name}“ verzögert: {}", slow.describe());
+                }
+                let Some((summary, client_reports)) = summary else { continue };
                 if let Some(tx) = &notices {
                     let _ = tx.send(ServerNotice::Latency { name: name.clone(), summary, client_reports });
                 }
@@ -847,7 +849,12 @@ impl Server {
                     }
                 }
                 let files = FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers };
+                let (step, started) = (platform_step(&action), Instant::now());
                 apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops, captured);
+                let took = started.elapsed();
+                if let Some(step) = step.filter(|_| took >= SLOW_STEP) {
+                    warn!("„{step}“ hielt die Weitergabe {} ms auf – so lange stand der Cursor auf dem Client", took.as_millis());
+                }
             }
             self.report_hold(&state, &mut hold);
         }
@@ -1025,6 +1032,24 @@ fn deliver_files(ready: Ready, clipboard: &ClipboardHub, clip_synced: &ClipSynce
             }
         }
     });
+}
+
+/// Ab so lange gilt ein Schritt der Ereignisschleife als Hänger: Solange gehen keine Bewegungen hinaus.
+const SLOW_STEP: Duration = Duration::from_millis(20);
+
+/// Schritte, die das System direkt aufrufen und dabei die Ereignisschleife aufhalten können, fürs Log
+fn platform_step(action: &Action) -> Option<&'static str> {
+    Some(match action {
+        Action::CaptureRemote => "Cursor einfangen",
+        Action::ReleaseCapture { .. } => "Cursor freigeben",
+        Action::SyncLocks { .. } => "Sperrtasten lesen",
+        Action::ProbeDrag { .. } => "Ziehen prüfen",
+        Action::CancelLocalDrag => "Ziehen abbrechen",
+        Action::AwaitLocalDrop { .. } => "Ablegen vorbereiten",
+        Action::DropIncoming { .. } => "Ablageordner suchen",
+        Action::StopLocalScreenSaver => "Bildschirmschoner beenden",
+        _ => return None,
+    })
 }
 
 /// `captured`: wann das auslösende Ereignis aus der Erfassung kam (Stichproben der Eingabekette)
