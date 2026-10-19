@@ -425,8 +425,9 @@ zuletzt veröffentlichten nicht erfüllt.
 
 Die Tests laufen im Release nicht noch einmal: Der Job „CI für diesen Commit“ verlangt eine grüne CI für den
 Commit des Tags und wartet, solange sie noch läuft. Gebaut wird mit dem Cache, den
-`.github/workflows/release-cache.yml` bei jedem Push auf main anlegt. Einen Cache vom Tag selbst sähe schon das
-nächste Release nicht, denn GitHub gibt einem Tag nur seine eigenen Caches und die von main.
+`.github/workflows/release-cache.yml` auf main anlegt: wenn sich Abhängigkeiten oder Build-Einstellungen ändern
+und zweimal die Woche für neue Rust-Versionen. Gibt es den Cache schon, baut er nichts. Einen Cache vom Tag
+selbst sähe schon das nächste Release nicht, denn GitHub gibt einem Tag nur seine eigenen Caches und die von main.
 
 Testlauf ohne Veröffentlichung, gebaut wird der Stand des Branches:
 

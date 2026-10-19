@@ -4,9 +4,22 @@ name: Release-Cache
 # Caches seines Tags und von main lesen, den des vorigen Tags sieht er nicht. Ohne diesen Lauf baute
 # jedes Release alle Abhängigkeiten neu (unter Windows über 15 Minuten). Hier entsteht derselbe Cache
 # auf main: gleicher Schlüssel, gleiche Umgebung, gleiche Befehle wie in release.yml.
+#
+# Gebaut wird nur, wenn der Schlüssel neu ist. Er hängt an den Abhängigkeiten (Cargo.lock ohne die
+# eigenen Versionen), den Build-Einstellungen und der Rust-Version, nicht am Code von Qross: Dessen
+# Crates nimmt der Cache ohnehin nicht auf.
 on:
   push:
     branches: [main]
+    paths:
+      - Cargo.lock
+      - "**/Cargo.toml"
+      - .cargo/config.toml
+      - .github/workflows/release-cache.yml
+  # Zweimal die Woche: Eine neue Rust-Version ändert den Schlüssel, und GitHub löscht Caches, die
+  # sieben Tage niemand gelesen hat.
+  schedule:
+    - cron: "23 4 * * 1,4"
   workflow_dispatch:
 
 permissions:
@@ -46,25 +59,31 @@ jobs:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        id: cache
         with:
           shared-key: release-${{ matrix.target }}
 
+      # Ab hier nur, wenn es zu diesem Schlüssel noch keinen Cache gibt. Sonst hat ihn das Wiederherstellen
+      # schon frisch gehalten, und ein Build übersetzte nur die Crates von Qross, die nicht gespeichert werden.
       - uses: actions/setup-node@v7
+        if: steps.cache.outputs.cache-hit != 'true'
         with:
           node-version: latest
 
       - name: Linux-Abhängigkeiten (Tauri)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
 
       - name: Kommandozeile bauen
+        if: steps.cache.outputs.cache-hit != 'true'
         run: cargo build --release --locked -p qross --target ${{ matrix.target }}
 
       # Über die Tauri-CLI wie im Release, nur ohne Pakete: Sie baut mit eigenen Features
       # (tauri/custom-protocol), ein einfaches `cargo build` legte andere Artefakte in den Cache.
       - name: App bauen (Tauri, ohne Pakete)
+        if: steps.cache.outputs.cache-hit != 'true'
         working-directory: crates/qross-gui
         run: npx --yes @tauri-apps/cli@2 build --ci --target ${{ matrix.target }} --no-bundle
