@@ -10,6 +10,7 @@ pub mod client;
 mod clipboard;
 pub mod clipfiles;
 pub mod discovery;
+mod drag_preview;
 pub mod files;
 pub mod game;
 mod identity;

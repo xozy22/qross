@@ -451,6 +451,15 @@ impl Receiver {
         self.try_finish(id);
     }
 
+    /// Einträge einer angekündigten Übertragung, die noch aufs Ablegen wartet; `None`, wenn sie schon
+    /// abgelegt, abgebrochen oder fehlgeschlagen ist (bzw. noch nicht angekündigt)
+    pub fn awaiting_drop(&self, transfer: u64) -> Option<&[FileEntry]> {
+        if self.staging.is_cancelled(transfer) {
+            return None;
+        }
+        self.transfers.get(&transfer).filter(|t| t.target.is_none())?.entries.as_deref()
+    }
+
     /// Der Cursor hat den Rechner verlassen: Übertragungen ohne Drop verwerfen.
     pub fn cancel_undropped(&mut self) {
         let undropped: Vec<u64> = self.transfers.iter().filter(|(_, t)| t.target.is_none()).map(|(id, _)| *id).collect();
@@ -682,6 +691,30 @@ mod tests {
         fs::create_dir_all(staging.transfer_dir(3)).unwrap();
         drop(staging);
         assert!(base.join("3").exists(), "bleibt nach dem Beenden erhalten");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_drag_awaits_its_drop_until_dropped_or_cancelled() {
+        let base = std::env::temp_dir().join(format!("qross-awaiting-drop-{}", std::process::id()));
+        let transfers = Transfers::new();
+        let mut receiver = Receiver::new(Staging::create(&base).unwrap(), transfers.clone());
+        let entries = vec![FileEntry { path: "Bericht.pdf".into(), size: 10, is_dir: false }];
+        assert!(receiver.awaiting_drop(1).is_none(), "noch nicht angekündigt");
+        receiver.on_drag_start("pc", 1, entries.clone());
+        assert_eq!(receiver.awaiting_drop(1), Some(entries.as_slice()));
+        receiver.on_drop(1, base.join("ziel"));
+        assert!(receiver.awaiting_drop(1).is_none(), "abgelegt");
+
+        // Abgebrochen (Knopf „Abbrechen“, Rechte entzogen, Gegenstelle fort)
+        receiver.on_drag_start("pc", 2, entries.clone());
+        assert!(transfers.cancel(Direction::Receiving, 2));
+        assert!(receiver.awaiting_drop(2).is_none());
+        // `Drop` kam vor `DragStart`
+        receiver.on_drop(3, base.join("ziel"));
+        receiver.on_drag_start("pc", 3, entries);
+        assert!(receiver.awaiting_drop(3).is_none());
+        drop(receiver);
         let _ = fs::remove_dir_all(&base);
     }
 

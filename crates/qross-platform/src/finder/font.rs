@@ -1,5 +1,6 @@
-//! Schrift für das Namensschild: die Systemschrift (Windows: Segoe UI, macOS: SF Pro, Linux: was
-//! fontconfig für „sans-serif“ nennt), gerastert mit `ab_glyph`. Fehlt sie, bleibt es beim Ring.
+//! Schrift für das Namensschild und die Drag-Vorschau: die Systemschrift (Windows: Segoe UI, macOS:
+//! SF Pro, Linux: was fontconfig für „sans-serif“ nennt), gerastert mit `ab_glyph`. Fehlt sie,
+//! bleibt es beim Ring bzw. beim Symbol.
 
 use std::path::PathBuf;
 
@@ -9,6 +10,14 @@ use super::draw::Text;
 
 /// Halbfett, wo die Schrift Gewichte kennt (variable Schriften wie SF Pro)
 const WEIGHT: f32 = 600.0;
+
+/// Wo ein zu langer Text gekürzt wird
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shorten {
+    End,
+    /// In der Mitte, damit z. B. die Endung eines Dateinamens sichtbar bleibt
+    Middle,
+}
 
 pub struct Font(FontVec);
 
@@ -25,21 +34,12 @@ impl Font {
     }
 
     /// Rastert `text` in `px` Bildpunkten Schriftgröße, höchstens `max_width` breit (sonst mit „…“
-    /// gekürzt). `None` bei leerem Text.
-    pub fn render(&self, text: &str, px: f32, max_width: f32) -> Option<Text> {
+    /// gekürzt, wo `shorten` sagt). `None` bei leerem Text.
+    pub fn render(&self, text: &str, px: f32, max_width: f32, shorten: Shorten) -> Option<Text> {
         let scale = PxScale::from(px);
         let font = self.0.as_scaled(scale);
-        let mut chars: Vec<char> = text.trim().chars().filter(|c| !c.is_control()).collect();
-        if chars.is_empty() {
-            return None;
-        }
-        let ellipsis = if font.glyph_id('…') == GlyphId(0) { "..." } else { "…" };
-        let mut glyphs = layout(&font, chars.iter().copied());
-        while glyphs.1 > max_width && chars.len() > 1 {
-            chars.pop();
-            glyphs = layout(&font, chars.iter().copied().chain(ellipsis.chars()));
-        }
-        let (positions, advance) = glyphs;
+        let fitted = self.fit(text, px, max_width, shorten)?;
+        let (positions, advance) = layout(&font, fitted.chars());
         let (ascent, descent) = (font.ascent(), font.descent());
         let width = advance.ceil().max(1.0) as u32;
         let height = (ascent - descent).ceil().max(1.0) as u32;
@@ -57,6 +57,27 @@ impl Font {
             });
         }
         Some(Text { width, height, coverage })
+    }
+
+    /// `text` ohne Steuerzeichen, so weit gekürzt, dass er in `px` Bildpunkten Schriftgröße höchstens
+    /// `max_width` breit ist; `None`, wenn nichts übrig bleibt
+    fn fit(&self, text: &str, px: f32, max_width: f32, shorten: Shorten) -> Option<String> {
+        let font = self.0.as_scaled(PxScale::from(px));
+        let chars: Vec<char> = text.trim().chars().filter(|c| !c.is_control()).collect();
+        if chars.is_empty() {
+            return None;
+        }
+        let ellipsis = if font.glyph_id('…') == GlyphId(0) { "..." } else { "…" };
+        let mut fitted: String = chars.iter().collect();
+        // So viele Zeichen bleiben, davon `tail` am Ende
+        let mut keep = chars.len();
+        while layout(&font, fitted.chars()).1 > max_width && keep > 1 {
+            keep -= 1;
+            let tail = if shorten == Shorten::Middle { keep / 2 } else { 0 };
+            let (head, end) = (&chars[..keep - tail], &chars[chars.len() - tail..]);
+            fitted = head.iter().copied().chain(ellipsis.chars()).chain(end.iter().copied()).collect();
+        }
+        Some(fitted)
     }
 }
 
@@ -139,18 +160,33 @@ mod tests {
             eprintln!("keine Systemschrift gefunden – übersprungen");
             return;
         };
-        let text = font.render("laptop", 15.0, 360.0).unwrap();
+        let text = font.render("laptop", 15.0, 360.0, Shorten::End).unwrap();
         assert!(text.width > 30 && text.width < 80, "{} Bildpunkte breit", text.width);
         assert!(text.height >= 15 && text.height < 30, "{} Bildpunkte hoch", text.height);
         assert!(text.coverage.contains(&255), "volle Deckung im Strich");
         assert!(text.coverage.iter().filter(|&&c| c == 0).count() > text.coverage.len() / 3, "Zwischenräume bleiben frei");
         // Doppelte Größe für 200 %
-        let large = font.render("laptop", 30.0, 720.0).unwrap();
+        let large = font.render("laptop", 30.0, 720.0, Shorten::End).unwrap();
         assert!(large.width.abs_diff(text.width * 2) <= 3, "{} gegen {}", large.width, text.width);
 
-        let long = font.render(&"sehr-langer-rechnername-".repeat(10), 15.0, 360.0).unwrap();
+        let long = font.render(&"sehr-langer-rechnername-".repeat(10), 15.0, 360.0, Shorten::End).unwrap();
         assert!(long.width <= 360, "{}", long.width);
-        assert!(font.render("  ", 15.0, 360.0).is_none());
-        assert!(font.render("Büro-PC 😀", 15.0, 360.0).is_some(), "fehlende Zeichen stören nicht");
+        assert!(font.render("  ", 15.0, 360.0, Shorten::End).is_none());
+        assert!(font.render("Büro-PC 😀", 15.0, 360.0, Shorten::End).is_some(), "fehlende Zeichen stören nicht");
+    }
+
+    #[test]
+    fn long_file_names_keep_their_ending() {
+        let Some(font) = Font::system() else {
+            eprintln!("keine Systemschrift gefunden – übersprungen");
+            return;
+        };
+        let name = format!("{}-ende.pdf", "Quartalsbericht".repeat(8));
+        let middle = font.fit(&name, 14.0, 200.0, Shorten::Middle).unwrap();
+        assert!(middle.starts_with("Quartals") && middle.ends_with("-ende.pdf") && middle.contains('…'), "{middle}");
+        let end = font.fit(&name, 14.0, 200.0, Shorten::End).unwrap();
+        assert!(end.starts_with("Quartals") && end.ends_with('…'), "{end}");
+        assert!(font.render(&name, 14.0, 200.0, Shorten::Middle).unwrap().width <= 200);
+        assert_eq!(font.fit(" a.pdf\n", 14.0, 200.0, Shorten::Middle).as_deref(), Some("a.pdf"), "Kurzes bleibt, wie es ist");
     }
 }

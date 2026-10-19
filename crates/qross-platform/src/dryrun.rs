@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use qross_core::finder::DragPreview;
 use qross_core::keys::KeyOptions;
 use qross_core::Inject;
 use qross_proto::{ClipboardData, CursorFinder, LockState};
@@ -252,9 +253,11 @@ impl Capture for RecordingCapture {
 pub enum FinderCall {
     Show { style: CursorFinder, name: String },
     Hide,
+    ShowDrag(DragPreview),
+    HideDrag,
 }
 
-/// Merkt sich, was der Cursor-Finder zeigen sollte (für Tests)
+/// Merkt sich, was der Cursor-Finder und die Drag-Vorschau zeigen sollten (für Tests)
 #[derive(Clone, Default)]
 pub struct RecordingFinder(pub Arc<Mutex<Vec<FinderCall>>>);
 
@@ -264,9 +267,14 @@ impl RecordingFinder {
         self.0.lock().unwrap().clone()
     }
 
-    /// Nur die Aufrufe zum Zeigen
+    /// Nur die Aufrufe zum Zeigen des Cursor-Finders
     pub fn shown(&self) -> Vec<FinderCall> {
         self.calls().into_iter().filter(|c| matches!(c, FinderCall::Show { .. })).collect()
+    }
+
+    /// Nur die Aufrufe der Drag-Vorschau
+    pub fn drags(&self) -> Vec<FinderCall> {
+        self.calls().into_iter().filter(|c| matches!(c, FinderCall::ShowDrag(_) | FinderCall::HideDrag)).collect()
     }
 }
 
@@ -277,5 +285,13 @@ impl FinderOverlay for RecordingFinder {
 
     fn hide(&self) {
         self.0.lock().unwrap().push(FinderCall::Hide);
+    }
+
+    fn show_drag(&self, preview: &DragPreview) {
+        self.0.lock().unwrap().push(FinderCall::ShowDrag(preview.clone()));
+    }
+
+    fn hide_drag(&self) {
+        self.0.lock().unwrap().push(FinderCall::HideDrag);
     }
 }

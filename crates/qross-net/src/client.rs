@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Incoming, Notify, Ready};
+use crate::drag_preview::DragView;
 use crate::files::{self, FileOutcome, Receiver, Staging};
 use crate::game::{self, Detector};
 use crate::latency::{self, Collector, Measured, Stamp};
@@ -585,6 +586,8 @@ async fn session(
     });
 
     let mut receiver = Receiver::new(Staging::create(&files::drag_staging_base())?, clip.transfers.clone());
+    // Was vom Server hierher gezogen wird, steht am Cursor, bis es abgelegt oder verworfen ist.
+    let mut drag_view = DragView::new(screen.finder.clone());
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     // Rechte je Rechner: nur neuere Server schicken nach dem Welcome noch etwas.
@@ -662,9 +665,16 @@ async fn session(
                             }
                             Input::DragStart { transfer, entries } => {
                                 receiver.on_drag_start(&server_name, *transfer, entries.clone());
+                                // `Drop` bzw. `Leave` können schon vorher angekommen sein: Dann nichts zeigen.
+                                if state.is_active() {
+                                    drag_view.show(*transfer, &receiver);
+                                }
                                 None
                             }
-                            Input::Drop { transfer, x, y } => Some((*transfer, *x, *y)),
+                            Input::Drop { transfer, x, y } => {
+                                drag_view.hide();
+                                Some((*transfer, *x, *y))
+                            }
                             _ => None,
                         };
                         let (events, transition) = state.on_input(input);
@@ -701,6 +711,7 @@ async fn session(
                                 if let Some(trace) = entering.take() {
                                     trace.log();
                                 }
+                                drag_view.hide();
                                 receiver.cancel_undropped();
                                 notify(notices, ClientNotice::CursorLeft);
                                 info!(
@@ -852,6 +863,8 @@ async fn session(
                 }
                 reason = conn.closed() => return Err(closed(reason)),
             }
+            // Abgebrochen (hier, vom Server oder weil Rechte entzogen wurden) oder fehlgeschlagen
+            drag_view.check(&receiver);
         }
     }
     .await;
@@ -861,6 +874,7 @@ async fn session(
     if let Some(overlay) = &screen.finder {
         overlay.hide();
     }
+    drag_view.hide();
     receiver.cancel_undropped();
     // Was noch ankam, wird nie vollständig.
     clip.transfers.abort_receiving(None, "Verbindung getrennt");

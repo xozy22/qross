@@ -70,6 +70,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Drag & Drop **vom Server** ziehen⁸ | ✔ | ✔ Dateimanager (XDND) | – | ✔ Finder¹ |
 | Drag & Drop **vom Client** zum Server ziehen⁸ | ✔ Explorer | ✔ Dateimanager (XDND) | – | ✔ Finder¹ |
 | Gezogene Dateien **ablegen**⁸ | ✔ Explorer-Fenster oder Desktop unter dem Cursor | ✔ Schreibtisch unter dem Cursor, sonst `~/Downloads/Qross` | Client: in `~/Downloads/Qross` | ✔ Finder-Fenster oder Schreibtisch unter dem Cursor¹ |
+| Vorschau beim Ziehen: Symbol, Name und Größe der Dateien am Cursor des anderen Rechners⁹ | ✔ | ✔ mit Compositor | – | ✔ in der App¹ |
 | Fang-Taste frei wählbar, Medientasten, Tasten je Rechner umbelegen | ✔ | ✔² | Fang-Taste nur, solange der Cursor auf einem Client ist | ✔¹ ² |
 | Zeichen statt Tastenposition je Rechner: anderes Tastaturlayout, tote Tasten, AltGr | ✔ | ✔ | – (bleibt Tastenposition) | ✔¹ |
 | Feststelltaste, Num und Rollen auf allen Rechnern gleich (Stand des Servers) | ✔ alle drei | ✔ Feststelltaste, Num | Client: per Tastendruck, so gut der Compositor seinen Stand meldet; Server: – | ✔ Feststelltaste¹ |
@@ -131,6 +132,13 @@ und den sichtbaren Einträgen; in einer Suche, in „Zuletzt benutzt“ oder Air
 von xfdesktop, Plasma, Nemo oder Caja): Dateimanager verraten nicht verlässlich, welchen Ordner ein Fenster
 zeigt. Unter Wayland sieht kein Programm fremde Drag-&-Drop-Vorgänge oder das Fenster unter dem Cursor, und kein
 Desktop-Portal bietet das an; InputCapture meldet an der Kante nicht einmal, ob eine Taste gedrückt ist.
+⁹ Nur eine Vorschau: Für das System des Zielrechners läuft dort kein Drag, abgelegt wird wie beschrieben im
+Ordner unter dem Cursor. Sie steht rechts unter dem Cursor (am Rand links bzw. darüber) und folgt ihm, bis
+abgelegt oder abgebrochen wird, der Cursor den Rechner verlässt oder die Verbindung endet; die Spitze des
+Cursors deckt sie nie ab. Immer an, nicht über Programmen im Vollbild. Wie beim Cursor-Finder lassen sich unter
+Wayland keine Fenster über andere Programme legen, und unter macOS zeigt nur die App etwas, nicht `qross` auf
+der Kommandozeile. Geprüft sind Bild und Ablauf im Test, beide Richtungen über echtes QUIC; auf echten Rechnern
+ist sie noch nicht geprüft.
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
@@ -141,7 +149,8 @@ Desktop-Portal bietet das an; InputCapture meldet an der Kante nicht einmal, ob 
   Gegenstellen aus 0.5, Wechsel per Tastenkürzel, Zeichen statt Tastenposition samt Gegenstellen aus 0.6, Abgleich
   von Feststelltaste, Num und Rollen samt Gegenstellen aus 0.7, Rechte je Rechner für jede Art und Richtung samt
   sofortiger Änderung und einem älteren Client, der es trotzdem versucht, zurückgehaltene vertrauliche Inhalte,
-  Cursor-Finder samt sofortiger Änderung und Clients aus 0.7, Bildschirmschoner samt Ende durch Eingaben für einen
+  Cursor-Finder samt sofortiger Änderung und Clients aus 0.7, Drag-Vorschau in beide Richtungen samt Ausblenden
+  beim Ablegen, Verlassen, Abbrechen und Verbindungsende, Bildschirmschoner samt Ende durch Eingaben für einen
   Client, Sperren und Gegenstellen aus 0.7, Ablehnung unbekannter Clients, LAN-Suche, Zurückholen und Halten des
   Cursors bei sicherer Tastatureingabe).
 - macOS, sichere Tastatureingabe: Die CI schaltet sie im Test selbst ein, erkennt sie samt Prozess und schaltet
@@ -193,6 +202,9 @@ Desktop-Portal bietet das an; InputCapture meldet an der Kante nicht einmal, ob 
   Rechner, auf dem der Cursor ankommt, etwa eine Sekunde lang ein Ring um den Cursor auf und darunter sein Name;
   beides einzeln schaltbar. Eingestellt wird am Server, er gibt es an alle Clients weiter. „Ausprobieren“ zeigt
   es sofort. Die Anzeige lässt Klicks hindurch und erscheint nicht über Programmen im Vollbild.
+- **Drag-Vorschau:** Ziehst du Dateien über die Kante, hängt auf dem anderen Rechner ein Kärtchen am Cursor wie
+  beim Ziehen auf dem eigenen: Symbol, Name der Datei (bei mehreren „3 Dateien“) und Gesamtgröße. Es verschwindet
+  beim Loslassen, wenn du ohne Ablegen zurückgehst oder die Übertragung abgebrochen wird.
 - **Zeichen statt Tastenposition** (je Rechner, Einstellungen → Tastatur bzw. `[keys.mode]`): Standard ist die
   Tastenposition, dort bestimmt das eigene Layout das Zeichen. Auf „Zeichen“ kommt an, was du auf dem Server
   tippst, auch bei anderem Layout (z. B. Server Deutsch, Mac US): Y und Z, Umlaute, @, €, Klammern, ^ und ´.
@@ -400,7 +412,8 @@ docker run --rm -v "%CD%:/src" -v qross-cargo:/usr/local/cargo/registry -v qross
 ```
 
 Diagnose für Drag & Drop: `cargo run -p qross-platform --example folder_at -- <x> <y>` zeigt den Ablageordner
-an einer Bildschirmposition. `cargo run -p qross-platform --example clipboard_check` prüft die echte
+an einer Bildschirmposition, `cargo run -p qross-platform --example finder -- drag <Datei …>` die Drag-Vorschau
+am Cursor, ohne dass etwas gezogen wird. `cargo run -p qross-platform --example clipboard_check` prüft die echte
 Zwischenablage dieses Rechners mit allen Formaten und stellt den vorherigen Inhalt danach wieder her.
 `cargo run -p qross-net --example scripted_server -- drag <Client-Name> <Datei>` spielt einen Server mit
 simulierter Maus, der einer Oberfläche im Client-Modus eine Datei hinüberzieht (oder mit `copy` kopiert, mit

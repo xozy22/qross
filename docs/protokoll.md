@@ -224,6 +224,25 @@ Zeichen und reservierte Namen werden ersetzt.
 
 Ein älterer Client antwortet nie auf die Nachfrage. Mit gedrückter Taste bleibt der Cursor dann auf ihm.
 
+### Vorschau am Cursor
+
+Auf dem Rechner, auf dem der Cursor mit den Dateien gerade ist, hängt ein Kärtchen rechts unter dem Cursor:
+Symbol (Datei, Ordner oder mehrere), der Name bzw. „3 Dateien“, „2 Ordner“ oder „3 Elemente“ und die Gesamtgröße.
+Es braucht keine neue Nachricht, `DragStart` und `Offer` nennen die Einträge schon.
+
+- **Client** (vom Server gezogen): ab `DragStart`, sofern der Cursor noch auf ihm ist und noch kein `Drop` kam
+  (`DragStart` folgt erst, wenn der Server die Dateien aufgelistet hat), bis `Drop` oder `Leave`.
+- **Server** (vom Client gezogen): sobald der Cursor mit den Dateien zurück ist (`AwaitLocalDrop`), bis zum
+  Loslassen oder bis der Cursor wieder auf einen Client geht.
+- Auf beiden Seiten auch dann nicht mehr, wenn die Übertragung abgebrochen wird oder fehlschlägt, denn dann gibt
+  es nichts mehr abzulegen, und wenn die Verbindung endet.
+
+Das Kärtchen zeigt dasselbe Fenster wie der [Cursor-Finder](#cursor-finder), immer und unabhängig von dessen
+Einstellung; solange es zu sehen ist, tritt der Ring zurück. Am rechten bzw. unteren Rand des Monitors steht es
+links bzw. über dem Cursor, die Spitze des Cursors deckt es nie ab: Dort sucht der Empfänger beim Loslassen den
+Ordner im Fenster darunter. Für das System des Zielrechners ist es nur ein Bild, kein Drag; Programme bekommen
+nichts davon mit.
+
 ## Fortschritt und Abbrechen
 
 Für Drag & Drop in beide Richtungen und kopierte Dateien zählen Sender und Empfänger die gesendeten bzw.
@@ -397,7 +416,7 @@ stellt nur ein durchsichtiges Fenster, das Klicks durchlässt, keinen Fokus nimm
 | Wayland | – (globale Überlagerungen sind nicht vorgesehen) | |
 
 Läuft auf dem Zielrechner ein Programm im Vollbild oder hat eins den Zeiger eingefangen (wie beim
-Spielemodus), zeigt er nichts.
+Spielemodus), zeigt er nichts. Dasselbe Fenster zeigt beim Drag & Drop die [Vorschau am Cursor](#vorschau-am-cursor).
 
 **Kompatibilität:** Ein neuer Server meldet im `Welcome` die Version 9. Clients bis Qross 0.6 lesen den
 Control-Stream nach dem `Welcome` nicht mehr; Clients aus 0.7 überspringen `CursorFinder`, denn sie können die
@@ -517,6 +536,8 @@ Client an einem älteren Server misst nichts, dort entfällt die Anzeige.
 ## Noch offen
 
 - Drag & Drop unter Wayland (es fehlt ein Portal dafür); Ablegen im Ordner eines Dateimanagers unter X11
+- Drag & Drop: auf dem Zielrechner ein echter Drag des Systems statt der Vorschau (Windows: OLE mit virtuellen
+  Dateien, macOS: File Promises, X11: XDND), damit auch Programme die Dateien annehmen, etwa als Anhang
 - Spielemodus: eingefangenen Zeiger unter macOS und Linux erkennen; Rohdaten der Maus am Server
   (Raw Input) statt Cursor-Deltas, damit Zeigerbeschleunigung des Servers nicht mitwandert
 - Zwischenablage: RTF; virtuelle Dateien (z. B. Outlook-Anhänge) und Dateien erst beim Einfügen übertragen

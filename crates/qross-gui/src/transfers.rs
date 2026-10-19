@@ -3,10 +3,11 @@
 
 use std::time::Duration;
 
+use qross_core::text::size_text;
 use qross_net::progress::{Direction, Kind, Phase, Progress};
 use serde::Serialize;
 
-use crate::clipboard_files::{names_text, size_text};
+use crate::clipboard_files::names_text;
 
 /// Lief eine Übertragung mindestens so lange, meldet sich ihr Ende auch als Systembenachrichtigung
 /// (sofern das Fenster im Hintergrund ist). Gilt auch für „Kopierte Dateien sind bereit“.

@@ -5,6 +5,7 @@
 //! dorthin; das Schild mit dem Namen steht darunter (am unteren Rand darüber). Nach einer halben
 //! Sekunde blendet alles sanft aus.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use qross_proto::{CursorFinder, Rect};
@@ -37,9 +38,9 @@ const MARGIN: f32 = 8.0;
 pub const MAX_LABEL_WIDTH: f32 = 360.0;
 
 /// Farben der Oberfläche: Türkis für den Cursor, Mitternachtsblau für Saum und Schild
-const TEAL: [f32; 3] = [0x3f as f32 / 255.0, 0xe3 as f32 / 255.0, 0xc6 as f32 / 255.0];
+pub(super) const TEAL: [f32; 3] = [0x3f as f32 / 255.0, 0xe3 as f32 / 255.0, 0xc6 as f32 / 255.0];
 const INK: [f32; 3] = [0x12 as f32 / 255.0, 0x17 as f32 / 255.0, 0x2a as f32 / 255.0];
-const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
+pub(super) const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
 const HALO_ALPHA: f32 = 0.55;
 const PLATE_ALPHA: f32 = 0.9;
 const BORDER_ALPHA: f32 = 0.6;
@@ -100,11 +101,11 @@ pub struct Area {
 }
 
 impl Area {
-    fn right(&self) -> f32 {
+    pub(super) fn right(&self) -> f32 {
         self.x + self.width
     }
 
-    fn bottom(&self) -> f32 {
+    pub(super) fn bottom(&self) -> f32 {
         self.y + self.height
     }
 }
@@ -131,7 +132,7 @@ pub struct Scene {
     pub bounds: Rect,
 }
 
-fn smoothstep(x: f32) -> f32 {
+pub(super) fn smoothstep(x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
     x * x * (3.0 - 2.0 * x)
 }
@@ -205,19 +206,19 @@ fn place_label(cx: f32, cy: f32, width: f32, height: f32, ring: bool, display: &
 }
 
 /// Premultipliziertes RGBA in Gleitkomma, zum Übereinanderlegen
-struct Canvas {
-    width: u32,
-    height: u32,
+pub(super) struct Canvas {
+    pub(super) width: u32,
+    pub(super) height: u32,
     rgba: Vec<[f32; 4]>,
 }
 
 impl Canvas {
-    fn new(width: u32, height: u32) -> Self {
+    pub(super) fn new(width: u32, height: u32) -> Self {
         Self { width, height, rgba: vec![[0.0; 4]; (width * height) as usize] }
     }
 
     /// `color` mit Deckung `alpha` über den Bildpunkt legen
-    fn blend(&mut self, x: u32, y: u32, color: [f32; 3], alpha: f32) {
+    pub(super) fn blend(&mut self, x: u32, y: u32, color: [f32; 3], alpha: f32) {
         if alpha <= 0.0 {
             return;
         }
@@ -229,24 +230,73 @@ impl Canvas {
         px[3] = alpha + px[3] * keep;
     }
 
+    /// Gerasterten Text in `color` mit der Deckkraft `alpha` auftragen, obere linke Ecke bei
+    /// (`left`, `top`) in Bildpunkten; was über den Rand ragt, fällt weg
+    pub(super) fn text(&mut self, text: &Text, left: i64, top: i64, color: [f32; 3], alpha: f32) {
+        for ty in 0..text.height {
+            for tx in 0..text.width {
+                let (x, y) = (left + tx as i64, top + ty as i64);
+                if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
+                    continue;
+                }
+                let c = text.coverage[(ty * text.width + tx) as usize] as f32 / 255.0;
+                self.blend(x as u32, y as u32, color, alpha * c);
+            }
+        }
+    }
+
     /// Als BGRA (vormultipliziert) mit der Deckkraft `alpha` für alles
-    fn into_bgra(self, alpha: f32) -> Vec<u8> {
+    pub(super) fn into_bgra(self, alpha: f32) -> Vec<u8> {
         let to_byte = |v: f32| (v * alpha * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
         self.rgba.iter().flat_map(|p| [to_byte(p[2]), to_byte(p[1]), to_byte(p[0]), to_byte(p[3])]).collect()
     }
 }
 
 /// Deckung eines Bildpunkts, dessen Mitte `distance` (in Bildpunkten) vor einer Kante liegt
-fn coverage(distance: f32) -> f32 {
+pub(super) fn coverage(distance: f32) -> f32 {
     (distance + 0.5).clamp(0.0, 1.0)
 }
 
 /// Vorzeichenbehafteter Abstand zu einem Rechteck mit runden Ecken (negativ: innen)
-fn rounded_box(px: f32, py: f32, b: &Area, radius: f32) -> f32 {
+pub(super) fn rounded_box(px: f32, py: f32, b: &Area, radius: f32) -> f32 {
     let (hx, hy) = (b.width / 2.0, b.height / 2.0);
     let (qx, qy) = ((px - b.x - hx).abs() - (hx - radius), (py - b.y - hy).abs() - (hy - radius));
     let outside = qx.max(0.0).hypot(qy.max(0.0));
     outside + qx.max(qy).min(0.0) - radius
+}
+
+/// Mitte des Bildpunkts (x, y) in Koordinaten des Systems; `origin`: Koordinaten der oberen linken
+/// Ecke des Bildes
+pub(super) fn center(origin: (f32, f32), density: f32, x: u32, y: u32) -> (f32, f32) {
+    (origin.0 + (x as f32 + 0.5) / density, origin.1 + (y as f32 + 0.5) / density)
+}
+
+/// Nur die Bildpunkte, die `area` (in Koordinaten) berühren
+pub(super) fn span(canvas: &Canvas, area: &Area, origin: (f32, f32), density: f32) -> (Range<u32>, Range<u32>) {
+    let to_px = |v: f32, origin: f32, limit: u32| (((v - origin) * density).floor().max(0.0) as u32).min(limit);
+    let xs = to_px(area.x, origin.0, canvas.width)..to_px(area.right() + 1.0, origin.0, canvas.width);
+    let ys = to_px(area.y, origin.1, canvas.height)..to_px(area.bottom() + 1.0, origin.1, canvas.height);
+    (xs, ys)
+}
+
+/// Dunkles Schild mit feinem türkisem Rand, `plate` und `radius` in Koordinaten
+pub(super) fn plate(canvas: &mut Canvas, origin: (f32, f32), plate: &Area, radius: f32, display: &Display) {
+    let density = display.density;
+    let border = BORDER * display.scale;
+    let (xs, ys) = span(canvas, plate, origin, density);
+    for y in ys {
+        for x in xs.clone() {
+            let (px, py) = center(origin, density, x, y);
+            let d = rounded_box(px, py, plate, radius) * density;
+            if d > 1.0 {
+                continue;
+            }
+            canvas.blend(x, y, INK, PLATE_ALPHA * coverage(-d));
+            // Feiner Rand: Abstand zur Mitte eines Streifens innen entlang der Kante
+            let edge = (d + border * density / 2.0).abs() - border * density / 2.0;
+            canvas.blend(x, y, TEAL, BORDER_ALPHA * coverage(-edge));
+        }
+    }
 }
 
 /// Zeichnet die Szene; `text`: der gerasterte Name (zur Dichte von `display`)
@@ -255,26 +305,17 @@ pub fn render(scene: &Scene, display: &Display, text: Option<&Text>) -> Frame {
     let rect = scene.bounds;
     let (width, height) = (((rect.width as f32) * density).round() as u32, ((rect.height as f32) * density).round() as u32);
     let mut canvas = Canvas::new(width.max(1), height.max(1));
-    // Mitte des Bildpunkts (x, y) in Koordinaten des Systems
-    let at = |x: u32, y: u32| (rect.x as f32 + (x as f32 + 0.5) / density, rect.y as f32 + (y as f32 + 0.5) / density);
-
-    // Nur die Bildpunkte, die `area` (in Koordinaten) berühren
-    let pixels = |area: Area, canvas: &Canvas| {
-        let to_px = |v: f32, origin: i32, limit: u32| (((v - origin as f32) * density).floor().max(0.0) as u32).min(limit);
-        let xs = to_px(area.x, rect.x, canvas.width)..to_px(area.right() + 1.0, rect.x, canvas.width);
-        let ys = to_px(area.y, rect.y, canvas.height)..to_px(area.bottom() + 1.0, rect.y, canvas.height);
-        (xs, ys)
-    };
+    let origin = (rect.x as f32, rect.y as f32);
 
     if let Some(ring) = scene.ring {
         let half = ring.width / 2.0 * density;
         let outer = half + ring.halo * density;
         let reach = ring.radius + ring.width / 2.0 + ring.halo + 1.0;
         let area = Area { x: ring.x - reach, y: ring.y - reach, width: 2.0 * reach, height: 2.0 * reach };
-        let (xs, ys) = pixels(area, &canvas);
+        let (xs, ys) = span(&canvas, &area, origin, density);
         for y in ys {
             for x in xs.clone() {
-                let (px, py) = at(x, y);
+                let (px, py) = center(origin, density, x, y);
                 let off = ((px - ring.x).hypot(py - ring.y) - ring.radius).abs() * density;
                 if off > outer + 1.0 {
                     continue;
@@ -285,37 +326,13 @@ pub fn render(scene: &Scene, display: &Display, text: Option<&Text>) -> Frame {
         }
     }
 
-    if let Some(plate) = scene.label {
-        let radius = plate.height / 2.0;
-        let border = BORDER * display.scale;
-        let (xs, ys) = pixels(plate, &canvas);
-        for y in ys {
-            for x in xs.clone() {
-                let (px, py) = at(x, y);
-                let d = rounded_box(px, py, &plate, radius) * density;
-                if d > 1.0 {
-                    continue;
-                }
-                canvas.blend(x, y, INK, PLATE_ALPHA * coverage(-d));
-                // Feiner Rand: Abstand zur Mitte eines Streifens innen entlang der Kante
-                let edge = (d + border * density / 2.0).abs() - border * density / 2.0;
-                canvas.blend(x, y, TEAL, BORDER_ALPHA * coverage(-edge));
-            }
-        }
+    if let Some(label) = scene.label {
+        plate(&mut canvas, origin, &label, label.height / 2.0, display);
         if let Some(text) = text {
             // Text mittig im Schild, auf ganze Bildpunkte gelegt
-            let left = ((plate.x - rect.x as f32) * density + (plate.width * density - text.width as f32) / 2.0).round() as i64;
-            let top = ((plate.y - rect.y as f32) * density + (plate.height * density - text.height as f32) / 2.0).round() as i64;
-            for ty in 0..text.height {
-                for tx in 0..text.width {
-                    let (x, y) = (left + tx as i64, top + ty as i64);
-                    if x < 0 || y < 0 || x >= canvas.width as i64 || y >= canvas.height as i64 {
-                        continue;
-                    }
-                    let c = text.coverage[(ty * text.width + tx) as usize] as f32 / 255.0;
-                    canvas.blend(x as u32, y as u32, WHITE, c);
-                }
-            }
+            let left = ((label.x - origin.0) * density + (label.width * density - text.width as f32) / 2.0).round() as i64;
+            let top = ((label.y - origin.1) * density + (label.height * density - text.height as f32) / 2.0).round() as i64;
+            canvas.text(text, left, top, WHITE, 1.0);
         }
     }
 

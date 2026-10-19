@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use qross_core::chars::{KeyChars, Produces};
+use qross_core::finder::{DragIcon, DragPreview};
 use qross_core::keys::{parse_switch_keys, HotkeyEvent, HotkeyTracker, KeyConfig, KeyMode, KeyOptions};
 use qross_core::sharing::{Share, Sharing, SharingRules};
 use qross_core::{CaptureEvent, Inject, Layout, LinkConfig};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::progress::{Direction, Kind, Phase, Progress, Transfers};
-use qross_net::server::{CursorFinderHandle, Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle};
+use qross_net::server::{CursorFinderHandle, Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle, StopHandle};
 use qross_net::{clipfiles, files};
 use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, FinderCall, RecordingCapture, RecordingFinder, RecordingInjector, SharedClipboard};
@@ -65,6 +66,8 @@ struct Setup {
     cursor_finder: CursorFinderHandle,
     server_finder: RecordingFinder,
     client_finder: RecordingFinder,
+    /// Beendet den Server samt aller Verbindungen
+    stop: StopHandle,
     server_task: JoinHandle<anyhow::Result<()>>,
     client_task: JoinHandle<anyhow::Result<()>>,
 }
@@ -126,7 +129,7 @@ fn start_client_screen(
     let addr = server.local_addr().unwrap();
     let server_transfers = server.transfers();
     let sharing = server.sharing();
-    let cursor_finder = server.cursor_finder();
+    let (cursor_finder, stop) = (server.cursor_finder(), server.stop_handle());
     let (server_finder, client_finder) = (RecordingFinder::default(), RecordingFinder::default());
 
     let capture = RecordingCapture::default();
@@ -190,6 +193,7 @@ fn start_client_screen(
         cursor_finder,
         server_finder,
         client_finder,
+        stop,
         server_task,
         client_task,
     }
@@ -1687,7 +1691,7 @@ fn start_typing(mode: KeyMode, injected: RecordingInjector) -> Setup {
     let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
     let server = Server::bind(config, &server_id, trust).unwrap().with_keys(keys).with_notices(notice_tx);
     let (addr, server_transfers, sharing) = (server.local_addr().unwrap(), server.transfers(), server.sharing());
-    let cursor_finder = server.cursor_finder();
+    let (cursor_finder, stop) = (server.cursor_finder(), server.stop_handle());
     let (server_finder, client_finder) = (RecordingFinder::default(), RecordingFinder::default());
 
     let capture = RecordingCapture::default();
@@ -1745,6 +1749,7 @@ fn start_typing(mode: KeyMode, injected: RecordingInjector) -> Setup {
         cursor_finder,
         server_finder,
         client_finder,
+        stop,
         server_task,
         client_task,
     }
@@ -2094,6 +2099,158 @@ async fn the_cursor_finder_stays_off_by_default() {
     assert!(s.client_finder.shown().is_empty(), "{:?}", s.client_finder.calls());
     assert!(s.server_finder.shown().is_empty(), "{:?}", s.server_finder.calls());
     assert_eq!(client_cursor_finder(&s), None, "ausgeschaltet schickt der Server nichts");
+}
+
+// ------------------------------------------------------------------ Drag-Vorschau
+
+fn preview(icon: DragIcon, title: &str, size: &str) -> FinderCall {
+    FinderCall::ShowDrag(DragPreview { icon, title: title.into(), size: size.into() })
+}
+
+/// Wartet, bis die Drag-Vorschau eines Rechners genau das gezeigt bzw. ausgeblendet hat
+async fn wait_for_drags(what: &str, finder: &RecordingFinder, expected: Vec<FinderCall>) {
+    let finder = finder.clone();
+    wait_up_to(Duration::from_secs(20), what, || finder.drags() == expected).await;
+}
+
+/// 256 MiB, wie `big_file`
+const BIG_SIZE: &str = "268,4 MB";
+
+#[tokio::test]
+async fn files_dragged_to_the_client_hang_at_its_cursor_until_they_are_dropped() {
+    let s = start(true, None);
+    let (source, report) = copied_files("vorschau-client");
+    let target = source.with_file_name(format!("qross-vorschau-client-ziel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::create_dir_all(&target).unwrap();
+    *s.injected.1.lock().unwrap() = Some(target.clone());
+
+    let held = CaptureEvent::EdgeHit { edge: Edge::Right, x: 1919, y: 540, buttons_down: true };
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    wait_for("Drag-Prüfung", || {
+        let _ = events.send(held.clone());
+        capture.0.lock().unwrap().contains(&CaptureCall::ProbeDrag { x: 1919, y: 540 })
+    })
+    .await;
+    s.events.send(CaptureEvent::DragProbeResult { files: vec![source.join("Bericht.pdf"), source.join("Projekt")] }).unwrap();
+    // Eine Datei und ein Ordner, zusammen 3 MiB und ein paar Bytes
+    let shown = preview(DragIcon::Several, "2 Elemente", "3,1 MB");
+    wait_for_drags("Vorschau am Cursor des Laptops", &s.client_finder, vec![shown.clone()]).await;
+    assert!(s.server_finder.drags().is_empty(), "der Server zeigt nichts, der Cursor ist nicht dort");
+
+    // Loslassen legt ab und blendet die Vorschau aus
+    s.events.send(CaptureEvent::MouseDelta { dx: 50, dy: 0 }).unwrap();
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+    wait_for_drags("ausgeblendet beim Ablegen", &s.client_finder, vec![shown, FinderCall::HideDrag]).await;
+    let file = target.join("Bericht.pdf");
+    wait_up_to(Duration::from_secs(20), "abgelegte Dateien", || file.exists() && target.join("Projekt/sub/notiz.txt").exists())
+        .await;
+    assert_eq!(std::fs::read(&file).unwrap(), report);
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+#[tokio::test]
+async fn the_preview_on_the_client_goes_when_the_cursor_goes_back() {
+    let s = start(true, None);
+    let base = std::env::temp_dir().join(format!("qross-vorschau-zurueck-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let source = big_file(&base.join("quelle"), "vorschau-zurueck.bin");
+    drag_to_laptop(&s, source).await;
+    let shown = preview(DragIcon::File, "vorschau-zurueck.bin", BIG_SIZE);
+    wait_for_drags("Vorschau am Laptop", &s.client_finder, vec![shown.clone()]).await;
+
+    // Mit gedrückter Taste zurück zum Server: Dort wird nichts abgelegt, also auch nichts gezeigt.
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    wait_for_drags("ausgeblendet beim Verlassen", &s.client_finder, vec![shown, FinderCall::HideDrag]).await;
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: false }).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(s.server_finder.drags().is_empty(), "{:?}", s.server_finder.calls());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn the_preview_on_the_client_goes_when_the_drag_is_cancelled() {
+    let s = start(true, None);
+    let base = std::env::temp_dir().join(format!("qross-vorschau-abbruch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let source = big_file(&base.join("quelle"), "vorschau-abbruch.bin");
+    let id = drag_to_laptop(&s, source).await;
+    let shown = preview(DragIcon::File, "vorschau-abbruch.bin", BIG_SIZE);
+    wait_for_drags("Vorschau am Laptop", &s.client_finder, vec![shown.clone()]).await;
+
+    // Der Server bricht ab, die Taste ist noch gedrückt: Ablegen brächte nichts mehr.
+    assert!(s.server_transfers.cancel(Direction::Sending, id));
+    wait_for_drags("ausgeblendet nach dem Abbruch", &s.client_finder, vec![shown, FinderCall::HideDrag]).await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn the_preview_on_the_client_goes_when_the_connection_ends() {
+    let s = start(true, None);
+    let base = std::env::temp_dir().join(format!("qross-vorschau-getrennt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let source = big_file(&base.join("quelle"), "vorschau-getrennt.bin");
+    drag_to_laptop(&s, source).await;
+    let shown = preview(DragIcon::File, "vorschau-getrennt.bin", BIG_SIZE);
+    wait_for_drags("Vorschau am Laptop", &s.client_finder, vec![shown.clone()]).await;
+
+    s.stop.stop().await;
+    wait_for_drags("ausgeblendet nach dem Verbindungsende", &s.client_finder, vec![shown, FinderCall::HideDrag]).await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Auf dem Laptop `files` greifen und an die Kante zum Server ziehen, bis der Server sie annimmt
+async fn drag_from_laptop(s: &Setup, files: Vec<PathBuf>) {
+    enter_laptop(s).await;
+    *s.injected.2.lock().unwrap() = files;
+    s.events.send(CaptureEvent::Button { button: MouseButton::Left, down: true }).unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let capture = s.capture.clone();
+    wait_for("Rückkehr zum Server mit den Dateien", || capture.0.lock().unwrap().contains(&CaptureCall::AwaitLocalDrop)).await;
+}
+
+#[tokio::test]
+async fn files_from_the_client_hang_at_the_cursor_of_the_server_until_they_are_dropped() {
+    let s = start(true, None);
+    let (source, report) = copied_files("vorschau-server");
+    let target = source.with_file_name(format!("qross-vorschau-server-ziel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::create_dir_all(&target).unwrap();
+    *s.capture.1.lock().unwrap() = Some(target.clone());
+    drag_from_laptop(&s, vec![source.join("Bericht.pdf")]).await;
+    let shown = preview(DragIcon::File, "Bericht.pdf", "3,1 MB");
+    wait_for_drags("Vorschau am Cursor des Servers", &s.server_finder, vec![shown.clone()]).await;
+    assert!(s.client_finder.drags().is_empty(), "der Laptop zeigt nichts, der Cursor ist nicht mehr dort");
+
+    s.events.send(CaptureEvent::LocalDrop { x: 300, y: 200 }).unwrap();
+    wait_for_drags("ausgeblendet beim Ablegen", &s.server_finder, vec![shown, FinderCall::HideDrag]).await;
+    let file = target.join("Bericht.pdf");
+    wait_up_to(Duration::from_secs(20), "abgelegte Datei", || file.exists()).await;
+    assert_eq!(std::fs::read(&file).unwrap(), report);
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+#[tokio::test]
+async fn the_preview_on_the_server_goes_when_the_cursor_goes_back_to_the_client() {
+    let s = start(true, None);
+    let (source, _) = copied_files("vorschau-server-zurueck");
+    drag_from_laptop(&s, vec![source.join("Projekt")]).await;
+    let shown = preview(DragIcon::Folder, "Projekt", "7 B");
+    wait_for_drags("Vorschau am Cursor des Servers", &s.server_finder, vec![shown.clone()]).await;
+
+    // Ohne Ablegen wieder zum Laptop: Die Dateien verfallen, die Vorschau geht mit.
+    let (events, capture) = (s.events.clone(), s.capture.clone());
+    s.capture.0.lock().unwrap().clear();
+    wait_for("wieder auf dem Laptop", || {
+        let _ = events.send(edge_hit());
+        capture.0.lock().unwrap().contains(&CaptureCall::Remote)
+    })
+    .await;
+    wait_for_drags("ausgeblendet beim Verlassen", &s.server_finder, vec![shown, FinderCall::HideDrag]).await;
+    assert!(s.client_finder.drags().is_empty());
+    let _ = std::fs::remove_dir_all(&source);
 }
 
 /// Wartet, bis der Client diese Aufträge an den Bildschirmschoner bekommen hat, als (`active`, `lock`)

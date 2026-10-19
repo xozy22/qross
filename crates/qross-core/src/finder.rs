@@ -2,11 +2,16 @@
 //! einem Client bei `Input::Enter`, auf dem Server, wenn der Cursor zurückkommt. Verlässt der Cursor
 //! einen Rechner, verschwindet die Anzeige dort sofort. Eingestellt wird er am Server; Clients ab
 //! Qross 0.8 erfahren es über `Control::CursorFinder`.
+//!
+//! Dieselbe Anzeige zeigt beim Drag & Drop über die Kante, was gezogen wird ([`DragPreview`]): auf
+//! dem Rechner, auf dem der Cursor mit den Dateien gerade ist, bis abgelegt oder abgebrochen wird.
 
 pub use qross_proto::CursorFinder;
+use qross_proto::FileEntry;
 
 use crate::client::Transition;
 use crate::server::Action;
+use crate::text::size_text;
 
 /// Was der Cursor-Finder auf diesem Rechner tun soll
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +47,61 @@ pub fn describe(finder: CursorFinder) -> &'static str {
         (true, false) => "nur Ring",
         (false, true) => "nur Name",
         (false, false) => "aus",
+    }
+}
+
+/// Symbol der Drag-Vorschau
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragIcon {
+    File,
+    Folder,
+    /// Mehrere Dateien bzw. Ordner
+    Several,
+}
+
+/// Was neben dem Cursor steht, solange Dateien über die Kante gezogen werden: Symbol, Name (bei
+/// mehreren „3 Dateien“) und Gesamtgröße
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DragPreview {
+    pub icon: DragIcon,
+    pub title: String,
+    /// z. B. „3,1 MB“
+    pub size: String,
+}
+
+impl DragPreview {
+    /// Aus den Einträgen einer Übertragung (`Input::DragStart`, `DragMessage::Offer`): Ordner
+    /// stehen dort samt Inhalt, gezogen wurden die obersten Einträge. `None` ohne Einträge.
+    pub fn of(entries: &[FileEntry]) -> Option<Self> {
+        // Name und ob es ein Ordner ist, in der Reihenfolge der Einträge
+        let mut tops: Vec<(&str, bool)> = Vec::new();
+        for entry in entries {
+            let (top, inside) = match entry.path.split_once('/') {
+                Some((top, _)) => (top, true),
+                None => (entry.path.as_str(), false),
+            };
+            let folder = inside || entry.is_dir;
+            match tops.iter_mut().find(|(name, _)| *name == top) {
+                Some((_, is_folder)) => *is_folder |= folder,
+                None => tops.push((top, folder)),
+            }
+        }
+        let (icon, title) = match tops.as_slice() {
+            [] => return None,
+            [(name, true)] => (DragIcon::Folder, (*name).to_owned()),
+            [(name, false)] => (DragIcon::File, (*name).to_owned()),
+            several => {
+                let folders = several.iter().filter(|(_, folder)| *folder).count();
+                let what = match folders {
+                    0 => "Dateien",
+                    n if n == several.len() => "Ordner",
+                    _ => "Elemente",
+                };
+                (DragIcon::Several, format!("{} {what}", several.len()))
+            }
+        };
+        let size = size_text(entries.iter().map(|e| e.size).sum());
+        Some(Self { icon, title, size })
     }
 }
 
@@ -127,5 +187,34 @@ mod tests {
         assert_eq!(describe(BOTH), "Ring und Name");
         assert_eq!(describe(NAME), "nur Name");
         assert_eq!(describe(CursorFinder::OFF), "aus");
+    }
+
+    fn file(path: &str, size: u64) -> FileEntry {
+        FileEntry { path: path.into(), size, is_dir: false }
+    }
+
+    fn folder(path: &str) -> FileEntry {
+        FileEntry { path: path.into(), size: 0, is_dir: true }
+    }
+
+    fn preview(icon: DragIcon, title: &str, size: &str) -> Option<DragPreview> {
+        Some(DragPreview { icon, title: title.into(), size: size.into() })
+    }
+
+    #[test]
+    fn the_drag_preview_names_what_was_picked_up() {
+        assert_eq!(DragPreview::of(&[file("Bericht.pdf", 3_141_592)]), preview(DragIcon::File, "Bericht.pdf", "3,1 MB"));
+        // Ein Ordner kommt samt Inhalt; gezählt wird er einmal, seine Größe ist die seines Inhalts
+        let project = [folder("Projekt"), folder("Projekt/sub"), file("Projekt/sub/notiz.txt", 600), file("Projekt/a.rs", 900)];
+        assert_eq!(DragPreview::of(&project), preview(DragIcon::Folder, "Projekt", "1,5 KB"));
+        assert_eq!(DragPreview::of(&[folder("leer")]), preview(DragIcon::Folder, "leer", "0 B"));
+
+        let files = [file("a.jpg", 2_000_000), file("b.jpg", 2_000_000), file("c.jpg", 1_000_000)];
+        assert_eq!(DragPreview::of(&files), preview(DragIcon::Several, "3 Dateien", "5 MB"));
+        let folders = [folder("x"), file("x/1", 10), folder("y")];
+        assert_eq!(DragPreview::of(&folders), preview(DragIcon::Several, "2 Ordner", "10 B"));
+        let mixed = [file("Bericht.pdf", 1000), folder("Projekt"), file("Projekt/a.rs", 1000)];
+        assert_eq!(DragPreview::of(&mixed), preview(DragIcon::Several, "2 Elemente", "2 KB"));
+        assert_eq!(DragPreview::of(&[]), None);
     }
 }

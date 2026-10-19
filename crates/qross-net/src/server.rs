@@ -24,6 +24,7 @@ use tracing::{debug, info, warn};
 
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Notify, Ready};
+use crate::drag_preview::DragView;
 use crate::files::{FileOutcome, Receiver, Staging};
 use crate::game::{self, Detector};
 use crate::latency::{self, Meter};
@@ -558,6 +559,8 @@ impl Server {
         if finder_style.borrow().is_on() {
             info!("Cursor-Finder: {}", cursor_finder::describe(*finder_style.borrow()));
         }
+        // Was ein Client hierher zieht, steht am Cursor, bis es abgelegt oder verworfen ist.
+        let mut drag_view = DragView::new(finder.clone());
         info!("Server „{}“ lauscht auf {}", self.config.name, self.local_addr()?);
         if !local_monitors.is_empty() {
             info!("eigene Monitore: {}", describe_monitors(&local_monitors));
@@ -881,6 +884,11 @@ impl Server {
                         None => {}
                     }
                 }
+                match &action {
+                    Action::AwaitLocalDrop { transfer, .. } => drag_view.show(*transfer, &drops),
+                    Action::DropIncoming { .. } | Action::CancelIncoming { .. } => drag_view.hide(),
+                    _ => {}
+                }
                 let files = FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers };
                 let (step, started) = (platform_step(&action), Instant::now());
                 apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops, captured);
@@ -890,6 +898,8 @@ impl Server {
                 }
             }
             self.report_hold(&state, &mut hold);
+            // Abgebrochen (hier, vom Client, weil Rechte entzogen wurden oder er fort ist) oder fehlgeschlagen
+            drag_view.check(&drops);
         }
     }
 
