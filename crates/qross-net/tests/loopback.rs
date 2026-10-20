@@ -729,6 +729,40 @@ async fn unknown_client_is_rejected() {
 }
 
 #[tokio::test]
+async fn an_unchecked_peer_gets_little_room_and_time_for_its_hello() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let server = Server::bind(config, &Identity::generate().unwrap(), TrustStore::in_memory()).unwrap();
+    let addr = server.local_addr().unwrap();
+    let (_events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(RecordingCapture::default()),
+        events: events_rx,
+        clipboard: Box::new(SharedClipboard::default()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+        finder: None,
+    }));
+
+    // Mit irgendeinem Zertifikat kommt jeder bis zum Hello. Ein Längenfeld von fast 64 MB wird gleich
+    // abgewiesen, statt dafür Speicher anzulegen und auf den Rest zu warten.
+    let (_endpoint, conn) = connect_raw(addr, &Identity::generate().unwrap()).await;
+    let (mut control, _control_rx) = conn.open_bi().await.unwrap();
+    control.write_all(&(64 * 1024 * 1024 - 1u32).to_be_bytes()).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(2), conn.closed()).await.is_ok(), "zu großes Hello: getrennt");
+
+    // Wer nach dem Handshake nichts schickt, ist nach 3 s draußen.
+    let (_endpoint, conn) = connect_raw(addr, &Identity::generate().unwrap()).await;
+    let started = Instant::now();
+    assert!(tokio::time::timeout(Duration::from_secs(10), conn.closed()).await.is_ok(), "ohne Hello: getrennt");
+    assert!(started.elapsed() >= Duration::from_millis(2500), "schon nach {:?}", started.elapsed());
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn wrong_server_fingerprint_stops_client() {
     let wrong = Identity::generate().unwrap().fingerprint();
     let mut s = start(true, Some(wrong));

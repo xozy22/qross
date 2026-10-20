@@ -14,9 +14,9 @@ use qross_core::sharing::{describe as describe_sharing, SharingRules};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard, FinderOverlay, SecureInput};
 use qross_proto::{
-    encode_datagram, is_sampled_input, is_sampled_move, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData,
-    Control, CursorFinder, Datagram, DragMessage, FileEntry, GameState, Input, Latency, LatencySummary, Platform, Rect,
-    SampleId, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
+    encode_datagram, is_sampled_input, is_sampled_move, read_frame, read_frame_up_to, write_frame, Clipboard as ClipboardMsg,
+    ClipboardData, Control, CursorFinder, Datagram, DragMessage, FileEntry, GameState, Input, Latency, LatencySummary,
+    Platform, Rect, SampleId, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -1312,8 +1312,15 @@ async fn handle_connection(
     let remote = incoming.remote_address();
     let conn = incoming.await.context("QUIC-Handshake")?;
     let fingerprint = peer_fingerprint(&conn)?;
-    let (mut send, mut recv) = conn.accept_bi().await?;
-    let Some(Control::Hello { version, name, screen, platform }) = read_frame(&mut recv).await? else {
+    let (mut send, mut recv, hello) = match receive_hello(&conn).await {
+        Ok(received) => received,
+        Err(e) => {
+            conn.close(0u32.into(), b"no hello");
+            return Err(e.context("kein gültiges Hello"));
+        }
+    };
+    let Control::Hello { version, name, screen, platform } = hello else {
+        conn.close(0u32.into(), b"no hello");
         bail!("{remote} hat kein Hello gesendet");
     };
 
@@ -1378,6 +1385,25 @@ async fn handle_connection(
     conn.close(0u32.into(), b"");
     let _ = tx.send(NetEvent::Closed { name, id });
     Ok(())
+}
+
+/// Höchstens so groß darf das `Hello` sein; es braucht ein paar Dutzend Bytes.
+const HELLO_MAX: usize = 16 * 1024;
+/// So lange darf es nach dem Handshake auf sich warten lassen
+const HELLO_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Das `Hello` auf dem Control-Stream, den der Client öffnet. Bis hierher kommt jeder mit irgendeinem
+/// Zertifikat; vertraut wird erst danach. Deshalb gilt eine eigene kleine Grenze statt der für Frames
+/// (64 MB, der Puffer entsteht schon mit dem Längenfeld), und es muss bald kommen.
+async fn receive_hello(conn: &Connection) -> Result<(SendStream, RecvStream, Control)> {
+    let receive = async {
+        let (send, mut recv) = conn.accept_bi().await?;
+        let hello = read_frame_up_to(&mut recv, HELLO_MAX).await?.context("Control-Stream ohne Nachricht beendet")?;
+        anyhow::Ok((send, recv, hello))
+    };
+    tokio::time::timeout(HELLO_TIMEOUT, receive)
+        .await
+        .map_err(|_| anyhow!("nichts binnen {} s nach dem Handshake", HELLO_TIMEOUT.as_secs()))?
 }
 
 /// Schickt dem Client nach dem `Welcome` seine Rechte und den Cursor-Finder (diesen nur, wenn er

@@ -44,6 +44,16 @@ where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
 {
+    read_frame_up_to(r, MAX_FRAME_LEN).await
+}
+
+/// Wie [`read_frame`], aber nur bis `max` Bytes, etwa solange die Gegenstelle noch nicht geprüft ist:
+/// Der Puffer wird nach dem Längenfeld angelegt, bevor ein Byte des Inhalts da ist.
+pub async fn read_frame_up_to<R, T>(r: &mut R, max: usize) -> Result<Option<T>, FrameError>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
     let mut len = [0u8; 4];
     match r.read_exact(&mut len).await {
         Ok(_) => {}
@@ -51,7 +61,7 @@ where
         Err(e) => return Err(e.into()),
     }
     let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_FRAME_LEN {
+    if len > max.min(MAX_FRAME_LEN) {
         return Err(FrameError::TooLarge(len));
     }
     let mut buf = vec![0u8; len];
@@ -106,6 +116,24 @@ mod tests {
         let (mut a, mut b) = tokio::io::duplex(64);
         a.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
         assert!(matches!(read_frame::<_, Input>(&mut b).await, Err(FrameError::TooLarge(_))));
+    }
+
+    #[tokio::test]
+    async fn a_smaller_limit_applies_before_any_content() {
+        let (mut a, mut b) = tokio::io::duplex(64);
+        // Nur das Längenfeld: Mehr braucht es nicht, um abgewiesen zu werden.
+        a.write_all(&(16 * 1024 + 1u32).to_be_bytes()).await.unwrap();
+        assert!(matches!(read_frame_up_to::<_, Control>(&mut b, 16 * 1024).await, Err(FrameError::TooLarge(16385))));
+
+        let (mut a, mut b) = tokio::io::duplex(1024);
+        let hello = Control::Hello {
+            version: 3,
+            name: "laptop".into(),
+            screen: ScreenInfo { bounds: Rect::new(0, 0, 1512, 982) },
+            platform: Platform::MacOs,
+        };
+        write_frame(&mut a, &hello).await.unwrap();
+        assert_eq!(read_frame_up_to::<_, Control>(&mut b, 16 * 1024).await.unwrap(), Some(hello));
     }
 
     #[test]
