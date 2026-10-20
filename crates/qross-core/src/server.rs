@@ -1318,6 +1318,30 @@ mod tests {
         assert!(!s.is_locked());
     }
 
+    #[test]
+    fn after_the_lock_the_cursor_crosses_where_it_hits_the_edge() {
+        // Gemeldet: Nach dem Fangen sprang der Cursor beim nächsten Wechsel in die Bildmitte
+        let lock = ServerEvent::Capture(CaptureEvent::ToggleLock);
+        let mut s = state();
+        s.handle(lock.clone());
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 270)).is_empty(), "gesperrt: kein Wechsel");
+        s.handle(lock.clone());
+        let out = s.handle(edge_hit(Edge::Right, 1919, 270));
+        assert!(
+            out.contains(&Action::Send { to: "laptop".into(), input: Input::Enter { epoch: 1, x: 1, y: 199 } }),
+            "auf einem Viertel der Höhe hinein, nicht in der Mitte: {out:?}"
+        );
+
+        // Auf dem Laptop fangen, bewegen, freigeben, zurück über die linke Kante
+        s.handle(lock.clone());
+        s.handle(delta(300, 400));
+        s.handle(delta(-1000, 0));
+        assert_eq!(s.active_screen(), "laptop", "gefangen");
+        s.handle(lock);
+        let out = s.handle(delta(-10, 0));
+        assert!(out.contains(&Action::ReleaseCapture { x: 1918, y: 808 }), "auf drei Vierteln der Höhe zurück: {out:?}");
+    }
+
     fn switch_to(target: &str) -> ServerEvent {
         ServerEvent::Capture(CaptureEvent::SwitchTo(target.parse().unwrap()))
     }

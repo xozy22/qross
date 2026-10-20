@@ -27,7 +27,7 @@ use std::cell::RefCell;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock};
 use std::thread::{self, Thread};
@@ -43,6 +43,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::System::Threading::{
     GetCurrentThread, GetCurrentThreadId, SetThreadInformation, SetThreadPriority, ThreadPowerThrottling,
     THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
@@ -72,6 +73,78 @@ struct Shared {
     events: UnboundedSender<CaptureEvent>,
     /// Dateien vom Client warten: das nächste Loslassen einer Maustaste meldet `LocalDrop`
     await_drop: AtomicBool,
+    /// Der Cursor wurde eben beim Wechsel versetzt (siehe [`Settle`])
+    settle: Settle,
+}
+
+/// Wie lange nach dem Versetzen des Cursors Mausereignisse noch vom alten Punkt aus berechnet sein
+/// können. Gesehen wurden 1–2 ms; Neusetzen der Hooks beim Wechsel kann sie etwas aufhalten.
+const SETTLE_MS: u64 = 100;
+
+/// Beim Wechsel versetzt Qross den Cursor: auf einen Client in die Mitte des Hauptbildschirms
+/// (geparkt, damit Bewegungen in alle Richtungen messbar bleiben), zurück an die Stelle des
+/// Übertritts. Windows berechnet die Position eines Mausereignisses aber schon beim Einreihen, der
+/// Hook sieht sie erst danach. Kurz um `SetCursorPos` herum passen Ereignis und `GetCursorPos`
+/// deshalb nicht zusammen: Das eine rechnet noch vom alten Punkt aus, das andere meldet schon den
+/// neuen, oder umgekehrt. Die Differenz war ein Sprung um eine halbe Bildschirmbreite (gemeldet:
+/// „größter Schritt 1909 px, nach 1,3 ms zurück auf dem Server“), und zurück auf dem Server zogen
+/// solche Ereignisse den Cursor in die Bildmitte. Für diese kurze Zeit merkt sich `Settle` beide
+/// Punkte; als Ausgangspunkt eines Ereignisses gilt der nähere (siehe [`settle_base`]).
+struct Settle {
+    /// Punkt vor und nach dem Versetzen (gepackt, siehe [`pack`])
+    from: AtomicU64,
+    to: AtomicU64,
+    /// Bis dahin gilt es (GetTickCount64)
+    until: AtomicU64,
+    /// Versetzt beim Zurückkommen auf den Server (sonst beim Wechsel auf einen Client)
+    released: AtomicBool,
+}
+
+impl Settle {
+    fn new() -> Self {
+        Self { from: AtomicU64::new(0), to: AtomicU64::new(0), until: AtomicU64::new(0), released: AtomicBool::new(false) }
+    }
+
+    /// Vor `SetCursorPos` aufrufen, damit der Hook es schon für das erste Ereignis danach kennt
+    fn moved(&self, from: POINT, to: POINT, released: bool) {
+        self.from.store(pack(from), Ordering::Relaxed);
+        self.to.store(pack(to), Ordering::Relaxed);
+        self.released.store(released, Ordering::Relaxed);
+        self.until.store(unsafe { GetTickCount64() } + SETTLE_MS, Ordering::Release);
+    }
+
+    /// Alter und neuer Punkt, solange es gilt und zur Richtung passt
+    fn active(&self, released: bool) -> Option<(POINT, POINT)> {
+        if unsafe { GetTickCount64() } >= self.until.load(Ordering::Acquire) || self.released.load(Ordering::Relaxed) != released {
+            return None;
+        }
+        Some((unpack(self.from.load(Ordering::Relaxed)), unpack(self.to.load(Ordering::Relaxed))))
+    }
+}
+
+fn pack(p: POINT) -> u64 {
+    (u64::from(p.x as u32) << 32) | u64::from(p.y as u32)
+}
+
+fn unpack(v: u64) -> POINT {
+    POINT { x: (v >> 32) as u32 as i32, y: v as u32 as i32 }
+}
+
+fn squared(a: POINT, b: POINT) -> i64 {
+    let (dx, dy) = (i64::from(a.x) - i64::from(b.x), i64::from(a.y) - i64::from(b.y));
+    dx * dx + dy * dy
+}
+
+/// Ausgangspunkt eines Ereignisses an `pt` kurz nach dem Versetzen von `from` nach `to`: der nähere
+/// der beiden, denn eine Bewegung zwischen zwei Ereignissen ist klein gegen ihren Abstand.
+fn settle_base(pt: POINT, from: POINT, to: POINT) -> POINT {
+    if squared(pt, from) < squared(pt, to) { from } else { to }
+}
+
+/// Kam ein Ereignis nach dem Zurücksetzen noch vom Parkpunkt `from` aus? Liegen beide Punkte nah
+/// beieinander (Kürzel zur Mitte des Servers), ist es gleichgültig.
+fn from_parked(pt: POINT, from: POINT, to: POINT) -> bool {
+    squared(from, to) > 64 * 64 && squared(pt, from) < squared(pt, to)
 }
 
 /// Hook-Prozeduren sind freie Funktionen ohne Kontext – daher ein prozessweiter Zustand.
@@ -189,7 +262,12 @@ pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Ar
 }
 
 fn start(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<WinCapture> {
-    let shared = Shared { remote: AtomicBool::new(false), events: events.clone(), await_drop: AtomicBool::new(false) };
+    let shared = Shared {
+        remote: AtomicBool::new(false),
+        events: events.clone(),
+        await_drop: AtomicBool::new(false),
+        settle: Settle::new(),
+    };
     if SHARED.set(shared).is_err() {
         bail!("die Eingabe-Erfassung läuft in diesem Prozess bereits");
     }
@@ -459,10 +537,13 @@ impl Capture for WinCapture {
 
     fn capture_remote(&self) {
         if let Some(shared) = SHARED.get() {
-            shared.remote.store(true, Ordering::Release);
-            unsafe { PostThreadMessageW(self.thread_id, WM_HOOKS_TO_FRONT, 0, 0) };
             // Weg vom Rand, damit Bewegungen in alle Richtungen messbar bleiben.
             let (x, y) = primary_center();
+            let mut from = POINT { x, y };
+            unsafe { GetCursorPos(&mut from) };
+            shared.settle.moved(from, POINT { x, y }, false);
+            shared.remote.store(true, Ordering::Release);
+            unsafe { PostThreadMessageW(self.thread_id, WM_HOOKS_TO_FRONT, 0, 0) };
             unsafe { SetCursorPos(x, y) };
             cursor::hide();
         }
@@ -470,6 +551,8 @@ impl Capture for WinCapture {
 
     fn release(&self, x: i32, y: i32) {
         if let Some(shared) = SHARED.get() {
+            let (px, py) = primary_center();
+            shared.settle.moved(POINT { x: px, y: py }, POINT { x, y }, true);
             shared.remote.store(false, Ordering::Release);
             unsafe { SetCursorPos(x, y) };
             cursor::restore();
@@ -576,6 +659,11 @@ fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
 
     if !remote {
         if msg == WM_MOUSEMOVE {
+            // Eben zurück vom Client: noch vom Parkpunkt aus berechnet. Durchgelassen spränge der
+            // Cursor dorthin, in die Bildmitte; die Bewegung selbst ist nur ein paar Pixel.
+            if shared.settle.active(true).is_some_and(|(from, to)| from_parked(info.pt, from, to)) {
+                return true;
+            }
             if let Some((edge, x, y)) = outer_edge_at(info.pt.x, info.pt.y) {
                 emit(CaptureEvent::EdgeHit { edge, x, y, buttons_down: buttons_down() });
             }
@@ -587,8 +675,15 @@ fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
     let wheel = (info.mouseData >> 16) as u16 as i16;
     let event = match msg {
         WM_MOUSEMOVE => {
-            let mut cur = POINT { x: 0, y: 0 };
-            unsafe { GetCursorPos(&mut cur) };
+            // Eben geparkt: vom Punkt aus rechnen, von dem aus Windows das Ereignis berechnet hat
+            let cur = match shared.settle.active(false) {
+                Some((from, to)) => settle_base(info.pt, from, to),
+                None => {
+                    let mut cur = POINT { x: 0, y: 0 };
+                    unsafe { GetCursorPos(&mut cur) };
+                    cur
+                }
+            };
             let (dx, dy) = (info.pt.x - cur.x, info.pt.y - cur.y);
             if dx == 0 && dy == 0 {
                 return true;
@@ -787,6 +882,40 @@ mod tests {
     /// Entfernt die Hooks so, wie Windows es nach einer Zeitüberschreitung tut: Der Hook-Thread merkt
     /// nichts davon und behält die alten Handles.
     pub(super) const WM_DROP_HOOKS: u32 = WM_APP + 0x5F;
+
+    const fn p(x: i32, y: i32) -> POINT {
+        POINT { x, y }
+    }
+
+    #[test]
+    fn right_after_parking_moves_count_from_where_windows_computed_them() {
+        // Gemeldet: 3840 px breit, Cursor an der rechten Kante, geparkt in der Mitte. Ein Ereignis,
+        // das schon von der Mitte aus berechnet ist, während GetCursorPos noch die Kante meldet,
+        // war ein Schritt von 1909 px nach links – zurück auf den Server.
+        let (edge, center) = (p(3839, 700), p(1920, 1080));
+        let base = settle_base(p(1930, 1081), edge, center);
+        assert_eq!((1930 - base.x, 1081 - base.y), (10, 1), "von der Mitte aus");
+        // Umgekehrt: noch von der Kante aus berechnet, GetCursorPos meldet schon die Mitte
+        let base = settle_base(p(3845, 702), edge, center);
+        assert_eq!((3845 - base.x, 702 - base.y), (6, 2), "von der Kante aus");
+    }
+
+    #[test]
+    fn back_on_the_server_moves_from_the_parking_spot_are_dropped() {
+        let (center, back) = (p(1920, 1080), p(3838, 1300));
+        assert!(from_parked(p(1912, 1079), center, back), "von der Mitte aus: verwerfen");
+        assert!(!from_parked(p(3830, 1301), center, back), "von der Kante aus: normal");
+        // Kürzel zum Server landet in der Mitte: beide Punkte gleich, nichts verwerfen
+        assert!(!from_parked(p(1925, 1080), center, p(1920, 1085)));
+    }
+
+    #[test]
+    fn points_pack_with_negative_coordinates() {
+        for point in [p(0, 0), p(-1920, 1080), p(5255, -360), p(i32::MIN, i32::MAX)] {
+            let back = unpack(pack(point));
+            assert_eq!((back.x, back.y), (point.x, point.y));
+        }
+    }
 
     /// Eigene Eingabe für beide Hooks (die Probe des Wächters)
     fn nudge() {
