@@ -2,8 +2,9 @@
 
 import { $, invoke } from "./core.js";
 import { el, icon, toast } from "./util.js";
+import { t } from "./i18n.js";
 import { TOAST_KIND } from "./clipboard-files.js";
-import { NBSP } from "./quality.js";
+import { percentText } from "./quality.js";
 
 /** Erst ab dieser Laufzeit erscheint eine Zeile; kürzere Übertragungen würden nur aufblitzen. */
 export const TRANSFER_SHOW_AFTER_MS = 500;
@@ -13,7 +14,7 @@ export const TRANSFER_LINGER_MS = { done: 5000, cancelled: 4000, failed: 9000 };
  *  und werden nur aktualisiert, damit bei vier Meldungen pro Sekunde nichts flackert. */
 export const transfers = new Map();
 
-export function transferRow(t) {
+export function transferRow(transfer) {
   const parts = {
     name: el("strong", { class: "tname" }),
     route: el("span", { class: "troute" }),
@@ -27,14 +28,14 @@ export function transferRow(t) {
   parts.cancel = el("button", {
     type: "button",
     class: "btn ghost small tcancel",
-    text: "Abbrechen",
-    "aria-label": `Übertragung von ${t.name} abbrechen`,
-    onclick: () => cancelTransfer(t.id),
+    text: t("common.cancel"),
+    "aria-label": t("transfers.cancelLabel", { name: transfer.name }),
+    onclick: () => cancelTransfer(transfer.id),
   });
   const node = el(
     "div",
-    { class: "transfer", "data-direction": t.direction, "data-state": "running" },
-    icon(t.direction === "sending" ? "up" : "down"),
+    { class: "transfer", "data-direction": transfer.direction, "data-state": "running" },
+    icon(transfer.direction === "sending" ? "up" : "down"),
     el(
       "div",
       { class: "tmain" },
@@ -49,33 +50,33 @@ export function transferRow(t) {
 
 export function showPercent(entry, percent) {
   const whole = Math.floor(percent);
-  entry.parts.pct.textContent = `${whole}${NBSP}%`;
+  entry.parts.pct.textContent = percentText(whole);
   entry.parts.fill.style.width = `${percent}%`;
   entry.parts.bar.setAttribute("aria-valuenow", whole);
 }
 
 /** Meldung aus dem Backend (etwa 4×/s je Übertragung, zum Schluss mit Ergebnis) */
-export function onTransfer(t) {
-  let entry = transfers.get(t.id);
+export function onTransfer(transfer) {
+  let entry = transfers.get(transfer.id);
   if (!entry) {
     // Kurze Übertragungen bekommen keine Zeile, ein Ende ohne Zeile braucht keine.
-    if (t.state !== "running" || t.elapsed_ms < TRANSFER_SHOW_AFTER_MS) return;
-    entry = transferRow(t);
-    transfers.set(t.id, entry);
+    if (transfer.state !== "running" || transfer.elapsed_ms < TRANSFER_SHOW_AFTER_MS) return;
+    entry = transferRow(transfer);
+    transfers.set(transfer.id, entry);
     $("#transfers").append(entry.node);
     $("#transfers").hidden = false;
   }
   // Schon beendet, etwa durch „Kopierte Dateien sind bereit“
   if (entry.final) return;
-  entry.data = t;
+  entry.data = transfer;
   const { parts } = entry;
-  parts.name.textContent = t.name;
-  parts.name.title = t.name;
-  parts.route.textContent = t.route;
-  parts.size.textContent = t.size;
-  parts.speed.textContent = t.speed;
-  showPercent(entry, t.percent);
-  if (t.state !== "running") finishTransfer(entry, t.outcome, t.state);
+  parts.name.textContent = transfer.name;
+  parts.name.title = transfer.name;
+  parts.route.textContent = transfer.route;
+  parts.size.textContent = transfer.size;
+  parts.speed.textContent = transfer.speed;
+  showPercent(entry, transfer.percent);
+  if (transfer.state !== "running") finishTransfer(entry, transfer.outcome, transfer.state);
 }
 
 /** Ergebnis in die Zeile schreiben; sie verschwindet nach ein paar Sekunden. */

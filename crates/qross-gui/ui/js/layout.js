@@ -1,6 +1,7 @@
 // Layout-Editor
 
 import { $, $$, DEFAULT_PORT, state } from "./core.js";
+import { t, tn } from "./i18n.js";
 import { copy, el, icon, toast } from "./util.js";
 import { askName } from "./dialog.js";
 import { settingsChanged } from "./store.js";
@@ -42,7 +43,7 @@ export function multipleMonitors(screen) {
 /** Zusatz für Beschriftungen, z. B. „ · 2 Monitore“ */
 export function monitorNote(screen) {
   const monitors = multipleMonitors(screen);
-  return monitors ? ` · ${monitors.length} Monitore` : "";
+  return monitors ? ` · ${tn("layout.monitors", monitors.length)}` : "";
 }
 
 /** Tooltip: Name, dann jeder Monitor von links nach rechts und die Gesamtauflösung */
@@ -50,7 +51,11 @@ export function screenTitle(name, screen) {
   const monitors = multipleMonitors(screen);
   if (!monitors) return name;
   const sorted = [...monitors].sort((a, b) => a.x - b.x || a.y - b.y);
-  return [name, ...sorted.map((m, i) => `Monitor ${i + 1}: ${m.width} × ${m.height}`), `Gesamt: ${screen.width} × ${screen.height}`].join("\n");
+  return [
+    name,
+    ...sorted.map((m, i) => t("layout.monitorSize", { number: i + 1, width: m.width, height: m.height })),
+    t("layout.totalSize", { width: screen.width, height: screen.height }),
+  ].join("\n");
 }
 
 /** Maßstäbliche Skizze der Monitore, klein unter der Beschriftung des Kastens */
@@ -87,18 +92,16 @@ export function renderGameNote() {
   const game = s.role === "server" && !s.locked ? s.game_hold : null;
   note.hidden = !game;
   if (!game) return;
-  const where = s.cursor_on === state.settings.server.name ? "Auf diesem Rechner" : `Auf „${s.cursor_on}“`;
-  const what =
-    game === "captured"
-      ? `${where} hat ein Spiel den Zeiger eingefangen. Der Cursor bleibt dort, bis es ihn freigibt.`
-      : `${where} läuft ein Programm im Vollbild. Der Cursor bleibt dort, bis es endet.`;
+  const here = s.cursor_on === state.settings.server.name;
+  const name = s.cursor_on;
+  let what;
+  if (game === "captured") what = here ? t("layout.gameCapturedHere") : t("layout.gameCaptured", { name });
+  else what = here ? t("layout.gameFullscreenHere") : t("layout.gameFullscreen", { name });
   const lock = state.settings.server.keys.lock;
   // Die Tastennamen („Rollen“) lädt sonst erst der Einstellungsbereich
   if (lock && !state.keyNames) loadKeyNames().then(renderGameNote);
-  const release = lock
-    ? ` ${hotkeyLabel(lock)} gibt ihn sofort frei.`
-    : " Die Fang-Taste ist aus; Strg+Alt+Umschalt+Esc holt ihn zu diesem Rechner zurück.";
-  note.replaceChildren(el("strong", { text: "Spielemodus: " }), what + release);
+  const release = lock ? t("layout.gameRelease", { key: hotkeyLabel(lock) }) : t("layout.gameNoLock");
+  note.replaceChildren(el("strong", { text: `${t("layout.gameTitle")} ` }), `${what} ${release}`);
 }
 
 export function renderServer() {
@@ -139,8 +142,8 @@ export function renderServer() {
               "data-col": col,
               "data-row": row,
               style: `grid-column:${col + 1};grid-row:${row + 1}`,
-              "aria-label": "Bildschirm hier hinzufügen",
-              title: "Bildschirm hier hinzufügen",
+              "aria-label": t("layout.addHere"),
+              title: t("layout.addHere"),
               onclick: () => addScreen(col, row),
             },
             icon("plus"),
@@ -167,7 +170,7 @@ export function renderServer() {
     const isServer = s.name === server.name;
     const isOnline = online.has(s.name);
     const hasCursor = cursorOn === s.name;
-    let sub = isServer ? "dieser Rechner" : "nicht verbunden";
+    let sub = isServer ? t("layout.thisComputer") : t("layout.notConnected");
     // Gesamtfläche und Monitore: vom laufenden Server selbst und von verbundenen Clients
     let screen = isServer && serverRunning ? status.local_screen : null;
     if (isOnline) {
@@ -175,14 +178,14 @@ export function renderServer() {
       sub = `${c.width} × ${c.height}`;
       screen = c;
     }
-    if (hasCursor && locked) sub = "Cursor gesperrt";
-    if (hasCursor && game) sub = game === "captured" ? "Spiel hält den Zeiger" : "Vollbild, Cursor bleibt";
+    if (hasCursor && locked) sub = t("layout.cursorLocked");
+    if (hasCursor && game) sub = game === "captured" ? t("layout.gameHolds") : t("layout.fullscreenStays");
     const held = hasCursor && (locked || game);
     const marker = locked
-      ? { title: "Cursor hier gesperrt (Rollen-Taste)", icon: "lock" }
+      ? { title: t("layout.lockedHere"), icon: "lock" }
       : game
-        ? { title: "Spielemodus: Cursor bleibt hier, bis das Vollbild endet (Fang-Taste gibt ihn frei)", icon: "game" }
-        : { title: "Cursor ist hier", icon: "cursor" };
+        ? { title: t("layout.gameHere"), icon: "game" }
+        : { title: t("layout.cursorHere"), icon: "cursor" };
     const classes = [
       "screen",
       isServer && "server",
@@ -195,6 +198,7 @@ export function renderServer() {
       .join(" ");
     // Eingeschränkte Rechte: kleines Schild, das zu den Rechten in den Details führt
     const limits = isServer ? null : sharingSummary(sharingOf(s.name));
+    const label = { name: s.name, status: isServer ? t("layout.server") : sub, monitors: monitorNote(screen) };
     const card = el(
       "div",
       {
@@ -202,11 +206,11 @@ export function renderServer() {
         tabindex: "0",
         role: "button",
         "data-name": s.name,
-        "aria-label": `${s.name}, ${isServer ? "Server" : sub}${monitorNote(screen)}${limits ? ", Rechte eingeschränkt" : ""}`,
+        "aria-label": limits ? t("layout.cardLabelLimited", label) : t("layout.cardLabel", label),
         style: `grid-column:${s.col + 1};grid-row:${s.row + 1}`,
         title: screenTitle(s.name, screen),
       },
-      isServer ? el("span", { class: "tag", text: "Server" }) : null,
+      isServer ? el("span", { class: "tag", text: t("layout.server") }) : null,
       hasCursor ? el("span", { class: "marker", title: marker.title }, icon(marker.icon)) : null,
       el("span", { class: "name", text: s.name }),
       el("span", { class: "sub", text: sub }),
@@ -217,8 +221,8 @@ export function renderServer() {
             {
               class: "share-badge",
               type: "button",
-              title: `Eingeschränkt: ${limits}`,
-              "aria-label": `Rechte von ${s.name} anzeigen`,
+              title: t("layout.restricted", { limits }),
+              "aria-label": t("layout.showRights", { name: s.name }),
               tabindex: "-1",
               onpointerdown: (e) => e.stopPropagation(),
               onclick: (e) => {
@@ -236,8 +240,8 @@ export function renderServer() {
             {
               class: "remove",
               type: "button",
-              title: "Entfernen",
-              "aria-label": `${s.name} entfernen`,
+              title: t("common.remove"),
+              "aria-label": t("layout.removeNamed", { name: s.name }),
               tabindex: "-1",
               onpointerdown: (e) => e.stopPropagation(),
               onclick: (e) => {
@@ -284,7 +288,12 @@ export function addressChips() {
   const suffix = port === DEFAULT_PORT ? "" : `:${port}`;
   const values = [state.hostname, state.localIp].filter(Boolean).map((v) => v + suffix);
   return values.map((v) =>
-    el("span", { class: "chip" }, v, el("button", { type: "button", title: "Kopieren", "aria-label": `${v} kopieren`, onclick: () => copy(v) }, icon("copy"))),
+    el(
+      "span",
+      { class: "chip" },
+      v,
+      el("button", { type: "button", title: t("common.copy"), "aria-label": t("layout.copyAddress", { address: v }), onclick: () => copy(v) }, icon("copy")),
+    ),
   );
 }
 
@@ -402,7 +411,7 @@ export function addScreenNamed(name, cell = freeCell()) {
   const server = state.settings.server;
   if (server.screens.some((s) => s.name === name)) return true;
   if (!cell) {
-    toast("Im Raster ist kein Feld mehr frei. Entferne zuerst einen Bildschirm.", "error");
+    toast(t("layout.gridFull"), "error");
     return false;
   }
   server.screens.push({ name, col: cell[0], row: cell[1] });
@@ -412,10 +421,10 @@ export function addScreenNamed(name, cell = freeCell()) {
 }
 
 export async function addScreen(col, row) {
-  const name = await askName("Bildschirm hinzufügen");
+  const name = await askName(t("layout.addTitle"));
   if (!name) return;
   if (state.settings.server.screens.some((s) => s.name === name)) {
-    toast(`„${name}“ ist schon in der Anordnung.`, "error");
+    toast(t("layout.nameTaken", { name }), "error");
     return;
   }
   const cell = col == null ? freeCell() : [col, row];
@@ -428,10 +437,10 @@ export async function addScreen(col, row) {
 
 export async function renameScreen(oldName) {
   const server = state.settings.server;
-  const name = await askName(oldName === server.name ? "Server umbenennen" : "Bildschirm umbenennen", oldName);
+  const name = await askName(oldName === server.name ? t("layout.renameServer") : t("layout.renameScreen"), oldName);
   if (!name || name === oldName) return focusScreen(oldName);
   if (server.screens.some((s) => s.name === name)) {
-    toast(`„${name}“ ist schon in der Anordnung.`, "error");
+    toast(t("layout.nameTaken", { name }), "error");
     return;
   }
   server.screens.find((s) => s.name === oldName).name = name;
@@ -451,7 +460,7 @@ export function removeScreen(name) {
   delete server.sharing.clients[name];
   state.focusName = server.name;
   settingsChanged({ immediate: true });
-  toast(`„${name}“ entfernt`);
+  toast(t("layout.removed", { name }));
 }
 
 export function setServerName(name) {

@@ -13,6 +13,10 @@ import { updateStatusText } from "../ui/js/settings.js";
 import { selectedName } from "../ui/js/layout.js";
 import { clientPhase } from "../ui/js/client-view.js";
 import { approveLabel, pendingText } from "../ui/js/clients.js";
+import { setLanguage } from "../ui/js/i18n.js";
+
+// Die Erwartungen hier sind deutsch; englische Texte prüft i18n.test.mjs.
+setLanguage("de");
 
 const NB = " ";
 

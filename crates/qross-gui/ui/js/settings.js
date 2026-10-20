@@ -1,13 +1,19 @@
 // Einstellungen (Fenster mit den Bereichen)
 
 import { $, $$, invoke, state } from "./core.js";
-import { closeMenu, toast } from "./util.js";
+import { closeMenu, store, toast } from "./util.js";
+import { LANG_KEY, language, locale, resolveLanguage, t } from "./i18n.js";
 import { openSheet, setupSheet } from "./dialog.js";
 import { saveSoon, updatePreview } from "./store.js";
 import { renderClipLimit } from "./clipboard-files.js";
 import { openNews } from "./news.js";
 import { loadKeyNames, renderKeys, setupKeys } from "./keys.js";
 import { activeProfile, renderProfiles, watchNetworks } from "./profiles.js";
+
+/** Bereich, den die Einstellungen nach dem Neuladen (Sprachwechsel) wieder zeigen */
+export const REOPEN_SETTINGS = "qross.reopenSettings";
+/** Sprachnamen in ihrer eigenen Sprache, damit man aus jeder Sprache zurückfindet */
+export const LANGUAGE_NAMES = { de: "Deutsch", en: "English" };
 
 export async function refreshPrefs() {
   try {
@@ -66,9 +72,10 @@ export function onSettingsNavKey(e) {
 /** Gruppe „Profil …“ in der Navigation und ob Server bzw. Client gerade gelten */
 export function renderProfileScope() {
   const profile = activeProfile();
-  $("#navProfileGroup").textContent = profile ? `Profil „${profile.name}“` : "Profil";
+  $("#navProfileGroup").textContent = profile ? t("settings.tab.profileNamed", { name: profile.name }) : t("settings.tab.profile");
   for (const id of ["#tab-server", "#tab-client"]) {
-    $(id).setAttribute("aria-label", profile ? `${$(id).textContent} (Profil „${profile.name}“)` : $(id).textContent);
+    const tab = $(id).textContent;
+    $(id).setAttribute("aria-label", profile ? t("settings.tab.inProfile", { tab, name: profile.name }) : tab);
   }
   const role = state.settings.role;
   $("#serverRoleNote").hidden = role !== "client";
@@ -79,14 +86,14 @@ export function renderSettings() {
   const prefs = state.prefs;
   if (!prefs) return;
   renderProfileScope();
+  renderLanguage();
   renderKeys();
   const autostart = $("#prefAutostart");
   autostart.checked = prefs.autostart;
   autostart.disabled = !prefs.autostart_editable;
   autostart.closest(".setting").classList.toggle("disabled", !prefs.autostart_editable);
   // Grund, falls Qross sich nicht eintragen kann (Entwicklungsbuild, macOS-DMG, …), sonst wo der Eintrag liegt
-  $("#autostartHint").textContent =
-    prefs.autostart_note ?? `Qross startet bei der Anmeldung unsichtbar im Tray. Eintrag unter ${prefs.autostart_place}.`;
+  $("#autostartHint").textContent = prefs.autostart_note ?? t("settings.general.autostartPlace", { place: prefs.autostart_place });
   $("#prefResume").checked = state.settings.resume_role;
   renderCursorFinder();
   $("#prefAutoUpdate").checked = state.settings.auto_update;
@@ -99,12 +106,19 @@ export function renderSettings() {
   renderUpdateStatus();
 }
 
+/** Auswahl der Sprache; „Automatisch“ nennt die Sprache, die das System gerade ergibt. */
+export function renderLanguage() {
+  const auto = resolveLanguage("auto", state.systemLanguage);
+  $("#prefLanguageAuto").textContent = t("settings.general.languageAuto", { language: LANGUAGE_NAMES[auto] });
+  $("#prefLanguage").value = LANGUAGE_NAMES[state.settings.language] ? state.settings.language : "auto";
+}
+
 /** Was der Cursor-Finder zeigt, in Worten */
 export function finderText(f) {
-  if (f.ring && f.name) return "Ring und Name";
-  if (f.ring) return "nur den Ring";
-  if (f.name) return "nur den Namen";
-  return "nichts";
+  if (f.ring && f.name) return t("settings.finder.both");
+  if (f.ring) return t("settings.finder.ring");
+  if (f.name) return t("settings.finder.name");
+  return t("settings.finder.none");
 }
 
 /** Cursor-Finder: Als Server eingestellt und an die Clients weitergegeben; als Client gilt, was der Server will. */
@@ -123,51 +137,56 @@ export function renderCursorFinder() {
   note.hidden = !isClient;
   if (isClient) {
     const connected = status?.role === "client" && status.phase === "connected";
+    const server = status?.server_name;
     note.textContent = !connected
-      ? "Stellt der Server ein, für alle Rechner. Dieser Rechner ist gerade als Client eingestellt."
+      ? t("settings.finder.clientNote")
       : fromServer
-        ? `Stellt der Server ein: „${status.server_name}“ zeigt hier ${finderText(fromServer)}.`
-        : `Stellt der Server ein: „${status.server_name}“ zeigt hier nichts (aus oder Qross vor 0.8).`;
+        ? t("settings.finder.fromServer", { server, what: finderText(fromServer) })
+        : t("settings.finder.fromServerOff", { server });
   }
-  $("#finderHint").textContent =
-    state.desktop === "wayland"
-      ? "Unter Wayland lässt sich nichts über andere Fenster legen; dieser Rechner zeigt selbst nichts, Clients schon."
-      : "Gilt für alle Rechner: Der Server gibt es an Clients ab Qross 0.8 weiter. Über Programmen im Vollbild erscheint nichts.";
+  $("#finderHint").textContent = t(state.desktop === "wayland" ? "settings.finder.wayland" : "settings.finder.all");
 }
 
-/** „heute um 14:02“, „gestern um 9:15“, sonst „am 3. Oktober um 14:02“ */
+/** „heute um 14:02“, „gestern um 9:15“, sonst „am 3. Oktober um 14:02“ (englisch entsprechend) */
 export function whenText(ms) {
   const d = new Date(ms);
-  const time = d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+  const time = d.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
   const today = new Date();
   const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
-  if (d.toDateString() === today.toDateString()) return `heute um ${time}`;
-  if (d.toDateString() === yesterday.toDateString()) return `gestern um ${time}`;
-  return `am ${d.toLocaleDateString("de-DE", { day: "numeric", month: "long" })} um ${time}`;
+  if (d.toDateString() === today.toDateString()) return t("settings.when.today", { time });
+  if (d.toDateString() === yesterday.toDateString()) return t("settings.when.yesterday", { time });
+  return t("settings.when.date", { date: d.toLocaleDateString(locale(), { day: "numeric", month: "long" }), time });
 }
 
 export function updateStatusText(u) {
-  const checked = u.checked_at ? `, geprüft ${whenText(u.checked_at)}` : "";
+  const version = u.version;
   switch (u.phase) {
     case "checking":
-      return ["Suche nach Updates …", ""];
+      return [t("settings.updates.checking"), ""];
     case "current":
-      return [`Qross ${u.current} ist aktuell${checked}.`, ""];
+      return [
+        u.checked_at
+          ? t("settings.updates.currentChecked", { version: u.current, when: whenText(u.checked_at) })
+          : t("settings.updates.current", { version: u.current }),
+        "",
+      ];
     case "downloading":
-      return [`Update ${u.version} wird geladen … ${u.progress ?? 0} %`, "new"];
+      return [t("settings.updates.downloading", { version, progress: u.progress ?? 0 }), "new"];
     case "waiting":
-      return [`Update ${u.version} ist geladen und wird installiert, sobald Maus und Tastatur gerade nicht gebraucht werden.`, "new"];
+      return [t("settings.updates.waiting", { version }), "new"];
     case "installing":
-      return [`Update ${u.version} wird installiert, Qross startet gleich neu.`, "new"];
+      return [t("settings.updates.installing", { version }), "new"];
     case "available": {
-      const prompt = u.bundle === "msi" ? " Die Installation fragt nach Administratorrechten."
-        : u.bundle === "deb" || u.bundle === "rpm" ? " Die Installation fragt nach dem Passwort." : "";
-      return [`Update ${u.version} ist verfügbar.${prompt}`, "new"];
+      const prompt = u.bundle === "msi" ? t("settings.updates.promptAdmin")
+        : u.bundle === "deb" || u.bundle === "rpm" ? t("settings.updates.promptPassword") : "";
+      return [[t("settings.updates.available", { version }), prompt].filter(Boolean).join(" "), "new"];
     }
-    case "error":
-      return [`${u.message || "Prüfung fehlgeschlagen"}${u.checked_at ? `. Zuletzt erfolgreich geprüft ${whenText(u.checked_at)}.` : "."}`, "error"];
+    case "error": {
+      const message = u.message || t("settings.updates.failed");
+      return [u.checked_at ? `${message}. ${t("settings.updates.lastChecked", { when: whenText(u.checked_at) })}` : `${message}.`, "error"];
+    }
     default:
-      return [u.automatic ? "Die erste Prüfung folgt kurz nach dem Start." : `Qross ${u.current}. Automatische Prüfung nur in installierten Versionen.`, ""];
+      return [u.automatic ? t("settings.updates.first") : t("settings.updates.devBuild", { version: u.current }), ""];
   }
 }
 
@@ -211,6 +230,16 @@ export function setupSettings() {
     }
     renderSettings();
   });
+  $("#prefLanguage").addEventListener("change", async (e) => {
+    state.settings.language = e.target.value;
+    await saveSoon.flush();
+    const lang = resolveLanguage(e.target.value, state.systemLanguage);
+    if (lang === language()) return;
+    // Neu laden: So kommt jeder Text in der neuen Sprache, auch einmal aufgebaute Listen und Menüs.
+    store(LANG_KEY, lang);
+    store(REOPEN_SETTINGS, state.settingsSection);
+    window.location.reload();
+  });
   $("#prefResume").addEventListener("change", (e) => {
     state.settings.resume_role = e.target.checked;
     saveSoon.flush();
@@ -231,7 +260,7 @@ export function setupSettings() {
     const ring = $("#prefFinderRing").checked, name = $("#prefFinderName").checked;
     const style = ring || name ? { ring, name } : { ring: true, name: true };
     try {
-      if (!(await invoke("try_cursor_finder", style))) toast("Unter Wayland lässt sich der Cursor-Finder nicht zeigen.");
+      if (!(await invoke("try_cursor_finder", style))) toast(t("settings.finder.waylandTry"));
     } catch (e) {
       toast(String(e), "error");
     }

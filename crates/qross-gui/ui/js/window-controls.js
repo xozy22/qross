@@ -3,6 +3,7 @@
 // in main.rs). Unter macOS bleiben die Ampel-Knöpfe des Systems; sie liegen links in der Kopfzeile.
 
 import { $, state } from "./core.js";
+import { t } from "./i18n.js";
 
 export async function setupWindowControls() {
   document.documentElement.dataset.platform = state.platform;
@@ -16,7 +17,7 @@ export async function setupWindowControls() {
     const maximized = await win.isMaximized();
     const button = $("#winMax");
     button.classList.toggle("maximized", maximized);
-    button.title = maximized ? "Wiederherstellen" : "Maximieren";
+    button.title = t(maximized ? "window.restore" : "window.maximize");
     button.setAttribute("aria-label", button.title);
   };
   await sync();

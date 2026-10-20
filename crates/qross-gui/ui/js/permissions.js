@@ -2,15 +2,16 @@
 
 import { $, invoke, state } from "./core.js";
 import { el, toast } from "./util.js";
+import { t } from "./i18n.js";
 
 export const PERMISSIONS = {
   accessibility: {
-    title: "Bedienungshilfen",
-    text: "Damit Qross Maus und Tastatur steuern kann, als Client wie als Server.",
+    title: "permissions.accessibility",
+    text: "permissions.accessibilityText",
   },
   input_monitoring: {
-    title: "Eingabeüberwachung",
-    text: "Damit Qross als Server Maus und Tastatur erfassen kann. macOS bietet danach an, Qross neu zu öffnen.",
+    title: "permissions.inputMonitoring",
+    text: "permissions.inputMonitoringText",
     serverOnly: true,
   },
 };
@@ -32,8 +33,8 @@ export function renderPermissions() {
       el(
         "li",
         { class: "perm-item" },
-        el("span", { class: "perm-text" }, el("strong", { text: PERMISSIONS[key].title }), el("span", { class: "hint", text: PERMISSIONS[key].text })),
-        el("button", { type: "button", class: "btn small", text: "Freigeben …", onclick: () => openPermission(key) }),
+        el("span", { class: "perm-text" }, el("strong", { text: t(PERMISSIONS[key].title) }), el("span", { class: "hint", text: t(PERMISSIONS[key].text) })),
+        el("button", { type: "button", class: "btn small", text: t("perm.grant"), onclick: () => openPermission(key) }),
       ),
     ),
   );
@@ -53,13 +54,13 @@ export async function checkPermissions() {
     return;
   }
   renderPermissions();
-  if (wasMissing && !missingPermissions().length) toast("macOS hat Qross freigegeben.", "success");
+  if (wasMissing && !missingPermissions().length) toast(t("permissions.granted"), "success");
 }
 
 export async function openPermission(key) {
   try {
     await invoke("open_permission_settings", { permission: key });
   } catch (e) {
-    toast(`Systemeinstellungen nicht geöffnet: ${e}`, "error");
+    toast(t("permissions.openFailed", { error: e }), "error");
   }
 }

@@ -2,6 +2,7 @@
 
 import { $, invoke, state } from "./core.js";
 import { debounce, toast } from "./util.js";
+import { formatList, t, tn } from "./i18n.js";
 import { renderServer } from "./layout.js";
 
 export const saveNow = async () => {
@@ -31,8 +32,8 @@ export async function updatePreview() {
   } else if (preview.isolated.length) {
     note.hidden = false;
     note.className = "note";
-    const names = preview.isolated.map((n) => `„${n}“`).join(", ");
-    note.textContent = `${names} berührt keinen anderen Bildschirm. Schieb ihn direkt daneben, sonst kann der Cursor ihn nicht erreichen.`;
+    const names = formatList(preview.isolated.map((name) => t("store.quoted", { name })));
+    note.textContent = tn("store.isolated", preview.isolated.length, { names });
   } else {
     note.hidden = true;
   }

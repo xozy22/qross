@@ -1,5 +1,7 @@
 // Grundlagen: Tauri-Aufrufe, DOM-Kurzformen, Zustand der Oberfläche
 
+import { t } from "./i18n.js";
+
 export const { invoke } = window.__TAURI__.core;
 export const { listen } = window.__TAURI__.event;
 
@@ -27,6 +29,8 @@ export const state = {
   focusName: null,
   /** Betriebssystem dieses Rechners */
   platform: "windows",
+  /** Sprache des Systems (z. B. "de-DE"), für die Einstellung „Automatisch“ */
+  systemLanguage: "",
   /** Version dieser App und die Neuigkeiten aus CHANGELOG.md (einmal geladen) */
   version: "",
   releases: null,
@@ -64,5 +68,10 @@ export const PLATFORMS = {
   windows: { label: "Windows", short: "Win" },
   macos: { label: "macOS", short: "Mac" },
   linux: { label: "Linux", short: "Lx" },
-  other: { label: "anderes System", short: "?" },
+  other: {
+    get label() {
+      return t("platform.otherSystem");
+    },
+    short: "?",
+  },
 };

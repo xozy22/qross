@@ -1,6 +1,7 @@
 // Gesamt: Neuaufbau der Oberfläche und Start
 
 import { $, $$, invoke, listen, state } from "./core.js";
+import { LANG_KEY, language, resolveLanguage, setLanguage, t, translatePage } from "./i18n.js";
 import { el, fillFingerprint, running, store, toast } from "./util.js";
 import { confirmRoleChange } from "./dialog.js";
 import { saveSoon, settingsChanged, updatePreview } from "./store.js";
@@ -14,7 +15,7 @@ import { appendLogs, filterLogs, setLogOpen } from "./log.js";
 import { TOAST_KIND, setupClipboardFiles } from "./clipboard-files.js";
 import { clearTransfers, onClipboardFiles, onTransfer } from "./transfers.js";
 import { openNews, setupNews } from "./news.js";
-import { openSettings, renderCursorFinder, renderProfileScope, renderUpdateStatus, setupSettings } from "./settings.js";
+import { REOPEN_SETTINGS, openSettings, renderCursorFinder, renderProfileScope, renderUpdateStatus, setupSettings } from "./settings.js";
 import { renderKeyModes } from "./keys.js";
 import { pickProfile, renderProfilePick, renderProfiles, setupProfiles } from "./profiles.js";
 import { onQuality, pruneQualities } from "./quality.js";
@@ -84,9 +85,18 @@ async function init() {
     platform: snap.platform,
     desktop: snap.desktop ?? state.desktop,
     version: snap.version,
+    systemLanguage: snap.system_language || navigator.language || "",
   });
+  // Sprache aus Einstellung oder System. Begonnen hat die Oberfläche mit der zuletzt gültigen; weicht die ab
+  // (erster Start, Datei von Hand geändert), gleich umstellen.
+  const lang = resolveLanguage(snap.settings.language, state.systemLanguage);
+  store(LANG_KEY, lang);
+  if (lang !== language()) {
+    setLanguage(lang);
+    translatePage();
+  }
   // Titelleiste: braucht das System; ein Fehler darf den Rest der Oberfläche nicht aufhalten
-  setupWindowControls().catch((e) => console.warn("Fensterknöpfe:", e));
+  setupWindowControls().catch((e) => console.warn("window controls:", e));
   for (const node of $$("[data-own-fingerprint]")) fillFingerprint(node, snap.fingerprint);
   for (const node of $$("[data-data-dir]")) node.textContent = snap.data_dir;
   $("#clientName").placeholder = snap.hostname;
@@ -128,7 +138,7 @@ async function init() {
   // Hinweise aus dem Backend (z. B. „Update verfügbar“); Fehler kommen nie als Hinweis.
   await listen("app-notice", (e) => {
     const { tone, text, action } = e.payload;
-    const button = action === "install-update" ? { label: "Jetzt aktualisieren", run: () => invoke("install_update") } : null;
+    const button = action === "install-update" ? { label: t("settings.updates.install"), run: () => invoke("install_update") } : null;
     toast(text, TOAST_KIND[tone] ?? "", button);
   });
   setupSettings();
@@ -137,6 +147,12 @@ async function init() {
   await listen("clipboard-files", (e) => onClipboardFiles(e.payload));
   setupClipboardFiles();
   setupNews();
+  // Nach einem Sprachwechsel (lädt neu) die Einstellungen wieder dort öffnen, wo sie waren
+  const reopen = store(REOPEN_SETTINGS);
+  if (reopen) {
+    store(REOPEN_SETTINGS, "");
+    openSettings(reopen);
+  }
 
   for (const b of $$(".segmented button")) {
     b.addEventListener("click", async () => {
@@ -204,6 +220,8 @@ async function init() {
   });
 }
 
+// Feste Texte gleich in der zuletzt gültigen Sprache; init() stellt um, falls sie nicht mehr stimmt.
+translatePage();
 init().catch((e) => {
-  document.body.prepend(el("div", { class: "note error", text: `Die Oberfläche konnte nicht geladen werden: ${e}` }));
+  document.body.prepend(el("div", { class: "note error", text: t("main.loadFailed", { error: e }) }));
 });
