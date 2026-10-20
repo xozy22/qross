@@ -19,9 +19,9 @@ use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, FinderCall, RecordingCapture, RecordingFinder, RecordingInjector, SharedClipboard};
 use qross_platform::Clipboard;
 use qross_proto::{
-    read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, DragMessage, Edge,
-    FileEntry, FrameError, GameState, KeyCode, Latency, LatencySummary, LockState, MouseButton, MouseMove, Platform,
-    Rect, ScreenInfo, StreamKind, LATENCY_SINCE, PROTOCOL_VERSION, SERVER_VERSION,
+    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
+    DragMessage, Edge, FileEntry, FrameError, GameState, Input, KeyCode, Latency, LatencySummary, LockState, MouseButton,
+    MouseMove, Platform, Rect, ScreenInfo, StreamKind, LATENCY_SINCE, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -1102,6 +1102,53 @@ async fn an_older_client_stays_connected_and_gets_positions() {
     assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
     reader.abort();
     server_task.abort();
+}
+
+#[tokio::test]
+async fn a_move_that_overtakes_its_enter_is_not_lost() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let endpoint =
+        quinn::Endpoint::server(qross_net::tls::server_config(&server_id).unwrap(), "127.0.0.1:0".parse().unwrap())
+            .unwrap();
+    let addr = endpoint.local_addr().unwrap();
+    let injected = RecordingInjector::default();
+    let client_task = tokio::spawn(client::run(
+        ClientConfig {
+            name: "laptop".into(),
+            server: addr.to_string(),
+            server_fingerprint: Some(server_id.fingerprint()),
+            clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+            share_concealed: false,
+        },
+        Identity::generate().unwrap(),
+        TrustStore::in_memory(),
+        ClientPlatform {
+            injector: Box::new(injected.clone()),
+            clipboard: Box::new(SharedClipboard::default()),
+            screen: Box::new(|| LAPTOP),
+            monitors: Box::new(Vec::new),
+            game: Box::new(GameState::default),
+            finder: None,
+        },
+    ));
+    let conn = endpoint.accept().await.unwrap().await.unwrap();
+    let (mut control, mut control_rx) = conn.accept_bi().await.unwrap();
+    read_frame::<_, Control>(&mut control_rx).await.unwrap();
+    let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
+    write_frame(&mut control, &welcome).await.unwrap();
+
+    // Das Enter muss auf dem Input-Stream nachgeschickt werden; die erste Bewegung des Besuchs ist schneller.
+    let first = Datagram::MouseMove(MouseMove { epoch: 1, seq: 1, x: 500, y: 300 });
+    conn.send_datagram(encode_datagram(&first).into()).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut input = conn.open_uni().await.unwrap();
+    input.write_all(&[StreamKind::Input as u8]).await.unwrap();
+    write_frame(&mut input, &Input::Enter { epoch: 1, x: 1, y: 399 }).await.unwrap();
+    let recorded = injected.clone();
+    wait_for("Bewegung gleich nach dem Enter", || recorded.0.lock().unwrap().contains(&Inject::MoveTo { x: 500, y: 300 }))
+        .await;
+    client_task.abort();
 }
 
 /// Ein Server wie Qross 0.5 bzw. 0.6 (`welcome_version`). Ein Client mit Vollbildprogramm meldet

@@ -36,7 +36,7 @@ use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
 use crate::screensaver;
 use crate::streams::{read_kind, send_drag_message};
-use crate::switch_trace::{ClientTrace, Discarded};
+use crate::switch_trace::{ClientTrace, EarlyMoves};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::wake::{self, Backoff, SystemEvent};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
@@ -658,9 +658,9 @@ async fn session(
     let mut probe: Option<Probe> = None;
     // Was der Cursor-Finder hier zeigt; ältere Server melden nichts, dann bleibt er aus.
     let mut finder_style = CursorFinder::OFF;
-    // Protokoll des Betretens (siehe `switch_trace`): verworfene Bewegungen, das laufende Protokoll
+    // Protokoll des Betretens (siehe `switch_trace`): Bewegungen vor dem `Enter`, das laufende Protokoll
     // und die Rückmeldungen des Einspeise-Threads dazu
-    let mut discarded = Discarded::default();
+    let mut early_moves = EarlyMoves::default();
     let mut entering: Option<ClientTrace> = None;
     let (traced_tx, mut traced_rx) = mpsc::unbounded_channel::<Measured>();
 
@@ -680,7 +680,7 @@ async fn session(
                             let id = SampleId::Mouse { epoch: mv.epoch, seq: mv.seq };
                             trace_move(&mut entering, inject, &traced_tx, id, received);
                         }
-                        None => discarded.add(mv.epoch, received),
+                        None => early_moves.add(mv.epoch, received),
                     },
                     FromServer::Delta(delta, received) => match state.on_delta(delta) {
                         Some(event) => {
@@ -690,7 +690,7 @@ async fn session(
                             let id = SampleId::Mouse { epoch: delta.epoch, seq: delta.seq };
                             trace_move(&mut entering, inject, &traced_tx, id, received);
                         }
-                        None => discarded.add(delta.epoch, received),
+                        None => early_moves.add(delta.epoch, received),
                     },
                     FromServer::Input(input, stamp) => {
                         let entered = match &input {
@@ -717,6 +717,13 @@ async fn session(
                             _ => None,
                         };
                         let (events, transition) = state.on_input(input);
+                        // Eine Bewegung, die ihr Enter überholt hatte, folgt ihm gleich.
+                        if entered.is_some() && events.len() > 1 {
+                            moves += 1;
+                            if let Some(&Inject::MoveTo { x, y }) = events.last() {
+                                last_pos = (x, y);
+                            }
+                        }
                         let injects = !events.is_empty();
                         inject_all(inject, events);
                         if injects {
@@ -743,7 +750,7 @@ async fn session(
                                     earlier.log();
                                 }
                                 if let Some(epoch) = entered {
-                                    entering = Some(ClientTrace::start(epoch, Instant::now(), &mut discarded));
+                                    entering = Some(ClientTrace::start(epoch, Instant::now(), &mut early_moves));
                                 }
                             }
                             Some(Transition::Left) => {

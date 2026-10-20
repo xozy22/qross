@@ -1,14 +1,14 @@
 //! Protokoll jedes Wechsels auf einen Client: eine Zeile je Seite im Log, kurz danach (als Info, wenn
 //! etwas auffällt, sonst zur Fehlersuche). Hakt der Cursor beim Wechsel, zeigt sie, wo die Zeit bleibt. Die Messung der Eingabekette ([`crate::latency`]) sieht
-//! das nicht: Sie nimmt nur jede 32. Bewegung, und was vor dem Wechsel an der Kante geschieht oder der
-//! Client verwirft, zählt sie gar nicht.
+//! das nicht: Sie nimmt nur jede 32. Bewegung, und was vor dem Wechsel an der Kante geschieht oder beim
+//! Client vor dem `Enter` ankommt, zählt sie gar nicht.
 //!
 //! - **Server:** Wie oft und wie lange lief der Cursor gegen die Kante, bis gewechselt wurde? Kamen
 //!   danach die Bewegungen aus der Erfassung lückenlos (größte Lücke, größter Einzelschritt), und kehrte
 //!   der Cursor gleich wieder zurück?
-//! - **Client:** Wie viele Bewegungen kamen vor dem `Enter` an und fielen deshalb weg? Wann kam die
-//!   erste danach, wie groß war die größte Lücke beim Empfang, und wie lange nach dem Empfang war jede
-//!   eingespeist?
+//! - **Client:** Wie viele Bewegungen kamen vor dem `Enter` an (die neueste folgt ihm gleich, siehe
+//!   `ClientState`)? Wann kam die erste danach, wie groß war die größte Lücke beim Empfang, und wie
+//!   lange nach dem Empfang war jede eingespeist?
 //!
 //! Stimmt auf beiden Seiten alles, liegt ein Haken hinter dem Einspeisen, beim Zeichnen des Systems.
 
@@ -21,7 +21,7 @@ use tracing::{debug, info};
 pub const WINDOW: Duration = Duration::from_millis(300);
 /// Kantenberührungen mit höchstens diesem Abstand gehören zu einem Anlauf
 const HIT_GAP: Duration = Duration::from_millis(300);
-/// So viele verworfene Bewegungen merkt sich der Client höchstens
+/// So viele Bewegungen vor einem `Enter` merkt sich der Client höchstens
 const MAX_EARLY: usize = 512;
 /// Ab hier fällt eine Lücke oder Wartezeit auf (ein Bild bei 60 Hz dauert 17 ms)
 const NOTABLE: Duration = Duration::from_millis(30);
@@ -150,11 +150,12 @@ impl ServerTrace {
     }
 }
 
-/// Client: Bewegungen, die nicht zum laufenden Besuch gehörten und wegfielen (Epoche, Empfang)
+/// Client: Bewegungen, die nicht zum laufenden Besuch gehörten (Epoche, Empfang): Nachzügler früherer
+/// Besuche und solche, die vor dem `Enter` ihres Besuchs ankamen
 #[derive(Debug, Default)]
-pub struct Discarded(VecDeque<(u16, Instant)>);
+pub struct EarlyMoves(VecDeque<(u16, Instant)>);
 
-impl Discarded {
+impl EarlyMoves {
     pub fn add(&mut self, epoch: u16, received: Instant) {
         if self.0.len() == MAX_EARLY {
             self.0.pop_front();
@@ -188,8 +189,8 @@ pub struct ClientTrace {
 
 impl ClientTrace {
     /// `Enter` mit `epoch`, empfangen um `at`
-    pub fn start(epoch: u16, at: Instant, discarded: &mut Discarded) -> Self {
-        let (early, earliest) = discarded.take(epoch, at);
+    pub fn start(epoch: u16, at: Instant, early_moves: &mut EarlyMoves) -> Self {
+        let (early, earliest) = early_moves.take(epoch, at);
         Self {
             at,
             early,
@@ -230,7 +231,8 @@ impl ClientTrace {
         now.saturating_duration_since(self.at) > WINDOW + Duration::from_millis(50)
     }
 
-    /// Sichtbar: Bewegungen gingen merklich lange verloren, eine Lücke beim Empfang oder langsames Einspeisen
+    /// Sichtbar: Das `Enter` kam merklich nach den ersten Bewegungen (so lange stand der Cursor), eine
+    /// Lücke beim Empfang oder langsames Einspeisen
     fn is_notable(&self) -> bool {
         (self.early > 0 && self.earliest >= Duration::from_millis(10))
             || self.max_gap >= NOTABLE
@@ -245,14 +247,17 @@ impl ClientTrace {
         }
     }
 
-    /// Fürs Log, z. B. „Betreten: keine Bewegung vor dem Enter verworfen; in den ersten 300 ms 241
-    /// Bewegungen empfangen, die erste nach 1,0 ms, größte Lücke 4,2 ms, eingespeist höchstens 0,5 ms
-    /// nach dem Empfang“
+    /// Fürs Log, z. B. „Betreten: keine Bewegung vor dem Enter; in den ersten 300 ms 241 Bewegungen
+    /// empfangen, die erste nach 1,0 ms, größte Lücke 4,2 ms, eingespeist höchstens 0,5 ms nach dem
+    /// Empfang“
     pub fn describe(&self) -> String {
         let early = match self.early {
-            0 => "keine Bewegung vor dem Enter verworfen".to_owned(),
-            1 => format!("1 Bewegung kam vor dem Enter an und fiel weg, {} ms vorher", ms(self.earliest)),
-            n => format!("{n} Bewegungen kamen vor dem Enter an und fielen weg, die erste {} ms vorher", ms(self.earliest)),
+            0 => "keine Bewegung vor dem Enter".to_owned(),
+            1 => format!("1 Bewegung kam {} ms vor dem Enter an und folgte ihm gleich", ms(self.earliest)),
+            n => format!(
+                "{n} Bewegungen kamen vor dem Enter an, die erste {} ms vorher; die neueste folgte ihm gleich",
+                ms(self.earliest)
+            ),
         };
         let received = match (self.moves, self.first) {
             (0, _) | (_, None) => "keine Bewegung empfangen".to_owned(),
@@ -325,12 +330,12 @@ mod tests {
     #[test]
     fn the_client_counts_what_came_before_the_enter() {
         let t = Instant::now();
-        let mut discarded = Discarded::default();
-        discarded.add(6, t);
-        discarded.add(7, at(t, 10));
-        discarded.add(7, at(t, 12));
+        let mut early_moves = EarlyMoves::default();
+        early_moves.add(6, t);
+        early_moves.add(7, at(t, 10));
+        early_moves.add(7, at(t, 12));
         let entered = at(t, 15);
-        let mut trace = ClientTrace::start(7, entered, &mut discarded);
+        let mut trace = ClientTrace::start(7, entered, &mut early_moves);
         for i in 1..=50 {
             let received = entered + Duration::from_millis(i);
             assert!(trace.watches(received));
@@ -345,16 +350,13 @@ mod tests {
         assert!(trace.is_due(entered + Duration::from_millis(351)));
         assert_eq!(
             trace.describe(),
-            "Betreten: 2 Bewegungen kamen vor dem Enter an und fielen weg, die erste 5,0 ms vorher; in den ersten \
-             300 ms 51 Bewegungen empfangen, die erste nach 1,0 ms, größte Lücke 200,0 ms, eingespeist höchstens \
-             30,0 ms nach dem Empfang"
+            "Betreten: 2 Bewegungen kamen vor dem Enter an, die erste 5,0 ms vorher; die neueste folgte ihm gleich; \
+             in den ersten 300 ms 51 Bewegungen empfangen, die erste nach 1,0 ms, größte Lücke 200,0 ms, eingespeist \
+             höchstens 30,0 ms nach dem Empfang"
         );
         assert!(trace.is_notable());
-        let quiet = ClientTrace::start(8, at(t, 1000), &mut discarded);
-        assert_eq!(
-            quiet.describe(),
-            "Betreten: keine Bewegung vor dem Enter verworfen; in den ersten 300 ms keine Bewegung empfangen"
-        );
+        let quiet = ClientTrace::start(8, at(t, 1000), &mut early_moves);
+        assert_eq!(quiet.describe(), "Betreten: keine Bewegung vor dem Enter; in den ersten 300 ms keine Bewegung empfangen");
         assert!(!quiet.is_notable());
     }
 }
