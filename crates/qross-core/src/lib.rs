@@ -6,6 +6,7 @@ pub mod client;
 pub mod finder;
 pub mod input;
 pub mod keys;
+pub mod lang;
 pub mod layout;
 mod screen;
 pub mod server;
@@ -13,4 +14,5 @@ pub mod sharing;
 pub mod text;
 
 pub use input::{CaptureEvent, Inject};
+pub use lang::Lang;
 pub use layout::{Layout, LayoutError, LinkConfig};

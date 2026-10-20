@@ -34,7 +34,7 @@ fn worker() -> Option<&'static Sender<Job>> {
             match std::thread::Builder::new().name("qross-cursor".into()).spawn(move || run(rx)) {
                 Ok(_) => Some(tx),
                 Err(e) => {
-                    tracing::warn!("Thread für den Cursor startet nicht ({e}) – Ausblenden hält die Eingabe kurz auf");
+                    tracing::warn!("failed to start the cursor thread ({e}); hiding the cursor briefly holds up input");
                     None
                 }
             }

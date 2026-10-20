@@ -783,7 +783,7 @@ async fn wrong_server_fingerprint_stops_client() {
     let mut s = start(true, Some(wrong));
     let result = tokio::time::timeout(Duration::from_secs(5), &mut s.client_task).await.expect("Client hätte aufgeben müssen");
     let err = result.unwrap().unwrap_err();
-    assert!(err.to_string().contains("Fingerprint"), "{err:#}");
+    assert!(err.to_string().contains("fingerprint"), "{err:#}");
 }
 
 /// Wartet, bis der Server diese Fläche und Monitore des Clients kennt (Meldung für die Oberfläche).
@@ -2276,7 +2276,7 @@ async fn wait_for_drags(what: &str, finder: &RecordingFinder, expected: Vec<Find
 }
 
 /// 256 MiB, wie `big_file`
-const BIG_SIZE: &str = "268,4 MB";
+const BIG_SIZE: &str = "268.4 MB";
 
 #[tokio::test]
 async fn files_dragged_to_the_client_hang_at_its_cursor_until_they_are_dropped() {
@@ -2296,7 +2296,7 @@ async fn files_dragged_to_the_client_hang_at_its_cursor_until_they_are_dropped()
     .await;
     s.events.send(CaptureEvent::DragProbeResult { files: vec![source.join("Bericht.pdf"), source.join("Projekt")] }).unwrap();
     // Eine Datei und ein Ordner, zusammen 3 MiB und ein paar Bytes
-    let shown = preview(DragIcon::Several, "2 Elemente", "3,1 MB");
+    let shown = preview(DragIcon::Several, "2 items", "3.1 MB");
     wait_for_drags("Vorschau am Cursor des Laptops", &s.client_finder, vec![shown.clone()]).await;
     assert!(s.server_finder.drags().is_empty(), "der Server zeigt nichts, der Cursor ist nicht dort");
 
@@ -2381,7 +2381,7 @@ async fn files_from_the_client_hang_at_the_cursor_of_the_server_until_they_are_d
     std::fs::create_dir_all(&target).unwrap();
     *s.capture.1.lock().unwrap() = Some(target.clone());
     drag_from_laptop(&s, vec![source.join("Bericht.pdf")]).await;
-    let shown = preview(DragIcon::File, "Bericht.pdf", "3,1 MB");
+    let shown = preview(DragIcon::File, "Bericht.pdf", "3.1 MB");
     wait_for_drags("Vorschau am Cursor des Servers", &s.server_finder, vec![shown.clone()]).await;
     assert!(s.client_finder.drags().is_empty(), "der Laptop zeigt nichts, der Cursor ist nicht mehr dort");
 
@@ -3174,7 +3174,7 @@ async fn files_on_demand_need_the_right_to_share_files_also_when_pasting() {
     share_with_laptop(&s, Sharing { files: Share::Off, ..Sharing::ALL }).await;
     let target = paste_target("ohne-recht");
     let error = paste_into(&s.server_clip, &target).await.unwrap_err();
-    assert!(error.to_string().contains("darf keine kopierten Dateien mehr abgeben"), "{error}");
+    assert!(error.to_string().contains("no longer allowed to share copied files"), "{error}");
     let failed = wait_for_progress("Fehler beim Server", || server_progress(&s), |p| matches!(p.phase, Phase::Failed(_))).await;
     assert_eq!(failed.bytes, 0);
     assert!(client_progress(&s).is_empty(), "der Client hat nichts geliefert");

@@ -120,11 +120,11 @@ enum Break {
 impl fmt::Display for Break {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Break::Sleep => f.write_str("Ruhezustand – verbinde nach dem Aufwachen neu"),
+            Break::Sleep => f.write_str("going to sleep; reconnecting after waking up"),
             Break::Now(Some(reason)) => f.write_str(reason),
-            Break::Now(None) => f.write_str("Verbindungsversuch unterbrochen"),
-            Break::ServerSleeps => f.write_str("Server geht in den Ruhezustand"),
-            Break::Rejected(reason) => write!(f, "Server hat die Verbindung abgelehnt: {reason}"),
+            Break::Now(None) => f.write_str("connection attempt interrupted"),
+            Break::ServerSleeps => f.write_str("server is going to sleep"),
+            Break::Rejected(reason) => write!(f, "server rejected the connection: {reason}"),
         }
     }
 }
@@ -246,7 +246,7 @@ fn inject_loop(mut injector: Box<dyn Injector>, jobs: std::sync::mpsc::Receiver<
             ToInjector::Inject(event @ (Inject::MoveTo { .. } | Inject::MoveBy { .. })) => {
                 let (event, marks, after) = coalesce(event, &jobs);
                 next = after;
-                tracing::trace!(?event, "einspeisen");
+                tracing::trace!(?event, "inject");
                 injector.inject(&event);
                 let done = Instant::now();
                 for (stamp, to) in marks {
@@ -255,21 +255,21 @@ fn inject_loop(mut injector: Box<dyn Injector>, jobs: std::sync::mpsc::Receiver<
                 InjectStep::Inject(event)
             }
             ToInjector::Inject(event) => {
-                debug!(?event, "einspeisen");
+                debug!(?event, "inject");
                 injector.inject(&event);
                 InjectStep::Inject(event)
             }
             ToInjector::DropFolder { x, y, reply } => {
                 let _ = reply.send(injector.drop_folder(x, y));
-                InjectStep::Named("Ablageordner suchen")
+                InjectStep::Named("find drop folder")
             }
             ToInjector::TakeDragged { x, y, reply } => {
                 let _ = reply.send(injector.take_dragged_files(x, y));
-                InjectStep::Named("gezogene Dateien abholen")
+                InjectStep::Named("take dragged files")
             }
             ToInjector::ScreenSaver { active, lock } => {
                 screensaver::report(active, &injector.screen_saver(active, lock));
-                InjectStep::Named("Bildschirmschoner abgleichen")
+                InjectStep::Named("sync screen saver")
             }
             ToInjector::Measured { stamp, done } => {
                 let _ = done.send(Measured { id: stamp.id, received: stamp.received, done: Instant::now() });
@@ -278,7 +278,7 @@ fn inject_loop(mut injector: Box<dyn Injector>, jobs: std::sync::mpsc::Receiver<
         };
         let took = started.elapsed();
         if took >= SLOW_INJECT {
-            warn!("Einspeisen hing {} ms ({step}) – so lange warteten alle folgenden Eingaben", took.as_millis());
+            warn!("injecting stalled for {} ms ({step}); all following input waited that long", took.as_millis());
         }
     }
 }
@@ -398,7 +398,7 @@ pub async fn probe_fingerprint(server: &str, identity: &Identity) -> Result<(Soc
     let conn = endpoint
         .connect(addr, SERVER_NAME)?
         .await
-        .with_context(|| format!("keine Verbindung zu {addr}"))?;
+        .with_context(|| format!("failed to connect to {addr}"))?;
     let fingerprint = peer_fingerprint(&conn)?;
     conn.close(0u32.into(), b"probe");
     let _ = tokio::time::timeout(Duration::from_secs(1), endpoint.wait_idle()).await;
@@ -466,8 +466,8 @@ async fn run_inner(
         let mut asleep = false;
         match result {
             Ok(()) => {
-                info!("Verbindung zum Server beendet");
-                notify(notices, ClientNotice::Disconnected { reason: "Verbindung zum Server beendet".into() });
+                info!("connection to the server ended");
+                notify(notices, ClientNotice::Disconnected { reason: "connection to the server ended".into() });
             }
             Err(e) if e.downcast_ref::<Fatal>().is_some() => return Err(e),
             Err(e) => {
@@ -515,12 +515,12 @@ async fn pause(wait: Duration, mut asleep: bool, events: &mut Events, backoff: &
                     until = tokio::time::Instant::now() + wake::SLEEP_PAUSE;
                 }
                 SystemEvent::Woke => {
-                    info!("aufgewacht – verbinde neu");
+                    info!("woke up; reconnecting");
                     backoff.reset();
                     return;
                 }
                 SystemEvent::NetworkChanged if !asleep => {
-                    debug!("Netzwerk geändert – verbinde neu");
+                    debug!("network changed; reconnecting");
                     backoff.reset();
                     return;
                 }
@@ -544,15 +544,15 @@ async fn session(
             match (resolved, reconnect.last_addr) {
                 (Ok(Ok(addr)), _) => addr,
                 (Ok(Err(e)), Some(last)) => {
-                    debug!("{e:#} – versuche die zuletzt erreichte Adresse {last}");
+                    debug!("{e:#}; trying the last reached address {last}");
                     last
                 }
                 (Err(_), Some(last)) => {
-                    debug!("„{}“ nicht rechtzeitig aufgelöst – versuche {last}", config.server);
+                    debug!("'{}' not resolved in time; trying {last}", config.server);
                     last
                 }
                 (Ok(Err(e)), None) => return Err(e),
-                (Err(_), None) => bail!("„{}“ nicht rechtzeitig aufgelöst", config.server),
+                (Err(_), None) => bail!("failed to resolve '{}' in time", config.server),
             }
         }
         Some(event) = reconnect.events.recv() => return Err(Break::interrupt(event)),
@@ -560,15 +560,15 @@ async fn session(
     let mut endpoint = Endpoint::client(wake::unspecified(addr))?;
     endpoint.set_default_client_config(reconnect.tls.clone());
 
-    debug!("verbinde mit {addr}");
+    debug!("connecting to {addr}");
     notify(notices, ClientNotice::Connecting { addr });
     let connecting = endpoint.connect(addr, SERVER_NAME)?;
     // Aufwachen oder ein Netzwechsel unterbricht den Versuch: Der nächste beginnt sofort mit frischem
     // Socket auf dem neuen Weg.
     let conn = tokio::select! {
         connected = tokio::time::timeout(wake::CONNECT_TIMEOUT, connecting) => match connected {
-            Ok(conn) => conn.with_context(|| format!("keine Verbindung zu {addr}"))?,
-            Err(_) => bail!("keine Verbindung zu {addr}: keine Antwort"),
+            Ok(conn) => conn.with_context(|| format!("failed to connect to {addr}"))?,
+            Err(_) => bail!("failed to connect to {addr}: no response"),
         },
         Some(event) = reconnect.events.recv() => return Err(Break::interrupt(event)),
     };
@@ -585,12 +585,12 @@ async fn session(
     write_frame(&mut control, &hello).await?;
     let (server_name, server_platform, server_version) = match read_frame::<_, Control>(&mut control_rx).await? {
         Some(Control::Welcome { version, server_name, platform }) => {
-            info!("verbunden mit Server „{server_name}“ ({addr})");
+            info!("connected to server '{server_name}' ({addr})");
             notify(notices, ClientNotice::Connected { server_name: server_name.clone(), addr });
             (server_name, platform, version)
         }
         Some(Control::Reject { reason }) => return Err(Break::Rejected(reason).into()),
-        other => bail!("unerwartete Antwort vom Server: {other:?}"),
+        other => bail!("unexpected response from the server: {other:?}"),
     };
     reconnect.last_addr = Some(addr);
     // Zeichen statt Tastenpositionen kann nur ein Server schicken, der sie kennt; ältere trennen bei
@@ -608,14 +608,14 @@ async fn session(
     }
     // Kopierte Dateien erst beim Einfügen: nur mit Servern, die das kennen, und wenn dieses System es kann
     if server_version >= PASTE_ON_DEMAND_SINCE && clip.hub.pastes_on_demand() {
-        info!("Kopierte Dateien vom Server kommen erst beim Einfügen");
+        info!("copied files from the server are transferred only when pasted");
         write_frame(&mut control, &Control::PastesOnDemand).await?;
     }
     // Die einzelnen Monitore nur an Server, die sie kennen: ältere trennen bei unbekannten Nachrichten.
     let report_monitors = server_version >= MONITORS_SINCE;
     let mut monitors = (screen.monitors)();
     if report_monitors && !monitors.is_empty() {
-        debug!(?monitors, "Monitore an den Server gemeldet");
+        debug!(?monitors, "monitors reported to the server");
         write_frame(&mut control, &Control::Monitors(monitors.clone())).await?;
     }
     // Spielemodus nur an Server, die ihn kennen; anfangs nur, wenn schon etwas im Vollbild läuft.
@@ -623,7 +623,7 @@ async fn session(
     let mut game_rx = screen.game.clone();
     let mut game = *game_rx.borrow_and_update();
     if report_game && game.is_active() {
-        info!("Spielemodus: {} im Vordergrund, an den Server gemeldet", game::describe(game));
+        info!("game mode: {} in the foreground, reported to the server", game::describe(game));
         write_frame(&mut control, &Control::Game(game)).await?;
     }
     // Verzögerung der Eingabekette: nur mit Servern, die die Rückmeldung kennen (ältere trennen bei
@@ -661,7 +661,7 @@ async fn session(
     clip.link.send_replace(Some(conn.clone()));
     let link: Link = {
         let current = clip.link.subscribe();
-        Arc::new(move || current.borrow().clone().ok_or_else(|| "nicht mit dem Server verbunden".to_owned()))
+        Arc::new(move || current.borrow().clone().ok_or_else(|| "not connected to the server".to_owned()))
     };
     // Übertragungen der vorigen Verbindung kommen nie mehr vollständig an.
     clip.incoming.supersede();
@@ -670,7 +670,7 @@ async fn session(
     // PC steuert Mac (oder umgekehrt): Strg und Cmd tauschen, damit z. B. Strg+C kopiert
     let swap = (server_platform == Platform::MacOs) != (Platform::current() == Platform::MacOs);
     if swap {
-        info!("Strg und Cmd werden getauscht (Server: {server_platform:?})");
+        info!("swapping Ctrl and Cmd (server: {server_platform:?})");
     }
     state.set_swap_ctrl_cmd(swap);
     // Zuletzt abgeglichene Clipboard-Sequenznummer (auch aus Hintergrund-Aufgaben aktualisiert)
@@ -696,7 +696,7 @@ async fn session(
     let outcome: Result<()> = async {
         loop {
             if entering.as_ref().is_some_and(|trace| trace.is_due(Instant::now())) {
-                entering.take().expect("geprüft").log();
+                entering.take().expect("checked above").log();
             }
             tokio::select! {
                 Some(msg) = rx.recv() => match msg {
@@ -773,7 +773,7 @@ async fn session(
                         }
                         match transition {
                             Some(Transition::Entered) => {
-                                info!("Cursor betritt diesen Rechner bei {},{}", last_pos.0, last_pos.1);
+                                info!("cursor entered this computer at {},{}", last_pos.0, last_pos.1);
                                 notify(notices, ClientNotice::CursorEntered);
                                 if let Some(earlier) = entering.take() {
                                     earlier.log();
@@ -790,7 +790,7 @@ async fn session(
                                 receiver.cancel_undropped();
                                 notify(notices, ClientNotice::CursorLeft);
                                 info!(
-                                    "Cursor verlässt diesen Rechner ({moves} Bewegungen, zuletzt bei {},{})",
+                                    "cursor left this computer ({moves} moves, last at {},{})",
                                     last_pos.0, last_pos.1
                                 );
                                 // Beim Verlassen das eigene Clipboard mitgeben, falls es sich geändert hat
@@ -810,20 +810,20 @@ async fn session(
                                         }
                                     });
                                 } else {
-                                    debug!("Zwischenablage bleibt hier: der Server nimmt sie nicht an");
+                                    debug!("clipboard stays here: the server doesn't accept it");
                                 }
                             }
                             None => {}
                         }
                     }
                     FromServer::Clipboard(data) => {
-                        info!("Zwischenablage vom Server: {}", data.summary());
+                        info!("clipboard from the server: {}", data.summary());
                         clip.incoming.supersede();
                         let (hub, synced) = (clip.hub.clone(), clip_synced.clone());
                         tokio::spawn(async move {
                             match hub.write(data).await {
                                 Ok(seq) => *synced.lock().unwrap() = seq,
-                                Err(e) => warn!("Zwischenablage nicht übernommen: {e:#}"),
+                                Err(e) => warn!("failed to apply clipboard: {e:#}"),
                             }
                         });
                     }
@@ -835,7 +835,7 @@ async fn session(
                             Ok(Some(ready)) => deliver_files(ready, clip, &clip_synced),
                             Ok(None) => {}
                             Err(e) => {
-                                warn!("kopierte Dateien vom Server abgelehnt: {e:#}");
+                                warn!("copied files from the server rejected: {e:#}");
                                 (clip.notify)(FilesNotice::Failed { peer: server_name.clone(), reason: format!("{e:#}") });
                             }
                         }
@@ -853,13 +853,13 @@ async fn session(
                                 });
                             }
                             Err(e) => {
-                                warn!("kopierte Dateien vom Server abgelehnt: {e:#}");
+                                warn!("copied files from the server rejected: {e:#}");
                                 (clip.notify)(FilesNotice::Failed { peer: server_name.clone(), reason: format!("{e:#}") });
                             }
                         }
                     }
                     FromServer::PastesOnDemand => {
-                        debug!("der Server fügt kopierte Dateien auf Abruf ein");
+                        debug!("the server pastes copied files on demand");
                         server_on_demand = true;
                     }
                     FromServer::DragQuery { probe } => {
@@ -880,14 +880,14 @@ async fn session(
                     },
                     FromServer::Sharing(now) => {
                         if now != sharing {
-                            info!("Rechte dieses Rechners beim Server: {}", describe_sharing(now));
+                            info!("permissions of this computer on the server: {}", describe_sharing(now));
                         }
                         sharing = now;
                         notify(notices, ClientNotice::Sharing(now));
                     }
                     FromServer::CursorFinder(now) => {
                         if now != finder_style {
-                            info!("Cursor-Finder vom Server: {}", cursor_finder::describe(now));
+                            info!("cursor finder from the server: {}", cursor_finder::describe(now));
                         }
                         finder_style = now;
                         notify(notices, ClientNotice::CursorFinder(now));
@@ -917,7 +917,7 @@ async fn session(
                         let now = (screen.monitors)();
                         if now != monitors {
                             monitors = now;
-                            debug!(?monitors, "Monitore geändert");
+                            debug!(?monitors, "monitors changed");
                             write_frame(&mut control, &Control::Monitors(monitors.clone())).await?;
                         }
                     }
@@ -926,7 +926,7 @@ async fn session(
                     let now = *game_rx.borrow_and_update();
                     if now != game {
                         game = now;
-                        debug!("Spielemodus: {} im Vordergrund, an den Server gemeldet", game::describe(game));
+                        debug!("game mode: {} in the foreground, reported to the server", game::describe(game));
                         write_frame(&mut control, &Control::Game(game)).await?;
                     }
                 }
@@ -940,9 +940,9 @@ async fn session(
                         // Auf neuem Socket weiter (siehe `wake::rebind`); lebt die Verbindung noch,
                         // kommt die Antwort innerhalb einer Laufzeit.
                         if let Err(e) = wake::rebind(&endpoint, addr) {
-                            debug!("kein neues Socket: {e}");
+                            debug!("failed to bind a new socket: {e}");
                         }
-                        debug!(?event, "prüfe die Verbindung zum Server");
+                        debug!(?event, "checking the connection to the server");
                         probe = Some(Box::pin(wake::answers(conn.clone(), wake::CLIENT_PROBE)));
                     }
                 },
@@ -951,13 +951,13 @@ async fn session(
                         trace.on_injected(injected.received, injected.done);
                     }
                 }
-                alive = async { probe.as_mut().expect("nur mit laufender Prüfung").await }, if probe.is_some() => {
+                alive = async { probe.as_mut().expect("only while a check is running").await }, if probe.is_some() => {
                     probe = None;
                     if !alive {
                         conn.close(0u32.into(), b"no answer");
-                        return Err(Break::Now(Some("Server antwortet nicht mehr – verbinde neu".into())).into());
+                        return Err(Break::Now(Some("server stopped responding; reconnecting".into())).into());
                     }
-                    debug!("Verbindung zum Server lebt");
+                    debug!("connection to the server is alive");
                 }
                 reason = conn.closed() => return Err(closed(reason)),
             }
@@ -976,7 +976,7 @@ async fn session(
     receiver.cancel_undropped();
     clip.link.send_replace(None);
     // Was noch ankam, wird nie vollständig.
-    clip.transfers.abort_receiving(None, "Verbindung getrennt");
+    clip.transfers.abort_receiving(None, "disconnected");
     outcome
 }
 
@@ -985,14 +985,14 @@ fn closed(reason: ConnectionError) -> anyhow::Error {
     match &reason {
         ConnectionError::ApplicationClosed(close) if close.error_code == wake::CLOSE_SLEEPING => Break::ServerSleeps.into(),
         ConnectionError::ApplicationClosed(close) if close.error_code == wake::CLOSE_REPLACED => Fatal(
-            "Ein anderes Qross mit demselben Namen und Schlüssel hat sich beim Server angemeldet; dieser Client hört auf"
+            "another Qross with the same name and key connected to the server; this client stops"
                 .into(),
         )
         .into(),
         // Stateless Reset: Der Server ist erreichbar, kennt die Verbindung aber nicht mehr (er hat sie
         // im Ruhezustand dieses Rechners aufgegeben oder wurde neu gestartet). Gleich neu anmelden.
-        ConnectionError::Reset => Break::Now(Some("Server kennt die Verbindung nicht mehr – verbinde neu".into())).into(),
-        _ => anyhow!("Verbindung getrennt: {reason}"),
+        ConnectionError::Reset => Break::Now(Some("the server no longer knows the connection; reconnecting".into())).into(),
+        _ => anyhow!("disconnected: {reason}"),
     }
 }
 
@@ -1025,12 +1025,12 @@ fn deliver_files(ready: Ready, clip: &ClipboardSide, synced: &Arc<std::sync::Mut
         let Ready { peer, paths, data, names, bytes } = ready;
         match hub.write_files(paths, data).await {
             Ok(seq) => {
-                info!("kopierte Dateien liegen in der Zwischenablage");
+                info!("copied files are in the clipboard");
                 *synced.lock().unwrap() = seq;
                 notify(FilesNotice::Ready { peer, names, bytes });
             }
             Err(e) => {
-                warn!("kopierte Dateien nicht in die Zwischenablage gelegt: {e:#}");
+                warn!("failed to put copied files into the clipboard: {e:#}");
                 notify(FilesNotice::Failed { peer, reason: format!("{e:#}") });
             }
         }
@@ -1041,7 +1041,7 @@ fn verify_server(config: &ClientConfig, trust: &mut TrustStore, fingerprint: &Fi
     if let Some(pinned) = &config.server_fingerprint {
         if pinned != fingerprint {
             return Err(Fatal(format!(
-                "Fingerprint des Servers stimmt nicht: erwartet {pinned}, erhalten {fingerprint}"
+                "server fingerprint does not match: expected {pinned}, got {fingerprint}"
             ))
             .into());
         }
@@ -1051,15 +1051,15 @@ fn verify_server(config: &ClientConfig, trust: &mut TrustStore, fingerprint: &Fi
         TrustOutcome::Known => Ok(()),
         TrustOutcome::Unknown => {
             warn!(
-                "Erster Kontakt mit {}: Fingerprint {fingerprint} wird gespeichert. \
-                 Vergleiche ihn mit der Ausgabe von `qross fingerprint` auf dem Server.",
+                "first contact with {}: storing fingerprint {fingerprint}. \
+                 Compare it with the output of `qross fingerprint` on the server.",
                 config.server
             );
             trust.trust(&config.server, fingerprint)
         }
         TrustOutcome::Mismatch => Err(Fatal(format!(
-            "Der Server {} hat einen anderen Fingerprint als beim letzten Mal \
-             (gespeichert: {}, jetzt: {fingerprint}). Wurde er neu eingerichtet, den Eintrag in {KNOWN_SERVERS_FILE} löschen.",
+            "the server {} has a different fingerprint than last time \
+             (stored: {}, now: {fingerprint}). If it was set up again, delete its entry in {KNOWN_SERVERS_FILE}.",
             config.server,
             trust.expected(&config.server).unwrap_or("?"),
         ))
@@ -1080,7 +1080,7 @@ async fn resolve(server: &str) -> Result<SocketAddr> {
     };
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host(&target)
         .await
-        .with_context(|| format!("„{server}“ nicht auflösbar"))?
+        .with_context(|| format!("failed to resolve '{server}'"))?
         .collect();
     // Der Server lauscht standardmäßig auf IPv4; Windows liefert oft zuerst IPv6.
     addrs
@@ -1088,7 +1088,7 @@ async fn resolve(server: &str) -> Result<SocketAddr> {
         .find(|a| a.is_ipv4())
         .or(addrs.first())
         .copied()
-        .with_context(|| format!("„{server}“ hat keine Adresse"))
+        .with_context(|| format!("'{server}' has no address"))
 }
 
 /// Was der Server nach dem `Welcome` auf dem Control-Stream schickt (seit Qross 0.7: die Rechte,
@@ -1111,9 +1111,9 @@ async fn receive_control(mut control: RecvStream, tx: mpsc::UnboundedSender<From
             Ok(Some(Control::PastesOnDemand)) => {
                 let _ = tx.send(FromServer::PastesOnDemand);
             }
-            Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht vom Server"),
+            Ok(Some(other)) => debug!(?other, "unexpected control message from the server"),
             // Von einer neueren Version: überspringen, der Frame ist gelesen
-            Err(FrameError::Codec(e)) => debug!("unbekannte Control-Nachricht vom Server: {e}"),
+            Err(FrameError::Codec(e)) => debug!("unknown control message from the server: {e}"),
             Ok(None) | Err(_) => return,
         }
     }
@@ -1129,7 +1129,7 @@ async fn receive_datagrams(conn: Connection, tx: mpsc::UnboundedSender<FromServe
             Ok(Datagram::MouseDelta(delta)) => {
                 let _ = tx.send(FromServer::Delta(delta, received));
             }
-            Err(e) => debug!("ungültiges Datagramm: {e}"),
+            Err(e) => debug!("invalid datagram: {e}"),
         }
     }
 }
@@ -1149,7 +1149,7 @@ async fn offer_dragged_files(
         match tokio::task::spawn_blocking(move || files::collect(&paths)).await {
             Ok(Ok(entries)) => entries,
             Ok(Err(e)) => {
-                warn!("Gezogene Dateien nicht lesbar: {e:#}");
+                warn!("failed to read dragged files: {e:#}");
                 Vec::new()
             }
             Err(_) => Vec::new(),
@@ -1158,15 +1158,15 @@ async fn offer_dragged_files(
     let transfer = clipfiles::new_transfer_id();
     let offer = DragMessage::Offer { probe, transfer, entries: entries.iter().map(|e| e.entry.clone()).collect() };
     if let Err(e) = send_drag_message(&conn, &offer).await {
-        return warn!("Drag-Antwort an den Server nicht gesendet: {e:#}");
+        return warn!("failed to send drag reply to the server: {e:#}");
     }
     if entries.is_empty() {
         return;
     }
     let total: u64 = entries.iter().map(|e| e.entry.size).sum();
-    info!("übertrage {} gezogene Einträge ({}) zum Server", entries.len(), files::human_size(total));
+    info!("transferring {} dragged entries ({}) to the server", entries.len(), files::human_size(total));
     if let Err(e) = files::send_tracked(conn, StreamKind::File, transfer, entries, &server_name, &transfers).await {
-        warn!("Übertragung zum Server abgebrochen: {e:#}");
+        warn!("transfer to the server aborted: {e:#}");
     }
 }
 
@@ -1178,7 +1178,7 @@ async fn receive_streams(conn: Connection, tx: mpsc::UnboundedSender<FromServer>
         let (tx, stagings) = (tx.clone(), stagings.clone());
         tokio::spawn(async move {
             if let Err(e) = read_server_stream(&mut stream, &tx, &stagings).await {
-                debug!("Stream vom Server beendet: {e:#}");
+                debug!("stream from the server ended: {e:#}");
             }
         });
     }
@@ -1226,7 +1226,7 @@ async fn read_server_stream(
             }
         }
         // Abrufe kommen auf bidirektionalen Streams (siehe `ondemand::accept_fetches`).
-        StreamKind::Fetch => bail!("Abruf auf einem unidirektionalen Stream"),
+        StreamKind::Fetch => bail!("fetch on a unidirectional stream"),
     }
     Ok(())
 }

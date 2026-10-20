@@ -56,7 +56,7 @@ pub(crate) fn save(kind: Kind, token: Option<&str>) {
         },
     };
     if let Err(e) = result {
-        tracing::warn!("Freigabe des Portals nicht gespeichert ({}): {e}", path.display());
+        tracing::warn!("failed to save the portal permission ({}): {e}", path.display());
     }
 }
 
@@ -78,7 +78,7 @@ pub(crate) fn forget() -> anyhow::Result<()> {
         if let Some(path) = path(kind) {
             match fs::remove_file(&path) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(anyhow::anyhow!("{} löschen: {e}", path.display()))
+                    return Err(anyhow::anyhow!("failed to delete {}: {e}", path.display()))
                 }
                 _ => {}
             }

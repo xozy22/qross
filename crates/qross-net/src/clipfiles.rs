@@ -99,7 +99,7 @@ pub(crate) async fn send(
     }
     let (paths, data) = match content {
         Content::Data(data) => {
-            info!("Zwischenablage → „{peer}“: {}", data.summary());
+            info!("clipboard → '{peer}': {}", data.summary());
             return send_clipboard(conn, data).await;
         }
         Content::Files { paths, data } => (paths, data),
@@ -110,32 +110,32 @@ pub(crate) async fn send(
         let roots = paths.clone();
         match tokio::task::spawn_blocking(move || files::collect_within(&roots, u64::MAX, MAX_ENTRIES)).await {
             Ok(Ok(Some(entries))) => return offer(&conn, entries, data, peer, names, &offers, &notify).await,
-            Ok(Ok(None)) => info!("Mehr als {MAX_ENTRIES} Dateien und Ordner für „{peer}“ – sie gehen vorab statt auf Abruf"),
+            Ok(Ok(None)) => info!("more than {MAX_ENTRIES} files and folders for '{peer}'; transferring them in advance instead of on demand"),
             // Nicht lesbar: Das stellt das Vorab-Übertragen gleich noch einmal fest und meldet es.
             _ => {}
         }
     }
     let collected = if limit == 0 {
-        debug!("kopierte Dateien werden nicht übertragen (ausgeschaltet)");
+        debug!("copied files are not transferred (turned off)");
         None
     } else {
         match tokio::task::spawn_blocking(move || files::collect_up_to(&paths, limit)).await {
             Ok(Ok(Some(entries))) => Some(entries),
             Ok(Ok(None)) => {
                 warn!(
-                    "Kopierte Dateien für „{peer}“ sind größer als {} – große Dateien bitte per Drag & Drop ziehen",
+                    "copied files for '{peer}' are larger than {}; please use drag and drop for large files",
                     human_size(limit)
                 );
                 notify(FilesNotice::TooLarge { peer: peer.clone(), names: names.clone(), limit });
                 None
             }
             Ok(Err(e)) => {
-                warn!("Kopierte Dateien nicht lesbar: {e:#}");
+                warn!("failed to read copied files: {e:#}");
                 notify(FilesNotice::Failed { peer: peer.clone(), reason: format!("{e:#}") });
                 None
             }
             Err(e) => {
-                warn!("Kopierte Dateien nicht lesbar: {e}");
+                warn!("failed to read copied files: {e}");
                 None
             }
         }
@@ -150,18 +150,18 @@ pub(crate) async fn send(
 
     let transfer = new_transfer_id();
     let bytes: u64 = entries.iter().map(|e| e.entry.size).sum();
-    info!("Zwischenablage → „{peer}“: {} ({})", names.join(", "), human_size(bytes));
+    info!("clipboard → '{peer}': {} ({})", names.join(", "), human_size(bytes));
     notify(FilesNotice::Sending { peer: peer.clone(), names, bytes });
     let message = Clipboard::Files { transfer, entries: entries.iter().map(|e| e.entry.clone()).collect(), data };
     if let Err(e) = send_clipboard_message(&conn, &message).await {
-        warn!("Kopierte Dateien an „{peer}“ nicht gesendet: {e:#}");
+        warn!("failed to send copied files to '{peer}': {e:#}");
         return;
     }
     let started = std::time::Instant::now();
     match files::send_tracked(conn, StreamKind::ClipboardFile, transfer, entries, &peer, &transfers).await {
-        Ok(()) => debug!("kopierte Dateien an „{peer}“ gesendet in {:.1} s", started.elapsed().as_secs_f64()),
+        Ok(()) => debug!("copied files sent to '{peer}' in {:.1} s", started.elapsed().as_secs_f64()),
         // Neuerer Inhalt beim Empfänger, Verbindung weg oder eine Qross-Version ohne Dateien in der Zwischenablage
-        Err(e) => info!("Übertragung kopierter Dateien an „{peer}“ beendet: {e:#}"),
+        Err(e) => info!("transfer of copied files to '{peer}' ended: {e:#}"),
     }
 }
 
@@ -179,10 +179,10 @@ async fn offer(
     let list: Vec<FileEntry> = entries.iter().map(|e| e.entry.clone()).collect();
     let bytes = list.iter().map(|e| e.size).sum();
     offers.add(transfer, &peer, entries);
-    info!("Zwischenablage → „{peer}“: {} ({}, auf Abruf)", names.join(", "), human_size(bytes));
+    info!("clipboard → '{peer}': {} ({}, on demand)", names.join(", "), human_size(bytes));
     notify(FilesNotice::Sending { peer: peer.clone(), names, bytes });
     if let Err(e) = send_clipboard_message(conn, &Clipboard::FilesOnDemand { transfer, entries: list, data }).await {
-        warn!("Kopierte Dateien an „{peer}“ nicht gesendet: {e:#}");
+        warn!("failed to send copied files to '{peer}': {e:#}");
     }
 }
 
@@ -238,14 +238,14 @@ impl Incoming {
         let older: Vec<u64> =
             self.pending.iter().filter(|(id, p)| **id != transfer && p.announced.is_some()).map(|(id, _)| *id).collect();
         for id in older {
-            self.drop_transfer(id, "überholt", Phase::Cancelled { by_peer: true });
+            self.drop_transfer(id, "superseded", Phase::Cancelled { by_peer: true });
         }
         if let Err(e) = entries.iter().try_for_each(|e| sanitize(&e.path).map(drop)) {
-            self.drop_transfer(transfer, "ungültige Liste", Phase::Failed(format!("{e:#}")));
+            self.drop_transfer(transfer, "invalid list", Phase::Failed(format!("{e:#}")));
             bail!("{e:#}");
         }
         let (names, bytes) = summary(&entries);
-        info!("kopierte Dateien von „{peer}“: {} ({})", names.join(", "), human_size(bytes));
+        info!("copied files from '{peer}': {} ({})", names.join(", "), human_size(bytes));
         let staging = self.staging.clone();
         let info = Info { kind: Kind::Clipboard, peer: peer.clone(), names, total: bytes };
         self.progress.begin(Direction::Receiving, transfer, info, move || staging.discard(transfer));
@@ -257,7 +257,7 @@ impl Incoming {
         let id = outcome.transfer;
         if self.staging.is_cancelled(id) {
             // Kam nach dem Verwerfen (oder Abbrechen) noch an: wieder wegräumen
-            self.drop_transfer(id, "abgebrochen", Phase::Cancelled { by_peer: false });
+            self.drop_transfer(id, "cancelled", Phase::Cancelled { by_peer: false });
             return Ok(None);
         }
         match outcome.result {
@@ -267,12 +267,12 @@ impl Incoming {
             }
             Err(e) => {
                 if let Some(cancelled) = progress::cancelled(&e) {
-                    self.drop_transfer(id, "vom Sender abgebrochen", Phase::Cancelled { by_peer: cancelled.by_peer });
+                    self.drop_transfer(id, "cancelled by the sender", Phase::Cancelled { by_peer: cancelled.by_peer });
                     return Ok(None);
                 }
                 let peer = self.pending.get(&id).and_then(|p| p.announced.as_ref()).map(|a| a.peer.clone());
-                self.drop_transfer(id, "fehlgeschlagen", Phase::Failed(format!("{e:#}")));
-                warn!("kopierte Datei nicht übernommen: {e:#}");
+                self.drop_transfer(id, "failed", Phase::Failed(format!("{e:#}")));
+                warn!("failed to receive copied file: {e:#}");
                 Err(Failed { peer: peer.unwrap_or_default(), reason: format!("{e:#}") })
             }
         }
@@ -282,12 +282,12 @@ impl Incoming {
     pub fn supersede(&mut self) {
         let ids: Vec<u64> = self.pending.keys().copied().collect();
         for id in ids {
-            self.drop_transfer(id, "überholt", Phase::Cancelled { by_peer: true });
+            self.drop_transfer(id, "superseded", Phase::Cancelled { by_peer: true });
         }
     }
 
     fn drop_transfer(&mut self, id: u64, why: &str, phase: Phase) {
-        debug!("kopierte Dateien {id} verworfen ({why})");
+        debug!("copied files {id} discarded ({why})");
         self.pending.remove(&id);
         self.staging.discard(id);
         self.progress.end(Direction::Receiving, id, phase);
@@ -308,7 +308,7 @@ impl Incoming {
             let local = dir.join(sanitize(&entry.path).ok()?);
             if entry.is_dir {
                 if let Err(e) = std::fs::create_dir_all(&local) {
-                    warn!("Ordner {} nicht angelegt: {e}", local.display());
+                    warn!("failed to create folder {}: {e}", local.display());
                 }
             }
             let top = dir.join(sanitize(entry.path.split('/').next().unwrap_or_default()).ok()?);

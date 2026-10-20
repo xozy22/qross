@@ -15,20 +15,20 @@ use super::{dispatch, ready, SystemEvent, BEFORE_SLEEP};
 pub fn start() {
     let netlink = std::thread::Builder::new().name("qross-netlink".into()).spawn(|| {
         if let Err(e) = watch_netlink() {
-            warn!("Netzwerk wird nicht beobachtet (Netlink): {e}");
+            warn!("not watching the network (netlink): {e}");
         }
     });
     let logind = std::thread::Builder::new().name("qross-logind".into()).spawn(|| {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
-            Err(e) => return warn!("Ruhezustand wird nicht beobachtet: {e}"),
+            Err(e) => return warn!("not watching for sleep: {e}"),
         };
         if let Err(e) = runtime.block_on(watch_logind()) {
-            info!("Ruhezustand wird nicht beobachtet (logind nicht erreichbar: {e})");
+            info!("not watching for sleep (logind not reachable: {e})");
         }
     });
     if let Err(e) = netlink.and(logind) {
-        warn!("Systemereignisse werden nicht beobachtet: {e}");
+        warn!("not watching system events: {e}");
     }
 }
 
@@ -104,11 +104,11 @@ async fn watch_logind() -> zbus::Result<()> {
 /// Verzögerungssperre: logind wartet vor dem Einschlafen, bis sie freigegeben ist (höchstens
 /// `InhibitDelayMaxSec`, üblich 5 s). Ohne sie käme `Sleeping` womöglich zu spät an.
 async fn inhibit(manager: &zbus::Proxy<'_>) -> Option<zbus::zvariant::OwnedFd> {
-    let why = "Verbindungen vor dem Ruhezustand sauber trennen";
+    let why = "Close connections cleanly before going to sleep";
     match manager.call("Inhibit", &("sleep", "Qross", why, "delay")).await {
         Ok(fd) => Some(fd),
         Err(e) => {
-            debug!("keine Verzögerungssperre bei logind: {e}");
+            debug!("no delay inhibitor from logind: {e}");
             None
         }
     }

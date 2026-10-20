@@ -80,7 +80,7 @@ impl ClipboardHub {
                     }
                 }
             })
-            .expect("Clipboard-Thread starten");
+            .expect("failed to spawn clipboard thread");
         Self { jobs, pastes_on_demand }
     }
 
@@ -97,22 +97,22 @@ impl ClipboardHub {
 
     pub async fn write(&self, data: ClipboardData) -> Result<u64> {
         let (reply, rx) = oneshot::channel();
-        self.jobs.send(Job::Write { data, reply }).map_err(|_| anyhow!("Clipboard-Thread beendet"))?;
-        rx.await.map_err(|_| anyhow!("Clipboard-Thread beendet"))?
+        self.jobs.send(Job::Write { data, reply }).map_err(|_| anyhow!("clipboard thread ended"))?;
+        rx.await.map_err(|_| anyhow!("clipboard thread ended"))?
     }
 
     /// Legt Dateien (und `data`) in die Zwischenablage; Antwort ist die neue Sequenznummer.
     pub async fn write_files(&self, files: Vec<PathBuf>, data: ClipboardData) -> Result<u64> {
         let (reply, rx) = oneshot::channel();
-        self.jobs.send(Job::WriteFiles { files, data, reply }).map_err(|_| anyhow!("Clipboard-Thread beendet"))?;
-        rx.await.map_err(|_| anyhow!("Clipboard-Thread beendet"))?
+        self.jobs.send(Job::WriteFiles { files, data, reply }).map_err(|_| anyhow!("clipboard thread ended"))?;
+        rx.await.map_err(|_| anyhow!("clipboard thread ended"))?
     }
 
     /// Legt Dateien auf Abruf (und `data`) in die Zwischenablage; Antwort ist die neue Sequenznummer.
     pub async fn write_virtual_files(&self, files: VirtualFiles, data: ClipboardData) -> Result<u64> {
         let (reply, rx) = oneshot::channel();
-        self.jobs.send(Job::WriteVirtual { files, data, reply }).map_err(|_| anyhow!("Clipboard-Thread beendet"))?;
-        rx.await.map_err(|_| anyhow!("Clipboard-Thread beendet"))?
+        self.jobs.send(Job::WriteVirtual { files, data, reply }).map_err(|_| anyhow!("clipboard thread ended"))?;
+        rx.await.map_err(|_| anyhow!("clipboard thread ended"))?
     }
 
     pub async fn sequence(&self) -> u64 {
@@ -153,7 +153,7 @@ impl Guard {
     fn withhold(&mut self, seq: u64, marker: &str) {
         if self.withheld != Some(seq) {
             self.withheld = Some(seq);
-            info!("Zwischenablage: vertraulicher Inhalt (markiert mit „{marker}“) wird nicht geteilt");
+            info!("clipboard: confidential content (marked with '{marker}') is not shared");
             (self.on_withheld)();
         }
     }

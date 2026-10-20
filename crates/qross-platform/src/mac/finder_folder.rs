@@ -87,9 +87,9 @@ fn inspect(x: i32, y: i32, trace: &mut Trace) -> Option<PathBuf> {
             None => top_window_at(fx, fy, None, trace)?.0,
         };
         let bundle = bundle_id(pid);
-        trace.note(|| format!("Programm an der Stelle: pid {pid}, {bundle:?}"));
+        trace.note(|| format!("app at the position: pid {pid}, {bundle:?}"));
         if bundle.as_deref() != Some(FINDER) {
-            tracing::debug!("unter dem Cursor liegt kein Finder-Fenster");
+            tracing::debug!("no Finder window under the cursor");
             return None;
         }
         let (_, layer) = top_window_at(fx, fy, Some(pid), trace)?;
@@ -101,8 +101,8 @@ fn inspect(x: i32, y: i32, trace: &mut Trace) -> Option<PathBuf> {
         } else {
             None
         };
-        tracing::debug!(?folder, "Ablageordner bei {x},{y}");
-        trace.note(|| format!("Ergebnis: {folder:?}"));
+        tracing::debug!(?folder, "drop folder at {x},{y}");
+        trace.note(|| format!("result: {folder:?}"));
         folder
     })
 }
@@ -113,7 +113,7 @@ fn inspect(x: i32, y: i32, trace: &mut Trace) -> Option<PathBuf> {
 /// mit `owner` nur unter den Fenstern dieses Programms
 fn top_window_at(x: f64, y: f64, owner: Option<i32>, trace: &mut Trace) -> Option<(i32, i32)> {
     let Some(windows) = copy_window_info(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) else {
-        trace.note(|| "keine Fensterliste".into());
+        trace.note(|| "no window list".into());
         return None;
     };
     // Von vorn nach hinten sortiert
@@ -149,7 +149,7 @@ fn top_window_at(x: f64, y: f64, owner: Option<i32>, trace: &mut Trace) -> Optio
         let alpha = number(unsafe { kCGWindowAlpha }).and_then(|n| n.to_f64());
         trace.note(|| {
             let (o, s) = (bounds.origin, bounds.size);
-            format!("Fenster an der Stelle: pid {pid}, Ebene {layer}, Alpha {alpha:?}, {}×{} bei {},{}", s.width, s.height, o.x, o.y)
+            format!("window at the position: pid {pid}, layer {layer}, alpha {alpha:?}, {}×{} at {},{}", s.width, s.height, o.x, o.y)
         });
         // Unsichtbare Fenster (z. B. Hilfsflächen von Programmen) fangen keine Klicks
         if alpha.is_some_and(|alpha| alpha <= 0.0) {
@@ -157,7 +157,7 @@ fn top_window_at(x: f64, y: f64, owner: Option<i32>, trace: &mut Trace) -> Optio
         }
         return Some((pid, layer));
     }
-    trace.note(|| format!("kein Fenster bei {x},{y}"));
+    trace.note(|| format!("no window at {x},{y}"));
     None
 }
 
@@ -265,22 +265,22 @@ fn element_at(x: i32, y: i32, trace: &mut Trace) -> Option<AxElement> {
     let mut hit: CFTypeRef = null();
     let error = unsafe { AXUIElementCopyElementAtPosition(system.as_CFTypeRef(), x as f32, y as f32, &mut hit) };
     if error != 0 || hit.is_null() {
-        tracing::debug!("kein Element bei {x},{y} (Fehler {error}; fehlt das Recht „Bedienungshilfen“?)");
-        trace.note(|| format!("AXUIElementCopyElementAtPosition: Fehler {error}"));
+        tracing::debug!("no element at {x},{y} (error {error}; is the 'Accessibility' permission missing?)");
+        trace.note(|| format!("AXUIElementCopyElementAtPosition: error {error}"));
         return None;
     }
     let hit = unsafe { AxElement::wrap_under_create_rule(hit as AXUIElementRef) }.limited();
-    trace.note(|| format!("Element an der Stelle: {}", describe(&hit)));
+    trace.note(|| format!("element at the position: {}", describe(&hit)));
     Some(hit)
 }
 
 /// Ordner des Finder-Fensters, zu dem das Element unter dem Cursor gehört
 fn finder_window(hit: AxElement, trace: &mut Trace) -> Option<PathBuf> {
     let Some(window) = window_of(hit) else {
-        trace.note(|| "kein Fenster zum Element".into());
+        trace.note(|| "no window for the element".into());
         return None;
     };
-    trace.note(|| format!("Fenster: {}, Dokument {:?}", describe(&window), window.string("AXDocument")));
+    trace.note(|| format!("window: {}, document {:?}", describe(&window), window.string("AXDocument")));
     if trace.on() {
         outline(&window, 0, &mut 0, trace);
     }
@@ -290,8 +290,8 @@ fn finder_window(hit: AxElement, trace: &mut Trace) -> Option<PathBuf> {
     }
     let mut reader = Reader { elements: 0, deadline: Instant::now() + READ_LIMIT };
     let view = reader.read(&window);
-    tracing::debug!(?view, elements = reader.elements, "Finder-Fenster");
-    trace.note(|| format!("gelesen ({} Elemente): {view:?}", reader.elements));
+    tracing::debug!(?view, elements = reader.elements, "Finder window");
+    trace.note(|| format!("read ({} elements): {view:?}", reader.elements));
     let names = |path: &Path| {
         let shown = NSFileManager::defaultManager().displayNameAtPath(&NSString::from_str(&path.to_string_lossy()));
         let last = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -303,7 +303,7 @@ fn finder_window(hit: AxElement, trace: &mut Trace) -> Option<PathBuf> {
 /// Rolle, Unterrolle, Kennung, Titel, Wert und URL eines Elements, für die Ablaufspur
 fn describe(element: &AxElement) -> String {
     let mut text = element.role();
-    for (label, name) in [("", "AXSubrole"), ("id=", "AXIdentifier"), ("Titel=", "AXTitle"), ("Wert=", "AXValue")] {
+    for (label, name) in [("", "AXSubrole"), ("id=", "AXIdentifier"), ("title=", "AXTitle"), ("value=", "AXValue")] {
         if let Some(value) = element.string(name).filter(|v| !v.is_empty()) {
             text.push_str(&format!(" {label}{value:?}"));
         }

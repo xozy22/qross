@@ -7,17 +7,17 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     qross_platform::init_process();
     let folder = match args.as_slice() {
-        [flag, hwnd] if flag == "--hwnd" => explorer(hwnd.parse().expect("Handle als Zahl")),
+        [flag, hwnd] if flag == "--hwnd" => explorer(hwnd.parse().expect("handle must be a number")),
         [x, y] => qross_platform::folder_at(x.parse().expect("x"), y.parse().expect("y")),
         [flag, x, y] if flag == "--trace" => trace(x.parse().expect("x"), y.parse().expect("y")),
         _ => {
-            eprintln!("Aufruf: folder_at [--trace] <x> <y> | folder_at --hwnd <handle>");
+            eprintln!("Usage: folder_at [--trace] <x> <y> | folder_at --hwnd <handle>");
             std::process::exit(2);
         }
     };
     match folder {
         Some(path) => println!("{}", path.display()),
-        None => println!("(kein Ordner)"),
+        None => println!("(no folder)"),
     }
 }
 

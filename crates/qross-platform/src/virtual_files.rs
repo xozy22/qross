@@ -47,7 +47,7 @@ struct Cancelled;
 
 impl fmt::Display for Cancelled {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Einfügen abgebrochen")
+        f.write_str("paste cancelled")
     }
 }
 
@@ -83,7 +83,7 @@ pub fn file_group_descriptor(entries: &[FileEntry]) -> anyhow::Result<Vec<u8>> {
     for entry in entries {
         let name: Vec<u16> = entry.path.replace('/', "\\").encode_utf16().collect();
         if name.is_empty() || name.len() >= NAME_UNITS {
-            bail!("Pfad „{}“ passt nicht in eine virtuelle Datei (höchstens {} Zeichen)", entry.path, NAME_UNITS - 1);
+            bail!("path '{}' does not fit into a virtual file (at most {} characters)", entry.path, NAME_UNITS - 1);
         }
         let start = out.len();
         out.resize(start + DESCRIPTOR_LEN, 0);
@@ -149,7 +149,7 @@ mod tests {
         assert_eq!(longest.len(), NAME_UNITS - 1);
         assert!(file_group_descriptor(&[entry(&longest, 1, false)]).is_ok());
         let error = file_group_descriptor(&[entry(&format!("{longest}c"), 1, false)]).unwrap_err();
-        assert!(error.to_string().contains("höchstens 259 Zeichen"), "{error}");
+        assert!(error.to_string().contains("at most 259 characters"), "{error}");
     }
 
     #[test]

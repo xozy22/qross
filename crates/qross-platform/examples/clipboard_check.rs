@@ -22,18 +22,18 @@ fn main() -> anyhow::Result<()> {
     };
     let before = clipboard.sequence();
     clipboard.write(&data)?;
-    let read = clipboard.read().expect("Zwischenablage leer");
-    println!("Sequenz geändert: {}", clipboard.sequence() != before);
-    println!("Text gleich: {}", read.text == data.text);
-    println!("HTML gleich: {}", read.html == data.html);
-    println!("Bild gleich: {}", read.png.as_deref().map(png_to_rgba).transpose()?.as_ref() == Some(&image));
+    let read = clipboard.read().expect("clipboard is empty");
+    println!("Sequence changed: {}", clipboard.sequence() != before);
+    println!("Text matches: {}", read.text == data.text);
+    println!("HTML matches: {}", read.html == data.html);
+    println!("Image matches: {}", read.png.as_deref().map(png_to_rgba).transpose()?.as_ref() == Some(&image));
 
     #[cfg(windows)]
     {
         dib_only(&image)?;
-        let read = clipboard.read().expect("Zwischenablage leer");
+        let read = clipboard.read().expect("clipboard is empty");
         let decoded = read.png.as_deref().map(png_to_rgba).transpose()?;
-        println!("Nur-DIB (Screenshot-Fall) als PNG gelesen und gleich: {}", decoded.as_ref() == Some(&image));
+        println!("DIB only (screenshot case) read as PNG and matches: {}", decoded.as_ref() == Some(&image));
     }
 
     // Kopierte Dateien: Qross legt ab und liest zurück. Unter Windows prüft zusätzlich Windows
@@ -44,15 +44,15 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(dir.join("Bericht Grüße.txt"), "Qross")?;
     let files = vec![dir.join("Bericht Grüße.txt"), dir.join("Ordner Ä")];
     clipboard.write_files(&files, &ClipboardData::from_text("Bericht Grüße.txt"))?;
-    println!("Dateien gleich: {}", clipboard.files() == files);
-    println!("Dateinamen als Text dabei: {}", clipboard.text().as_deref() == Some("Bericht Grüße.txt"));
+    println!("Files match: {}", clipboard.files() == files);
+    println!("File names included as text: {}", clipboard.text().as_deref() == Some("Bericht Grüße.txt"));
     #[cfg(windows)]
     {
         let shell = powershell("Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::GetFileDropList()")?;
         let expected: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
-        println!("Windows sieht dieselben Dateien: {}", shell == expected);
+        println!("Windows sees the same files: {}", shell == expected);
         if shell != expected {
-            println!("  Windows: {shell:?}, erwartet: {expected:?}");
+            println!("  Windows: {shell:?}, expected: {expected:?}");
         }
         // Wie Strg+V im Explorer: das Shell-Verb „Einfügen“ auf einen Zielordner
         let target = dir.join("Ziel");
@@ -69,13 +69,13 @@ fn main() -> anyhow::Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         println!(
-            "Explorer hat eingefügt: {}",
+            "Explorer pasted: {}",
             std::fs::read_to_string(target.join("Bericht Grüße.txt")).is_ok_and(|t| t == "Qross")
                 && std::fs::read_to_string(&pasted).is_ok_and(|t| t == "im Ordner")
         );
         let single = dir.join("Bericht Grüße.txt");
         powershell(&format!("Set-Clipboard -LiteralPath '{}'", single.display()))?;
-        println!("Im Explorer-Format kopierte Datei gelesen: {}", clipboard.files() == vec![single]);
+        println!("File copied in Explorer format read: {}", clipboard.files() == vec![single]);
     }
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -83,7 +83,7 @@ fn main() -> anyhow::Result<()> {
         Some(previous) => clipboard.write(&previous)?,
         None => clipboard.write(&ClipboardData::default())?,
     }
-    println!("vorheriger Inhalt wiederhergestellt");
+    println!("Previous content restored");
     Ok(())
 }
 
@@ -107,7 +107,7 @@ fn dib_only(image: &Rgba) -> anyhow::Result<()> {
         let ptr = GlobalLock(mem) as *mut u8;
         std::ptr::copy_nonoverlapping(dib.as_ptr(), ptr, dib.len());
         GlobalUnlock(mem);
-        anyhow::ensure!(OpenClipboard(std::ptr::null_mut()) != 0, "Zwischenablage belegt");
+        anyhow::ensure!(OpenClipboard(std::ptr::null_mut()) != 0, "clipboard in use");
         EmptyClipboard();
         SetClipboardData(8, mem); // CF_DIB
         CloseClipboard();

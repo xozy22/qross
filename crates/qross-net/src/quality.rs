@@ -59,10 +59,10 @@ pub enum Level {
 impl Level {
     pub fn label(self) -> &'static str {
         match self {
-            Level::VeryGood => "Sehr gut",
-            Level::Good => "Gut",
-            Level::Fair => "Mäßig",
-            Level::Poor => "Schlecht",
+            Level::VeryGood => "very good",
+            Level::Good => "good",
+            Level::Fair => "fair",
+            Level::Poor => "poor",
         }
     }
 
@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(rating, Rating { rtt: Level::Fair, jitter: Level::VeryGood, loss: Level::Poor });
         assert_eq!(rating.overall(), Level::Poor);
         assert_eq!(Level::VeryGood.max(Level::Fair), Level::Fair);
-        assert_eq!(Level::Fair.label(), "Mäßig");
+        assert_eq!(Level::Fair.label(), "fair");
     }
 
     #[test]

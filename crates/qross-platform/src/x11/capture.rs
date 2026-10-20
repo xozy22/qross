@@ -132,13 +132,13 @@ impl Shared {
 
     fn read_locks(&self) -> LockState {
         let read = self.locks.map(|masks| masks.read(&self.conn));
-        read.and_then(|r| r.map_err(|e| tracing::debug!("Sperrtasten nicht lesbar: {e:#}")).ok()).unwrap_or_default()
+        read.and_then(|r| r.map_err(|e| tracing::debug!("cannot read Caps Lock and Num Lock: {e:#}")).ok()).unwrap_or_default()
     }
 }
 
 pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> {
     let (conn, root) = super::connect()?;
-    let blank = blank_cursor(&conn, root).context("leeren Cursor anlegen")?;
+    let blank = blank_cursor(&conn, root).context("failed to create the blank cursor")?;
     // Gehaltene Tasten wiederholen nur KeyPress, ohne künstliche KeyRelease dazwischen
     let xkb_ok = conn.xkb_use_extension(1, 0).ok().and_then(|c| c.reply().ok()).is_some_and(|r| r.supported);
     if xkb_ok {
@@ -150,7 +150,7 @@ pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> 
     let wake_window = conn.generate_id()?;
     conn.create_window(0, wake_window, root, 0, 0, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &CreateWindowAux::new())?;
     let locks = xkb_ok.then(|| LockMasks::fetch(&conn)).and_then(|masks| {
-        masks.map_err(|e| tracing::warn!("Feststelltaste und Num nicht lesbar: {e:#}")).ok()
+        masks.map_err(|e| tracing::warn!("cannot read Caps Lock and Num Lock: {e:#}")).ok()
     });
     let shared = Arc::new(Shared {
         conn,
@@ -172,7 +172,7 @@ pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<Arc<dyn Capture>> 
     capture.set_key_options(KeyOptions::default());
     thread::Builder::new().name("qross-x11-capture".into()).spawn(move || {
         if let Err(e) = run(&shared) {
-            tracing::error!("X11-Erfassung beendet: {e:#}");
+            tracing::error!("X11 capture ended: {e:#}");
         }
     })?;
     Ok(Arc::new(capture))
@@ -209,7 +209,7 @@ impl Capture for X11Capture {
         }
         for hotkey in options.hotkeys() {
             let Some(code) = evdev_from_hid(hotkey.key).and_then(|code| u8::try_from(code + X11_OFFSET).ok()) else {
-                tracing::warn!("Kürzel „{hotkey}“: Diese Taste gibt es unter X11 nicht");
+                tracing::warn!("shortcut '{hotkey}': this key does not exist under X11");
                 continue;
             };
             let mods = mod_mask(hotkey.mods);
@@ -224,8 +224,8 @@ impl Capture for X11Capture {
             let taken = cookies.into_iter().any(|cookie| cookie.check().is_err());
             if taken {
                 tracing::warn!(
-                    "Kürzel „{hotkey}“ ist schon von einem anderen Programm belegt; es wirkt nur, solange der Cursor \
-                     auf einem anderen Rechner ist"
+                    "shortcut '{hotkey}' is already taken by another program; it only works while the cursor is on \
+                     another computer"
                 );
             }
             grabbed.push((code, mods));
@@ -255,7 +255,7 @@ impl Capture for X11Capture {
         thread::spawn(move || {
             let files = shared.drag.lock().unwrap_or_else(|e| e.into_inner()).files();
             if !files.is_empty() {
-                tracing::info!("{} Datei(en) werden über die Kante gezogen", files.len());
+                tracing::info!("{} file(s) being dragged across the edge", files.len());
             }
             let _ = shared.events.send(CaptureEvent::DragProbeResult { files });
         });
@@ -304,7 +304,7 @@ impl Capture for X11Capture {
         let (pointer, keyboard) = status;
         if !ok(status) {
             // Ein anderes Programm hält gerade einen Grab (z. B. ein offenes Menü): nicht wechseln.
-            tracing::warn!("Eingaben lassen sich gerade nicht abfangen (Zeiger: {pointer:?}, Tastatur: {keyboard:?})");
+            tracing::warn!("cannot grab input right now (pointer: {pointer:?}, keyboard: {keyboard:?})");
             s.ungrab();
             let _ = s.events.send(CaptureEvent::PanicReturn);
             return;
@@ -344,9 +344,9 @@ fn run(s: &Shared) -> Result<()> {
     // Maustasten bei der letzten Abfrage im lokalen Modus
     let mut buttons_before = false;
     // Belegung für den Zeichenmodus; ohne sie bleibt es bei Tastenpositionen
-    let mut keymap = Keymap::fetch(&s.conn).map_err(|e| tracing::warn!("Tastaturbelegung nicht lesbar: {e:#}")).ok();
+    let mut keymap = Keymap::fetch(&s.conn).map_err(|e| tracing::warn!("cannot read the keyboard mapping: {e:#}")).ok();
     let raw = listen_raw(&s.conn, s.root)
-        .map_err(|e| tracing::info!("Kein XInput 2.1 ({e:#}): Zeigerposition wird alle 4 ms abgefragt"))
+        .map_err(|e| tracing::info!("no XInput 2.1 ({e:#}): polling the pointer position every 4 ms"))
         .is_ok();
     // Lokal: Zeigerposition prüfen, sobald die Warteschlange leer ist – einmal für alle Bewegungen
     // seit der letzten Prüfung
@@ -529,7 +529,7 @@ fn check_pointer(s: &Shared, size: &mut (u16, u16), size_checked: &mut Instant, 
 fn listen_raw(conn: &RustConnection, root: Window) -> Result<()> {
     let version = conn.xinput_xi_query_version(2, 2)?.reply()?;
     let version = (version.major_version, version.minor_version);
-    anyhow::ensure!(version >= (2, 1), "Version {}.{}", version.0, version.1);
+    anyhow::ensure!(version >= (2, 1), "version {}.{}", version.0, version.1);
     let select = |mask: XIEventMask| -> Result<()> {
         let masks = [xinput::EventMask { deviceid: xinput::Device::ALL_MASTER.into(), mask: vec![mask] }];
         conn.xinput_xi_select_events(root, &masks)?.check()?;

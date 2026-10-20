@@ -58,7 +58,7 @@ pub(crate) fn transport() -> quinn::TransportConfig {
     // Abbruch nimmt dem Nutzer den Cursor weg. Nach dem Aufwachen, vor dem Ruhezustand und bei einem
     // Netzwechsel warten Client und Server ohnehin nicht darauf, sondern prüfen selbst (siehe `wake`).
     t.keep_alive_interval(Some(Duration::from_secs(1)));
-    t.max_idle_timeout(Some(Duration::from_secs(5).try_into().expect("gültiges Timeout")));
+    t.max_idle_timeout(Some(Duration::from_secs(5).try_into().expect("valid timeout")));
     // Laufzeit, bis die erste Messung da ist. Davon hängt ab, wann quinn ein verlorenes Paket des
     // Verbindungsaufbaus wiederholt: mit den üblichen 333 ms erst nach 1 s, dann nach 3 s, mit 100 ms
     // nach 0,3 s und 0,9 s. Gerade nach dem Aufwachen und einem Netzwechsel geht das erste Paket gern
@@ -79,11 +79,11 @@ const DATAGRAM_SEND_BUFFER: usize = 4 * 1024;
 
 /// Fingerprint des Zertifikats der Gegenseite.
 pub fn peer_fingerprint(conn: &quinn::Connection) -> Result<Fingerprint> {
-    let identity = conn.peer_identity().context("Gegenseite hat kein Zertifikat gesendet")?;
+    let identity = conn.peer_identity().context("peer sent no certificate")?;
     let certs = identity
         .downcast::<Vec<CertificateDer<'static>>>()
-        .map_err(|_| anyhow!("unerwarteter Typ der Peer-Identität"))?;
-    let cert = certs.first().context("leere Zertifikatskette")?;
+        .map_err(|_| anyhow!("unexpected type of peer identity"))?;
+    let cert = certs.first().context("empty certificate chain")?;
     Ok(Fingerprint::of(cert))
 }
 

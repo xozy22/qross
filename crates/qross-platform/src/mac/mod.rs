@@ -58,9 +58,9 @@ unsafe impl Sync for Activity {}
 impl Activity {
     pub fn begin() -> Self {
         let options = NSActivityOptions::UserInitiatedAllowingIdleSystemSleep | NSActivityOptions::LatencyCritical;
-        let reason = NSString::from_str("Qross gibt Maus und Tastatur ohne Verzögerung weiter");
+        let reason = NSString::from_str("Qross forwards mouse and keyboard without delay");
         let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(options, &reason);
-        tracing::debug!("App Nap aus, solange Qross läuft");
+        tracing::debug!("App Nap off while Qross is running");
         Self(token)
     }
 }
@@ -69,7 +69,7 @@ impl Drop for Activity {
     fn drop(&mut self) {
         // SAFETY: Das Token stammt aus beginActivityWithOptions_reason, hat also den erwarteten Typ.
         unsafe { NSProcessInfo::processInfo().endActivity(&self.0) };
-        tracing::debug!("App Nap wieder erlaubt");
+        tracing::debug!("App Nap allowed again");
     }
 }
 
@@ -107,9 +107,9 @@ pub fn injector() -> Result<Box<dyn Injector>> {
     // Ohne das Recht verwirft macOS eingespeiste Ereignisse stillschweigend.
     if !has_permission(Permission::Accessibility) {
         tracing::warn!(
-            "„Bedienungshilfen“ ist für Qross nicht erlaubt – eingespeiste Maus- und Tastaturereignisse kommen \
-             nicht an. Unter Systemeinstellungen → Datenschutz & Sicherheit freigeben; ist Qross dort schon \
-             eingeschaltet, den Eintrag entfernen und neu hinzufügen."
+            "Qross does not have the 'Accessibility' permission, so injected mouse and keyboard events do not \
+             arrive. Grant it under System Settings → Privacy & Security; if Qross is already turned on there, \
+             remove the entry and add it again."
         );
     }
     let injector = inject::MacInjector::new()?;

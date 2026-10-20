@@ -111,12 +111,12 @@ unsafe fn raw(format: u32) -> Option<Vec<u8>> {
 pub(super) unsafe fn global(bytes: &[u8]) -> anyhow::Result<*mut core::ffi::c_void> {
     let mem = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1));
     if mem.is_null() {
-        bail!("GlobalAlloc fehlgeschlagen");
+        bail!("GlobalAlloc failed");
     }
     let ptr = GlobalLock(mem) as *mut u8;
     if ptr.is_null() {
         GlobalFree(mem);
-        bail!("GlobalLock fehlgeschlagen");
+        bail!("GlobalLock failed");
     }
     copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
     GlobalUnlock(mem);
@@ -143,7 +143,7 @@ impl Clipboard for WinClipboard {
             match image.and_then(|img| rgba_to_png(&img)) {
                 Ok(png) => Some(png),
                 Err(e) => {
-                    tracing::debug!("Bild in der Zwischenablage nicht lesbar: {e:#}");
+                    tracing::debug!("cannot read the image on the clipboard: {e:#}");
                     None
                 }
             }
@@ -215,7 +215,7 @@ fn formats(data: &ClipboardData) -> anyhow::Result<Vec<(u32, Option<Vec<u8>>)>> 
     });
     // Zusätzlich als DIB, damit auch ältere Programme (Paint, Office) das Bild einfügen können
     let dib = match &data.png {
-        Some(png) => Some(rgba_to_dib(&png_to_rgba(png).context("Bild aus der Gegenstelle ist kein gültiges PNG")?)),
+        Some(png) => Some(rgba_to_dib(&png_to_rgba(png).context("image from the peer is not a valid PNG")?)),
         None => None,
     };
     Ok(vec![(CF_UNICODETEXT, text), (html_format(), html), (png_format(), data.png.clone()), (CF_DIB, dib)])
@@ -223,7 +223,7 @@ fn formats(data: &ClipboardData) -> anyhow::Result<Vec<(u32, Option<Vec<u8>>)>> 
 
 /// Ersetzt den Inhalt des Clipboards durch die angegebenen Formate.
 fn put(formats: Vec<(u32, Option<Vec<u8>>)>) -> anyhow::Result<()> {
-    let _open = Open::acquire().context("Clipboard ist von einem anderen Programm belegt")?;
+    let _open = Open::acquire().context("clipboard is in use by another program")?;
     unsafe {
         EmptyClipboard();
         for (format, bytes) in formats {
@@ -235,7 +235,7 @@ fn put(formats: Vec<(u32, Option<Vec<u8>>)>) -> anyhow::Result<()> {
             // Bei Erfolg gehört der Speicher dem System.
             if SetClipboardData(format, mem).is_null() {
                 GlobalFree(mem);
-                tracing::debug!("Format {format} nicht gesetzt");
+                tracing::debug!("format {format} not set");
             }
         }
     }

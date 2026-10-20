@@ -102,8 +102,8 @@ async fn run(events: UnboundedSender<CaptureEvent>, mut commands: UnboundedRecei
         match session(&events, &mut commands, &mut keys, &mut ready).await {
             Ok(Ended::Closed) => return,
             Ok(Ended::Lost(reason)) => {
-                tracing::warn!("Wayland-Erfassung unterbrochen: {reason}");
-                let problem = PortalProblem::Failed(format!("Verbindung verloren: {reason}"));
+                tracing::warn!("Wayland capture interrupted: {reason}");
+                let problem = PortalProblem::Failed(format!("connection lost: {reason}"));
                 set_problem(Role::Capture, Some(problem));
                 delay = Duration::from_secs(1);
             }
@@ -112,7 +112,7 @@ async fn run(events: UnboundedSender<CaptureEvent>, mut commands: UnboundedRecei
                 set_problem(Role::Capture, Some(fail.problem()));
                 if matches!(fail, Fail::Denied) {
                     tracing::error!(
-                        "Freigabe zum Erfassen abgelehnt – der Cursor bleibt auf diesem Rechner, bis der Server neu startet"
+                        "permission to capture input denied; the cursor stays on this computer until the server restarts"
                     );
                     // Nicht wieder und wieder fragen. Ein neu gestarteter Server setzt die Tasten
                     // (`set_key_options`) – das gilt als Bitte, erneut zu fragen.
@@ -129,7 +129,7 @@ async fn run(events: UnboundedSender<CaptureEvent>, mut commands: UnboundedRecei
                     delay = Duration::from_secs(1);
                     continue;
                 }
-                tracing::warn!("Wayland-Erfassung: {}", start_error(Role::Capture, &fail));
+                tracing::warn!("Wayland capture: {}", start_error(Role::Capture, &fail));
             }
         }
         let pause = tokio::time::sleep(delay);
@@ -168,7 +168,7 @@ async fn session(
     let capabilities = Capabilities::Keyboard | Capabilities::Pointer;
     let token = tokens::load(Kind::InputCapture);
     if token.is_none() || portal.version() < 2 {
-        tracing::info!("Das System fragt jetzt, ob Qross Maus und Tastatur erfassen darf …");
+        tracing::info!("The system is now asking whether Qross may capture the mouse and keyboard …");
     }
     let session = if portal.version() >= 2 {
         // Ab Version 2 mit gemerkter Freigabe
@@ -184,7 +184,7 @@ async fn session(
         let options = CreateSessionOptions::default().set_capabilities(capabilities);
         let (session, granted) = portal.create_session(None, options).await?;
         if !granted.contains(Capabilities::Pointer) {
-            return Err(Fail::Other(anyhow::anyhow!("das Portal erlaubt nur {granted:?}, die Maus fehlt")));
+            return Err(Fail::Other(anyhow::anyhow!("the portal only allows {granted:?}, the mouse is missing")));
         }
         session
     };
@@ -220,7 +220,7 @@ async fn run_session(
         let release = tokio::select! {
             // Signale gehen nur an den Besitzer der Sitzung, und Qross hat höchstens eine offen.
             signal = activated.next() => {
-                let Some(signal) = signal else { return Ok(Ended::Lost("Portal-Signale beendet".into())) };
+                let Some(signal) = signal else { return Ok(Ended::Lost("portal signals ended".into())) };
                 let barrier = match signal.barrier_id() {
                     Some(ActivatedBarrier::Barrier(id)) => Some(id.get()),
                     _ => None,
@@ -228,7 +228,7 @@ async fn run_session(
                 state.on_activated(signal.activation_id(), signal.cursor_position(), barrier, &barriers, &monitors)
             }
             signal = deactivated.next() => {
-                let Some(signal) = signal else { return Ok(Ended::Lost("Portal-Signale beendet".into())) };
+                let Some(signal) = signal else { return Ok(Ended::Lost("portal signals ended".into())) };
                 state.on_deactivated(signal.activation_id());
                 None
             }
@@ -237,15 +237,15 @@ async fn run_session(
                 // (xdg-desktop-portal-gnome #126): die Sitzung neu aufbauen.
                 state.on_deactivated(None);
                 return Ok(Ended::Lost(match signal {
-                    Some(_) => "der Compositor hat die Erfassung ausgeschaltet".into(),
-                    None => "Portal-Signale beendet".into(),
+                    Some(_) => "the compositor disabled the capture".into(),
+                    None => "portal signals ended".into(),
                 }));
             }
             signal = zones_changed.next() => {
                 if signal.is_none() {
-                    return Ok(Ended::Lost("Portal-Signale beendet".into()));
+                    return Ok(Ended::Lost("portal signals ended".into()));
                 }
-                tracing::info!("Monitore geändert – Barrieren neu setzen");
+                tracing::info!("monitors changed, setting the barriers again");
                 state.on_deactivated(None);
                 (barriers, monitors) = match reset(portal, session, &mut resets).await {
                     Ok(setup) => setup,
@@ -260,7 +260,7 @@ async fn run_session(
                     Outcome::Lost(reason) => return Ok(Ended::Lost(reason)),
                 },
                 Some(Err(e)) => return Ok(Ended::Lost(format!("libei: {e}"))),
-                None => return Ok(Ended::Lost("libei-Verbindung geschlossen".into())),
+                None => return Ok(Ended::Lost("libei connection closed".into())),
             },
             command = commands.recv() => match command {
                 Some(Command::Keys(options)) => {
@@ -277,7 +277,7 @@ async fn run_session(
                 .set_activation_id(release.id)
                 .set_cursor_position((f64::from(release.x) + 0.5, f64::from(release.y) + 0.5));
             if let Err(e) = portal.release(session, options).await {
-                tracing::warn!("Erfassung freigeben: {e}");
+                tracing::warn!("failed to release the capture: {e}");
             }
         }
     }
@@ -295,7 +295,7 @@ async fn setup(portal: &InputCapture, session: &Session<InputCapture>) -> Result
     let monitors: Vec<Rect> =
         zones.regions().iter().map(|r| Rect::new(r.x_offset(), r.y_offset(), r.width(), r.height())).collect();
     if monitors.is_empty() {
-        return Err(Fail::Other(anyhow::anyhow!("das Portal meldet keine Monitore (Zonen)")));
+        return Err(Fail::Other(anyhow::anyhow!("the portal reports no monitors (zones)")));
     }
     set_geometry(monitors.clone());
     let wanted = wayland_logic::barriers(&monitors);
@@ -311,14 +311,14 @@ async fn setup(portal: &InputCapture, session: &Session<InputCapture>) -> Result
     let (accepted, refused): (Vec<Barrier>, Vec<Barrier>) = wanted.into_iter().partition(|b| !failed.contains(&b.id));
     if !refused.is_empty() {
         let list: Vec<String> = refused.iter().map(|b| format!("{:?} {:?}", b.edge, b.line)).collect();
-        tracing::warn!("Das Portal hat Barrieren abgelehnt: {}", list.join(", "));
+        tracing::warn!("the portal refused barriers: {}", list.join(", "));
     }
     if accepted.is_empty() {
-        return Err(Fail::Other(anyhow::anyhow!("das Portal hat alle Zeigerbarrieren abgelehnt")));
+        return Err(Fail::Other(anyhow::anyhow!("the portal refused all pointer barriers")));
     }
     portal.enable(session, Default::default()).await?;
     let edges: Vec<String> = accepted.iter().map(|b| format!("{:?}", b.edge)).collect();
-    tracing::info!("Wayland-Erfassung bereit, Monitore {}, Kanten {}", describe(&monitors), edges.join(", "));
+    tracing::info!("Wayland capture ready, monitors {}, edges {}", describe(&monitors), edges.join(", "));
     Ok((accepted, monitors))
 }
 
@@ -332,9 +332,9 @@ async fn reset(
     resets.retain(|at| at.elapsed() < Duration::from_secs(10));
     resets.push(Instant::now());
     if resets.len() > 3 {
-        return Err("Erfassung lässt sich nicht wieder einschalten".into());
+        return Err("cannot re-enable the capture".into());
     }
-    setup(portal, session).await.map_err(|e| format!("Barrieren neu setzen: {}", e.problem()))
+    setup(portal, session).await.map_err(|e| format!("failed to set the barriers again: {}", e.problem()))
 }
 
 /// Erfassung freigeben: Aktivierung und Cursorposition danach
@@ -507,13 +507,13 @@ impl State {
                         | DeviceCapability::Scroll,
                 );
                 if let Err(e) = self.connection.flush() {
-                    tracing::debug!("libei senden: {e}");
+                    tracing::debug!("failed to send via libei: {e}");
                 }
                 None
             }
             EiEvent::Disconnected(e) => {
                 let why = e.explanation.unwrap_or_else(|| format!("{:?}", e.reason));
-                return Outcome::Lost(format!("vom Compositor getrennt: {why}"));
+                return Outcome::Lost(format!("disconnected by the compositor: {why}"));
             }
             EiEvent::PointerMotion(e) => {
                 let (dx, dy) = (f64::from(e.dx), f64::from(e.dy));

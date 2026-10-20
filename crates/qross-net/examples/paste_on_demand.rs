@@ -11,7 +11,7 @@
 
 #[cfg(not(windows))]
 fn main() {
-    println!("nur unter Windows");
+    println!("Windows only");
 }
 
 #[cfg(windows)]
@@ -56,11 +56,11 @@ mod windows_check {
         let source = base.join(NAME);
         let started = Instant::now();
         let expected = write_source(&source, mb * 1_000_000)?;
-        println!("Quelle: {} ({}) in {:.1} s angelegt", source.display(), human_size(mb * 1_000_000), started.elapsed().as_secs_f64());
+        println!("Source: {} ({}) created in {:.1} s", source.display(), human_size(mb * 1_000_000), started.elapsed().as_secs_f64());
 
         let mut real = qross_platform::clipboard();
         let backup = real.read();
-        anyhow::ensure!(real.pastes_on_demand(), "diese Zwischenablage fügt nicht auf Abruf ein (QROSS_PASTE_ON_DEMAND=0?)");
+        anyhow::ensure!(real.pastes_on_demand(), "this clipboard does not paste on demand (QROSS_PASTE_ON_DEMAND=0?)");
 
         // Server „pc“ mit der echten Zwischenablage, Client „laptop“ mit der Datei in seiner
         let (server_id, client_id) = (Identity::generate()?, Identity::generate()?);
@@ -106,7 +106,7 @@ mod windows_check {
             Transfers::new(),
         ));
         loop {
-            if let ServerNotice::ClientConnected { .. } = notices.recv().await.context("Server beendet")? {
+            if let ServerNotice::ClientConnected { .. } = notices.recv().await.context("server stopped")? {
                 break;
             }
         }
@@ -126,18 +126,18 @@ mod windows_check {
         let switched = Instant::now();
         events.send(CaptureEvent::MouseDelta { dx: -5000, dy: 0 })?;
         loop {
-            let notice = tokio::time::timeout(Duration::from_secs(30), notices.recv()).await.context("nichts zum Einfügen")?;
-            match notice.context("Server beendet")? {
+            let notice = tokio::time::timeout(Duration::from_secs(30), notices.recv()).await.context("nothing to paste")?;
+            match notice.context("server stopped")? {
                 ServerNotice::ClipboardFiles(FilesNotice::Ready { names, bytes, .. }) => {
                     println!(
-                        "bereit zum Einfügen nach {:.0} ms: {names:?} ({})",
+                        "Ready to paste after {:.0} ms: {names:?} ({})",
                         switched.elapsed().as_secs_f64() * 1000.0,
                         human_size(bytes)
                     );
                     break;
                 }
-                ServerNotice::ClipboardFiles(FilesNotice::Failed { reason, .. }) => bail!("nicht abgelegt: {reason}"),
-                ServerNotice::Transfer(p) => bail!("vor dem Einfügen übertragen: {p:?}"),
+                ServerNotice::ClipboardFiles(FilesNotice::Failed { reason, .. }) => bail!("not placed in the clipboard: {reason}"),
+                ServerNotice::Transfer(p) => bail!("transferred before pasting: {p:?}"),
                 _ => {}
             }
         }
@@ -148,12 +148,12 @@ mod windows_check {
         let paste = paste_in_background(&target)?;
         let end = watch(&mut notices, None).await?;
         let status = tokio::task::spawn_blocking(move || paste.wait_with_output()).await??;
-        println!("Einfügen beendet ({}), Fortschritt am Ende: {:?}", status.status, end.phase);
+        println!("Paste finished ({}), final progress: {:?}", status.status, end.phase);
         let pasted = target.join(NAME);
         let got = hash(&pasted)?;
-        println!("eingefügt: {} – Inhalt {}", human_size(std::fs::metadata(&pasted)?.len()), if got == expected { "gleich" } else { "VERSCHIEDEN" });
+        println!("Pasted: {}, content {}", human_size(std::fs::metadata(&pasted)?.len()), if got == expected { "identical" } else { "DIFFERENT" });
         let sent = last_sending(&mut client_notices).await;
-        println!("Client meldet: {:?}, {} gesendet", sent.as_ref().map(|p| p.phase.clone()), human_size(sent.map_or(0, |p| p.bytes)));
+        println!("Client reports: {:?}, {} sent", sent.as_ref().map(|p| p.phase.clone()), human_size(sent.map_or(0, |p| p.bytes)));
 
         // Noch einmal einfügen und nach etwa einem Drittel abbrechen
         let target = base.join("abgebrochen");
@@ -161,10 +161,10 @@ mod windows_check {
         let paste = paste_in_background(&target)?;
         let end = watch(&mut notices, Some(&server_transfers)).await?;
         let status = tokio::task::spawn_blocking(move || paste.wait_with_output()).await??;
-        println!("Einfügen beendet ({}), Fortschritt am Ende: {:?}", status.status, end.phase);
-        println!("abgebrochene Datei im Ziel: {}", if target.join(NAME).exists() { "noch da" } else { "weg" });
+        println!("Paste finished ({}), final progress: {:?}", status.status, end.phase);
+        println!("Cancelled file in the target: {}", if target.join(NAME).exists() { "still there" } else { "gone" });
         let sent = last_sending(&mut client_notices).await;
-        println!("Client meldet: {:?}", sent.map(|p| p.phase));
+        println!("Client reports: {:?}", sent.map(|p| p.phase));
 
         client_task.abort();
         server_task.abort();
@@ -172,7 +172,7 @@ mod windows_check {
             Some(previous) => real.write(&previous)?,
             None => real.write(&ClipboardData::default())?,
         }
-        println!("vorheriger Inhalt der Zwischenablage wiederhergestellt");
+        println!("Previous clipboard content restored");
         let _ = std::fs::remove_dir_all(&base);
         Ok(())
     }
@@ -219,13 +219,13 @@ mod windows_check {
     async fn watch(notices: &mut UnboundedReceiver<ServerNotice>, cancel: Option<&Transfers>) -> Result<Progress> {
         let mut printed = Instant::now();
         loop {
-            let ServerNotice::Transfer(p) = notices.recv().await.context("Server beendet")? else { continue };
+            let ServerNotice::Transfer(p) = notices.recv().await.context("server stopped")? else { continue };
             if p.direction != Direction::Receiving {
                 continue;
             }
             if !p.phase.is_running() {
                 println!(
-                    "  Ende: {:?} nach {:.1} s, {} ({}/s)",
+                    "  End: {:?} after {:.1} s, {} ({}/s)",
                     p.phase,
                     p.elapsed.as_secs_f64(),
                     human_size(p.bytes),
@@ -234,13 +234,13 @@ mod windows_check {
                 return Ok(p);
             }
             if let Some(transfers) = cancel.filter(|_| p.bytes * 3 >= p.total) {
-                println!("  breche nach {} ab", human_size(p.bytes));
+                println!("  cancelling after {}", human_size(p.bytes));
                 transfers.cancel(Direction::Receiving, p.transfer);
             }
             if printed.elapsed() >= Duration::from_secs(1) {
                 printed = Instant::now();
-                let left = p.remaining.map(|r| format!(", noch {} s", r.as_secs())).unwrap_or_default();
-                println!("  {:5.1} %  {}/s{left}", p.bytes as f64 * 100.0 / p.total.max(1) as f64, human_size(p.bytes_per_s));
+                let left = p.remaining.map(|r| format!(", {} s left", r.as_secs())).unwrap_or_default();
+                println!("  {:5.1}%  {}/s{left}", p.bytes as f64 * 100.0 / p.total.max(1) as f64, human_size(p.bytes_per_s));
             }
         }
     }

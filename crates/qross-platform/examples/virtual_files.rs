@@ -8,7 +8,7 @@
 
 #[cfg(not(windows))]
 fn main() {
-    println!("nur unter Windows");
+    println!("Windows only");
 }
 
 #[cfg(windows)]
@@ -66,7 +66,7 @@ mod windows_check {
 
     impl VirtualFile for File {
         fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-            let thread = std::thread::current().name().unwrap_or("ohne Namen (RPC)").to_owned();
+            let thread = std::thread::current().name().unwrap_or("unnamed (RPC)").to_owned();
             self.threads.lock().unwrap().insert(thread);
             if offset >= self.cancel_after {
                 return Err(cancelled());
@@ -87,7 +87,7 @@ mod windows_check {
         let big_mb: u64 = std::env::args().nth(1).map(|a| a.parse()).transpose()?.unwrap_or(50);
         let mut clipboard = qross_platform::clipboard();
         let backup = clipboard.read();
-        println!("fügt auf Abruf ein: {}", clipboard.pastes_on_demand());
+        println!("Pastes on demand: {}", clipboard.pastes_on_demand());
 
         let big = big_mb * 1_000_000;
         let entries = vec![
@@ -100,13 +100,13 @@ mod windows_check {
         let dir = std::env::temp_dir().join(format!("qross-virtual-files-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        for (round, cancel_after) in [("vollständig", u64::MAX), ("mit Abbruch", big / 3)] {
+        for (round, cancel_after) in [("complete", u64::MAX), ("with cancellation", big / 3)] {
             let threads = Arc::new(Mutex::new(BTreeSet::new()));
             let read = Arc::new(AtomicU64::new(0));
             let source = Source { entries: entries.clone(), cancel_after, threads: threads.clone(), read: read.clone() };
             let files = VirtualFiles { entries: entries.clone(), source: Arc::new(source) };
             clipboard.write_virtual_files(files, &ClipboardData::from_text("Qross Ordner Ä\nQross Groß.bin\nleer.txt"))?;
-            println!("[{round}] Text daneben: {:?}", clipboard.text());
+            println!("[{round}] text alongside: {:?}", clipboard.text());
 
             let target = dir.join(round);
             std::fs::create_dir_all(&target)?;
@@ -115,29 +115,29 @@ mod windows_check {
             let folder = target.join("Qross Ordner Ä");
             let inner = std::fs::read(folder.join("drin.txt")).ok();
             println!(
-                "[{round}] {} nach {:.1} s: Ordner {}, Unterordner {}, drin.txt {}, große Datei {}, leer.txt {}",
-                if status.success() { "eingefügt" } else { "Einfügen gescheitert" },
+                "[{round}] {} after {:.1} s: folder {}, subfolder {}, drin.txt {}, large file {}, leer.txt {}",
+                if status.success() { "pasted" } else { "paste failed" },
                 started.elapsed().as_secs_f64(),
                 folder.is_dir(),
                 folder.join("Unterordner").is_dir(),
-                inner.map_or("fehlt".into(), |b| check_bytes(&b, 1, 9)),
-                std::fs::read(target.join("Qross Groß.bin")).map_or("fehlt".into(), |b| check_bytes(&b, 3, big)),
+                inner.map_or("missing".into(), |b| check_bytes(&b, 1, 9)),
+                std::fs::read(target.join("Qross Groß.bin")).map_or("missing".into(), |b| check_bytes(&b, 3, big)),
                 target.join("leer.txt").exists(),
             );
-            println!("[{round}] gelesen: {:.1} MB, in Threads: {:?}", read.load(Ordering::Relaxed) as f64 / 1e6, threads.lock().unwrap());
+            println!("[{round}] read: {:.1} MB, in threads: {:?}", read.load(Ordering::Relaxed) as f64 / 1e6, threads.lock().unwrap());
         }
         let _ = std::fs::remove_dir_all(&dir);
         match backup {
             Some(previous) => clipboard.write(&previous)?,
             None => clipboard.write(&ClipboardData::default())?,
         }
-        println!("vorheriger Inhalt wiederhergestellt");
+        println!("Previous content restored");
         Ok(())
     }
 
     /// Größe und Inhalt einer eingefügten Datei
     fn check_bytes(bytes: &[u8], seed: u64, expected: u64) -> String {
         let same = bytes.iter().enumerate().all(|(i, b)| *b == byte_at(seed, i as u64));
-        format!("{} von {expected} B ({})", bytes.len(), if same { "Inhalt richtig" } else { "Inhalt FALSCH" })
+        format!("{} of {expected} B ({})", bytes.len(), if same { "content correct" } else { "content WRONG" })
     }
 }

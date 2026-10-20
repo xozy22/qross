@@ -268,9 +268,9 @@ fn default_listen() -> SocketAddr {
 impl ServerFile {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| {
-            format!("Konfiguration {} nicht gefunden (Vorlage: qross.example.toml)", path.display())
+            format!("configuration {} not found (template: qross.example.toml)", path.display())
         })?;
-        toml::from_str(&text).with_context(|| format!("{} ist ungültig", path.display()))
+        toml::from_str(&text).with_context(|| format!("{} is invalid", path.display()))
     }
 }
 
@@ -354,12 +354,12 @@ mod tests {
 
         let error = |text: &str| toml::from_str::<ServerFile>(text).unwrap().keys.config().unwrap_err().to_string();
         assert!(error("[keys.switch]\n\"Ctrl+Gibtsnicht\" = \"left\"").contains("[keys.switch]"));
-        assert!(error("[keys.switch]\n\"Ctrl+Alt+KeyL\" = \"\"").contains("Ziel fehlt"));
+        assert!(error("[keys.switch]\n\"Ctrl+Alt+KeyL\" = \"\"").contains("missing target"));
         let lock = error("[keys]\nlock = \"Ctrl+Alt+KeyL\"\n[keys.switch]\n\"Alt+Ctrl+KeyL\" = \"laptop\"");
-        assert!(lock.contains("schon die Fang-Taste"), "{lock}");
+        assert_eq!(lock, "[keys]: shortcut 'Ctrl+Alt+KeyL' (to 'laptop') is already the lock key");
         let twice = error("[keys.switch]\n\"Ctrl+Alt+KeyL\" = \"laptop\"\n\"Alt+Ctrl+KeyL\" = \"left\"");
-        assert!(twice.contains("schon belegt"), "{twice}");
-        assert!(error("[keys.switch]\n\"Ctrl+Alt+Shift+Escape\" = \"pc\"").contains("Notausgang"));
+        assert!(twice.contains("is already taken"), "{twice}");
+        assert!(error("[keys.switch]\n\"Ctrl+Alt+Shift+Escape\" = \"pc\"").contains("emergency exit"));
     }
 
     #[test]

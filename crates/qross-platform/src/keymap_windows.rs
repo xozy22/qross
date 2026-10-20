@@ -113,7 +113,7 @@ pub fn windows_from_hid(key: KeyCode) -> Option<WinKey> {
         .iter()
         .find(|(_, hid)| *hid == key.0)
         .or_else(|| REVERSE_ONLY.iter().find(|(hid, _)| *hid == key.0).map(|(_, scan)| {
-            TABLE.iter().find(|(s, _)| s == scan).expect("REVERSE_ONLY zeigt auf TABLE")
+            TABLE.iter().find(|(s, _)| s == scan).expect("REVERSE_ONLY points into TABLE")
         }))
         .map(|&(scan, _)| scan)?;
     Some(WinKey { scan: code & 0xFF, extended: code & EXT != 0, vk: None })

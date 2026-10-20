@@ -166,7 +166,7 @@ fn store(layout: Option<Layout>) {
                 *current = Some((Arc::new(layout), Instant::now()));
             }
         }
-        None => tracing::debug!("Tastaturlayout der Eingabequelle nicht lesbar"),
+        None => tracing::debug!("cannot read the keyboard layout of the input source"),
     }
 }
 

@@ -38,11 +38,11 @@ pub fn folder_at(x: i32, y: i32) -> Option<PathBuf> {
             "Progman" | "WorkerW" => known_folder(&FOLDERID_Desktop),
             "CabinetWClass" | "ExploreWClass" => explorer_folder(root),
             other => {
-                tracing::debug!("unter dem Cursor liegt kein Ordner (Fensterklasse {other})");
+                tracing::debug!("no folder under the cursor (window class {other})");
                 None
             }
         };
-        tracing::debug!(?folder, "Ablageordner bei {x},{y}");
+        tracing::debug!(?folder, "drop folder at {x},{y}");
         folder
     }
 }

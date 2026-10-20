@@ -290,12 +290,12 @@ impl Lock {
         Self::ALL.into_iter().find(|lock| lock.key() == key)
     }
 
-    /// Für Log und Oberfläche
+    /// Englisch fürs Log (für die Oberfläche: `qross_core::keys::key_label_in(lock.key(), lang)`)
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Caps => "Feststelltaste",
-            Self::Num => "Num",
-            Self::Scroll => "Rollen",
+            Self::Caps => "Caps Lock",
+            Self::Num => "Num Lock",
+            Self::Scroll => "Scroll Lock",
         }
     }
 }
@@ -332,14 +332,14 @@ impl LockState {
         Lock::ALL.into_iter().any(|lock| self.get(lock).is_some())
     }
 
-    /// Kurzbeschreibung fürs Log, z. B. „Feststelltaste an, Num an, Rollen aus“
+    /// Kurzbeschreibung fürs Log, z. B. „Caps Lock on, Num Lock on, Scroll Lock off“
     pub fn describe(self) -> String {
         let parts: Vec<String> = Lock::ALL
             .into_iter()
-            .filter_map(|lock| self.get(lock).map(|on| format!("{} {}", lock.label(), if on { "an" } else { "aus" })))
+            .filter_map(|lock| self.get(lock).map(|on| format!("{} {}", lock.label(), if on { "on" } else { "off" })))
             .collect();
         if parts.is_empty() {
-            "unbekannt".to_owned()
+            "unknown".to_owned()
         } else {
             parts.join(", ")
         }
@@ -498,20 +498,20 @@ impl ClipboardData {
         self.text.is_none() && self.html.is_none() && self.png.is_none()
     }
 
-    /// Kurzbeschreibung fürs Log, z. B. „Text, Bild (1,2 MB)“
+    /// Kurzbeschreibung fürs Log, z. B. „text, image (1.2 MB)“
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         if self.text.is_some() {
-            parts.push("Text".to_owned());
+            parts.push("text".to_owned());
         }
         if self.html.is_some() {
             parts.push("HTML".to_owned());
         }
         if let Some(png) = &self.png {
-            parts.push(format!("Bild ({:.1} MB)", png.len() as f64 / 1_000_000.0).replace('.', ","));
+            parts.push(format!("image ({:.1} MB)", png.len() as f64 / 1_000_000.0));
         }
         if parts.is_empty() {
-            "leer".to_owned()
+            "empty".to_owned()
         } else {
             parts.join(", ")
         }
@@ -829,13 +829,21 @@ mod tests {
 
         let mut state = LockState::default();
         assert!(!state.is_known());
-        assert_eq!(state.describe(), "unbekannt");
+        assert_eq!(state.describe(), "unknown");
         state.set(Lock::Num, Some(true));
         state.set(Lock::Caps, Some(false));
         assert!(state.is_known());
         assert_eq!(state.get(Lock::Num), Some(true));
         assert_eq!(state.get(Lock::Scroll), None);
-        assert_eq!(state.describe(), "Feststelltaste aus, Num an");
+        assert_eq!(state.describe(), "Caps Lock off, Num Lock on");
+        assert_eq!(Lock::Scroll.label(), "Scroll Lock");
+    }
+
+    #[test]
+    fn clipboard_summaries_name_what_is_there() {
+        assert_eq!(ClipboardData::default().summary(), "empty");
+        let data = ClipboardData { text: Some("a".into()), html: Some("<b>a</b>".into()), png: Some(vec![0; 1_234_567]) };
+        assert_eq!(data.summary(), "text, HTML, image (1.2 MB)");
     }
 
     #[test]

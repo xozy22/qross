@@ -27,14 +27,14 @@ const MAX_EARLY: usize = 512;
 const NOTABLE: Duration = Duration::from_millis(30);
 
 fn ms(d: Duration) -> String {
-    format!("{:.1}", d.as_secs_f64() * 1000.0).replace('.', ",")
+    format!("{:.1}", d.as_secs_f64() * 1000.0)
 }
 
 fn moves(n: u32) -> String {
     if n == 1 {
-        "1 Bewegung".to_owned()
+        "1 move".to_owned()
     } else {
-        format!("{n} Bewegungen")
+        format!("{n} moves")
     }
 }
 
@@ -127,26 +127,26 @@ impl ServerTrace {
         }
     }
 
-    /// Fürs Log, z. B. „Wechsel zu „mac“: Kante 1× berührt; in den ersten 300 ms 240 Bewegungen
-    /// erfasst, die erste nach 1,0 ms, größte Lücke 4,1 ms, größter Schritt 18 px“
+    /// Fürs Log, z. B. „switch to 'mac': edge hit 1×; first 300 ms: 240 moves captured, the first after
+    /// 1.0 ms, largest gap 4.1 ms, largest step 18 px“
     pub fn describe(&self) -> String {
         let edge = match self.hits {
-            0 => "ohne Kante am Server".to_owned(),
-            1 => "Kante 1× berührt".to_owned(),
-            n => format!("Kante {n}× berührt, {} ms lang", ms(self.pushed)),
+            0 => "no edge hit on the server".to_owned(),
+            1 => "edge hit 1×".to_owned(),
+            n => format!("edge hit {n}× over {} ms", ms(self.pushed)),
         };
         let captured = match (self.moves, self.first) {
-            (0, _) | (_, None) => "keine Bewegung erfasst".to_owned(),
+            (0, _) | (_, None) => "no move captured".to_owned(),
             (n, Some(first)) => format!(
-                "{} erfasst, die erste nach {} ms, größte Lücke {} ms, größter Schritt {} px",
+                "{} captured, the first after {} ms, largest gap {} ms, largest step {} px",
                 moves(n),
                 ms(first),
                 ms(self.max_gap),
                 self.max_step
             ),
         };
-        let back = self.back.map(|after| format!(", nach {} ms zurück auf dem Server", ms(after))).unwrap_or_default();
-        format!("Wechsel zu „{}“: {edge}; in den ersten {} ms {captured}{back}", self.to, WINDOW.as_millis())
+        let back = self.back.map(|after| format!(", back on the server after {} ms", ms(after))).unwrap_or_default();
+        format!("switch to '{}': {edge}; first {} ms: {captured}{back}", self.to, WINDOW.as_millis())
     }
 }
 
@@ -247,30 +247,29 @@ impl ClientTrace {
         }
     }
 
-    /// Fürs Log, z. B. „Betreten: keine Bewegung vor dem Enter; in den ersten 300 ms 241 Bewegungen
-    /// empfangen, die erste nach 1,0 ms, größte Lücke 4,2 ms, eingespeist höchstens 0,5 ms nach dem
-    /// Empfang“
+    /// Fürs Log, z. B. „entering: no move before the Enter; first 300 ms: 241 moves received, the first
+    /// after 1.0 ms, largest gap 4.2 ms, injected at most 0.5 ms after receipt“
     pub fn describe(&self) -> String {
         let early = match self.early {
-            0 => "keine Bewegung vor dem Enter".to_owned(),
-            1 => format!("1 Bewegung kam {} ms vor dem Enter an und folgte ihm gleich", ms(self.earliest)),
+            0 => "no move before the Enter".to_owned(),
+            1 => format!("1 move arrived {} ms before the Enter and followed it at once", ms(self.earliest)),
             n => format!(
-                "{n} Bewegungen kamen vor dem Enter an, die erste {} ms vorher; die neueste folgte ihm gleich",
+                "{n} moves arrived before the Enter, the first {} ms earlier; the newest followed it at once",
                 ms(self.earliest)
             ),
         };
         let received = match (self.moves, self.first) {
-            (0, _) | (_, None) => "keine Bewegung empfangen".to_owned(),
+            (0, _) | (_, None) => "no move received".to_owned(),
             (n, Some(first)) => {
                 let inject = if self.injected == 0 {
                     String::new()
                 } else {
-                    format!(", eingespeist höchstens {} ms nach dem Empfang", ms(self.max_inject))
+                    format!(", injected at most {} ms after receipt", ms(self.max_inject))
                 };
-                format!("{} empfangen, die erste nach {} ms, größte Lücke {} ms{inject}", moves(n), ms(first), ms(self.max_gap))
+                format!("{} received, the first after {} ms, largest gap {} ms{inject}", moves(n), ms(first), ms(self.max_gap))
             }
         };
-        format!("Betreten: {early}; in den ersten {} ms {received}", WINDOW.as_millis())
+        format!("entering: {early}; first {} ms: {received}", WINDOW.as_millis())
     }
 }
 
@@ -296,8 +295,8 @@ mod tests {
         assert!(!trace.is_notable(), "nur zur Fehlersuche im Log");
         assert_eq!(
             trace.describe(),
-            "Wechsel zu „mac“: Kante 1× berührt; in den ersten 300 ms 100 Bewegungen erfasst, die erste nach 1,0 ms, \
-             größte Lücke 1,0 ms, größter Schritt 12 px"
+            "switch to 'mac': edge hit 1×; first 300 ms: 100 moves captured, the first after 1.0 ms, \
+             largest gap 1.0 ms, largest step 12 px"
         );
     }
 
@@ -318,13 +317,13 @@ mod tests {
         trace.on_move(switched + Duration::from_millis(140), 5, 0);
         assert_eq!(
             trace.describe(),
-            "Wechsel zu „mac“: Kante 40× berührt, 78,0 ms lang; in den ersten 300 ms 2 Bewegungen erfasst, die erste \
-             nach 2,0 ms, größte Lücke 118,0 ms, größter Schritt 900 px, nach 130,0 ms zurück auf dem Server"
+            "switch to 'mac': edge hit 40× over 78.0 ms; first 300 ms: 2 moves captured, the first after \
+             2.0 ms, largest gap 118.0 ms, largest step 900 px, back on the server after 130.0 ms"
         );
         assert!(trace.is_notable());
         // Ein neuer Wechsel ohne Kante am Server (Kürzel, von Client zu Client)
         let trace = ServerTrace::start("mac".into(), at(t, 5000), &mut hits);
-        assert!(trace.describe().starts_with("Wechsel zu „mac“: ohne Kante am Server; in den ersten 300 ms keine"));
+        assert!(trace.describe().starts_with("switch to 'mac': no edge hit on the server; first 300 ms: no move"));
     }
 
     #[test]
@@ -350,13 +349,13 @@ mod tests {
         assert!(trace.is_due(entered + Duration::from_millis(351)));
         assert_eq!(
             trace.describe(),
-            "Betreten: 2 Bewegungen kamen vor dem Enter an, die erste 5,0 ms vorher; die neueste folgte ihm gleich; \
-             in den ersten 300 ms 51 Bewegungen empfangen, die erste nach 1,0 ms, größte Lücke 200,0 ms, eingespeist \
-             höchstens 30,0 ms nach dem Empfang"
+            "entering: 2 moves arrived before the Enter, the first 5.0 ms earlier; the newest followed it at once; \
+             first 300 ms: 51 moves received, the first after 1.0 ms, largest gap 200.0 ms, injected \
+             at most 30.0 ms after receipt"
         );
         assert!(trace.is_notable());
         let quiet = ClientTrace::start(8, at(t, 1000), &mut early_moves);
-        assert_eq!(quiet.describe(), "Betreten: keine Bewegung vor dem Enter; in den ersten 300 ms keine Bewegung empfangen");
+        assert_eq!(quiet.describe(), "entering: no move before the Enter; first 300 ms: no move received");
         assert!(!quiet.is_notable());
     }
 }

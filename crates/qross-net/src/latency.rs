@@ -71,18 +71,18 @@ impl Slow {
         self.server_us.saturating_add(self.network_us).saturating_add(self.client_us)
     }
 
-    /// Fürs Log, z. B. „Maus 142 ms (Server 0,1 · Netz 138,0 · Client 3,9), 3 Stichproben über 50 ms“
+    /// Fürs Log, z. B. „mouse 142 ms (server 0.1 · network 138.0 · client 3.9), 3 samples over 50 ms“
     pub fn describe(&self) -> String {
-        let ms = |us: u32| format!("{:.1}", f64::from(us) / 1000.0).replace('.', ",");
+        let ms = |us: u32| format!("{:.1}", f64::from(us) / 1000.0);
         format!(
-            "{} {} ms (Server {} · Netz {} · Client {}), {} {} über {} ms",
-            if self.mouse { "Maus" } else { "Taste" },
+            "{} {} ms (server {} · network {} · client {}), {} {} over {} ms",
+            if self.mouse { "mouse" } else { "key" },
             self.total_us() / 1000,
             ms(self.server_us),
             ms(self.network_us),
             ms(self.client_us),
             self.count,
-            if self.count == 1 { "Stichprobe" } else { "Stichproben" },
+            if self.count == 1 { "sample" } else { "samples" },
             SLOW_US / 1000
         )
     }
@@ -391,12 +391,12 @@ fn percentile(sorted: &[u32], pct: usize) -> u32 {
     sorted[rank - 1]
 }
 
-/// Fürs Log, z. B. „Maus 0,9 ms (95 %: 1,6 ms; Server 0,1 · Netz 0,3 · Client 0,5)“
+/// Fürs Log, z. B. „mouse 0.90 ms (95%: 1.60 ms; server 0.10 · network 0.30 · client 0.50; 120 samples)“
 pub fn describe(summary: &LatencySummary) -> String {
-    let ms = |us: u32| format!("{:.2}", f64::from(us) / 1000.0).replace('.', ",");
+    let ms = |us: u32| format!("{:.2}", f64::from(us) / 1000.0);
     let chain = |label: &str, chain: &Chain| match (chain.total, chain.network, chain.client) {
         (Some(total), Some(network), Some(client)) => format!(
-            "{label} {} ms (95 %: {} ms; Server {} · Netz {} · Client {}; {} Stichproben)",
+            "{label} {} ms (95%: {} ms; server {} · network {} · client {}; {} samples)",
             ms(total.p50_us),
             ms(total.p95_us),
             ms(chain.server.p50_us),
@@ -404,14 +404,14 @@ pub fn describe(summary: &LatencySummary) -> String {
             ms(client.p50_us),
             chain.reported
         ),
-        _ => format!("{label}: Server {} ms (95 %: {} ms; {} Stichproben)", ms(chain.server.p50_us), ms(chain.server.p95_us), chain.samples),
+        _ => format!("{label}: server {} ms (95%: {} ms; {} samples)", ms(chain.server.p50_us), ms(chain.server.p95_us), chain.samples),
     };
-    let parts: Vec<String> = [("Maus", summary.mouse), ("Tasten", summary.keys)]
+    let parts: Vec<String> = [("mouse", summary.mouse), ("keys", summary.keys)]
         .into_iter()
         .filter_map(|(label, c)| c.map(|c| chain(label, &c)))
         .collect();
     if parts.is_empty() {
-        "noch keine Stichproben".to_owned()
+        "no samples yet".to_owned()
     } else {
         parts.join(", ")
     }
@@ -542,7 +542,7 @@ mod tests {
         }
         let slow = meter.take_slow().expect("Ausreißer");
         assert_eq!(slow, Slow { mouse: true, server_us: 20, network_us: 120_300, client_us: 100, count: 2 });
-        assert_eq!(slow.describe(), "Maus 120 ms (Server 0,0 · Netz 120,3 · Client 0,1), 2 Stichproben über 50 ms");
+        assert_eq!(slow.describe(), "mouse 120 ms (server 0.0 · network 120.3 · client 0.1), 2 samples over 50 ms");
         assert_eq!(meter.take_slow(), None, "einmal abgeholt");
         // Ein hängender Einspeise-Thread beim Client zählt genauso.
         let timing = Timing { server: 20, forward: 300, client: 70_000, hold: 50_000, back: 300 };
@@ -602,7 +602,7 @@ mod tests {
         assert_eq!(summary.uncertainty_us, None);
         assert!(!meter.client_reports());
         assert!(meter.take_summary(start + Duration::from_millis(20)).is_none(), "nichts Neues");
-        assert!(describe(&summary).starts_with("Maus: Server 0,08 ms"), "{}", describe(&summary));
+        assert!(describe(&summary).starts_with("mouse: server 0.08 ms"), "{}", describe(&summary));
     }
 
     #[test]

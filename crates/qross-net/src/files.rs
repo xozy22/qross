@@ -41,7 +41,7 @@ pub struct LocalEntry {
 /// Löst die gezogenen Pfade rekursiv auf. Relative Pfade beginnen mit dem Namen des gezogenen
 /// Elements; symbolische Links werden übersprungen.
 pub fn collect(roots: &[PathBuf]) -> Result<Vec<LocalEntry>> {
-    Ok(collect_up_to(roots, u64::MAX)?.expect("ohne Grenze immer vollständig"))
+    Ok(collect_up_to(roots, u64::MAX)?.expect("always complete without a limit"))
 }
 
 /// Wie [`collect`], hört aber auf, sobald die Dateien zusammen größer als `max_bytes` sind
@@ -56,7 +56,7 @@ pub fn collect_within(roots: &[PathBuf], max_bytes: u64, max_entries: usize) -> 
     for root in roots {
         let name = root
             .file_name()
-            .with_context(|| format!("{} hat keinen Dateinamen", root.display()))?
+            .with_context(|| format!("{} has no file name", root.display()))?
             .to_string_lossy()
             .into_owned();
         if !walk.visit(root, name)? {
@@ -76,7 +76,7 @@ struct Walk {
 impl Walk {
     /// `false`, sobald eine Grenze überschritten ist.
     fn visit(&mut self, path: &Path, rel: String) -> Result<bool> {
-        let meta = fs::symlink_metadata(path).with_context(|| format!("{} lesen", path.display()))?;
+        let meta = fs::symlink_metadata(path).with_context(|| format!("failed to read {}", path.display()))?;
         if meta.is_dir() {
             if !self.push(LocalEntry { source: path.to_owned(), entry: FileEntry { path: rel.clone(), size: 0, is_dir: true } }) {
                 return Ok(false);
@@ -95,7 +95,7 @@ impl Walk {
             }
             return Ok(self.push(LocalEntry { source: path.to_owned(), entry: FileEntry { path: rel, size: meta.len(), is_dir: false } }));
         } else {
-            debug!("überspringe {} (kein normaler Eintrag)", path.display());
+            debug!("skipping {} (not a regular entry)", path.display());
         }
         Ok(true)
     }
@@ -188,14 +188,14 @@ async fn acknowledged(stream: &SendStream, job: &Outgoing) -> Result<()> {
 async fn send_body(stream: &mut SendStream, local: &LocalEntry, buf: &mut [u8], job: &Outgoing) -> Result<()> {
     let mut file = tokio::fs::File::open(&local.source)
         .await
-        .with_context(|| format!("{} öffnen", local.source.display()))?;
+        .with_context(|| format!("failed to open {}", local.source.display()))?;
     let mut hasher = Sha256::new();
     let mut remaining = local.entry.size;
     while remaining > 0 {
         let want = remaining.min(CHUNK as u64) as usize;
         let n = file.read(&mut buf[..want]).await?;
         if n == 0 {
-            bail!("{} wurde während der Übertragung kürzer", local.source.display());
+            bail!("{} got shorter during the transfer", local.source.display());
         }
         hasher.update(&buf[..n]);
         // Schreiben wartet auf die Gegenstelle (Flusskontrolle); „Abbrechen“ soll trotzdem sofort wirken.
@@ -277,7 +277,7 @@ pub fn sanitize(path: &str) -> Result<PathBuf> {
     let mut out = PathBuf::new();
     for part in path.split('/') {
         if part.is_empty() || part == "." || part == ".." {
-            bail!("unzulässiger Pfad „{path}“");
+            bail!("invalid path '{path}'");
         }
         let mut clean: String = part
             .chars()
@@ -324,7 +324,7 @@ impl Staging {
         let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = base.join(format!("{}-{nanos}-{n}", std::process::id()));
-        fs::create_dir_all(&root).with_context(|| format!("{} anlegen", root.display()))?;
+        fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
         Ok(Arc::new(Self { root, cancelled: Mutex::new(HashSet::new()), keep: false }))
     }
 
@@ -332,7 +332,7 @@ impl Staging {
     /// Übertragungen, die älter als ein Tag sind, werden aufgeräumt.
     pub fn persistent(base: &Path) -> Result<Arc<Self>> {
         remove_older_than(base, DAY, None);
-        fs::create_dir_all(base).with_context(|| format!("{} anlegen", base.display()))?;
+        fs::create_dir_all(base).with_context(|| format!("failed to create {}", base.display()))?;
         Ok(Arc::new(Self { root: base.to_owned(), cancelled: Mutex::new(HashSet::new()), keep: true }))
     }
 
@@ -389,7 +389,7 @@ pub struct FileOutcome {
 
 /// Empfängt eine Datei (das `StreamKind`-Byte ist bereits gelesen) und zählt die Bytes in `transfers`.
 pub async fn receive_file(stream: &mut RecvStream, staging: &Staging, transfers: &Transfers) -> Result<FileOutcome> {
-    let header: FileHeader = read_frame(stream).await?.context("Datei-Stream ohne Header")?;
+    let header: FileHeader = read_frame(stream).await?.context("file stream without header")?;
     let bytes = transfers.counter(Direction::Receiving, header.transfer);
     let result = receive_body(stream, staging, &header, &bytes).await;
     Ok(FileOutcome { transfer: header.transfer, index: header.index, result })
@@ -432,9 +432,9 @@ async fn receive_body(stream: &mut RecvStream, staging: &Staging, header: &FileH
         }
         file.flush().await?;
         drop(file);
-        let trailer: FileTrailer = read_frame(stream).await.map_err(frame_read_error)?.context("Prüfsumme fehlt")?;
+        let trailer: FileTrailer = read_frame(stream).await.map_err(frame_read_error)?.context("checksum missing")?;
         if trailer.sha256 != <[u8; 32]>::from(hasher.finalize()) {
-            bail!("Prüfsumme stimmt nicht");
+            bail!("checksum mismatch");
         }
         tokio::fs::rename(&part, &dest).await?;
         Ok(())
@@ -487,7 +487,7 @@ impl Receiver {
     /// Gezogene Dateien von `peer` sind angekündigt.
     pub fn on_drag_start(&mut self, peer: &str, transfer: u64, entries: Vec<FileEntry>) {
         let (names, total) = summary(&entries);
-        info!("empfange {} Einträge ({})", entries.len(), human_size(total));
+        info!("receiving {} entries ({})", entries.len(), human_size(total));
         let staging = self.staging.clone();
         let info = Info { kind: Kind::Drag, peer: peer.to_owned(), names, total };
         self.progress.begin(Direction::Receiving, transfer, info, move || staging.discard(transfer));
@@ -497,9 +497,9 @@ impl Receiver {
 
     pub fn on_drop(&mut self, transfer: u64, target: PathBuf) {
         if self.staging.is_cancelled(transfer) {
-            return info!("Übertragung {transfer} ist abgebrochen – nichts abzulegen");
+            return info!("transfer {transfer} is cancelled; nothing to drop");
         }
-        info!("abgelegt in {}", target.display());
+        info!("dropped into {}", target.display());
         self.transfers.entry(transfer).or_default().target = Some(target);
         self.try_finish(transfer);
     }
@@ -518,7 +518,7 @@ impl Receiver {
             }
             Err(e) => match progress::cancelled(&e) {
                 Some(c) => transfer.cancelled_by_peer = Some(c.by_peer),
-                None => transfer.failed.push(format!("Datei {}: {e:#}", outcome.index)),
+                None => transfer.failed.push(format!("file {}: {e:#}", outcome.index)),
             },
         }
         self.try_finish(id);
@@ -537,7 +537,7 @@ impl Receiver {
     pub fn cancel_undropped(&mut self) {
         let undropped: Vec<u64> = self.transfers.iter().filter(|(_, t)| t.target.is_none()).map(|(id, _)| *id).collect();
         for id in undropped {
-            debug!("Übertragung {id} verworfen (nicht abgelegt)");
+            debug!("transfer {id} discarded (not dropped)");
             self.discard(id, Phase::Cancelled { by_peer: false });
         }
     }
@@ -551,12 +551,12 @@ impl Receiver {
     fn try_finish(&mut self, id: u64) {
         let Some(transfer) = self.transfers.get_mut(&id) else { return };
         if let Some(by_peer) = transfer.cancelled_by_peer {
-            info!("Übertragung {id} wurde {}", if by_peer { "vom Sender abgebrochen" } else { "abgebrochen" });
+            info!("transfer {id} was {}", if by_peer { "cancelled by the sender" } else { "cancelled" });
             return self.discard(id, Phase::Cancelled { by_peer });
         }
         if !transfer.failed.is_empty() {
             let reason = transfer.failed.join("; ");
-            warn!("Übertragung fehlgeschlagen: {reason}");
+            warn!("transfer failed: {reason}");
             return self.discard(id, Phase::Failed(reason));
         }
         if !transfer.complete() {
@@ -569,18 +569,18 @@ impl Receiver {
         if transfer.target.is_none() {
             return;
         }
-        let transfer = self.transfers.remove(&id).expect("eben geprüft");
-        let entries = transfer.entries.expect("vollständig");
-        let target = transfer.target.expect("abgelegt");
+        let transfer = self.transfers.remove(&id).expect("just checked");
+        let entries = transfer.entries.expect("complete");
+        let target = transfer.target.expect("dropped");
         let source = self.staging.transfer_dir(id);
         // Dateisystemarbeit nicht im Netzwerk-Task
         tokio::task::spawn_blocking(move || match finish(&source, &target, &entries) {
             Ok(placed) => {
                 for path in placed {
-                    info!("abgelegt: {}", path.display());
+                    info!("dropped: {}", path.display());
                 }
             }
-            Err(e) => warn!("Ablegen in {} fehlgeschlagen: {e:#}", target.display()),
+            Err(e) => warn!("failed to drop into {}: {e:#}", target.display()),
         });
     }
 }
@@ -588,7 +588,7 @@ impl Receiver {
 /// Verschiebt die obersten Einträge aus dem Staging in den Zielordner; vorhandene Namen werden
 /// nicht überschrieben, sondern durchnummeriert („Bericht (2).pdf“).
 pub fn finish(source: &Path, target: &Path, entries: &[FileEntry]) -> Result<Vec<PathBuf>> {
-    fs::create_dir_all(target).with_context(|| format!("{} anlegen", target.display()))?;
+    fs::create_dir_all(target).with_context(|| format!("failed to create {}", target.display()))?;
     let mut tops: Vec<&str> = Vec::new();
     for entry in entries {
         let top = entry.path.split('/').next().unwrap_or_default();
@@ -619,7 +619,7 @@ fn unique_path(path: &Path) -> PathBuf {
     (2..)
         .map(|n| path.with_file_name(format!("{stem} ({n}){ext}")))
         .find(|p| !p.exists())
-        .expect("unendlich viele Kandidaten")
+        .expect("infinitely many candidates")
 }
 
 /// Umbenennen, bei anderem Laufwerk kopieren und löschen.

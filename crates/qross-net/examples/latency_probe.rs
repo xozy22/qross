@@ -133,8 +133,8 @@ fn main() -> Result<()> {
     let client_clip = SharedClipboard::default();
     let (client_tx, mut client_notices) = mpsc::unbounded_channel();
     let _client_rt = if separate {
-        println!("Server lauscht auf {addr}, Fingerprint {}", server_id.fingerprint());
-        println!("Client starten: qross --data-dir <Ordner> client {addr} --name {CLIENT} --dry-run");
+        println!("Server listening on {addr}, fingerprint {}", server_id.fingerprint());
+        println!("Start the client: qross --data-dir <folder> client {addr} --name {CLIENT} --dry-run");
         None
     } else {
         let client_rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -163,11 +163,11 @@ fn main() -> Result<()> {
             match notices.recv().await {
                 Some(ServerNotice::ClientConnected { name, .. }) if name == CLIENT => break,
                 Some(ServerNotice::ClientRejected { name, fingerprint, trust: TrustOutcome::Unknown, .. }) if name == CLIENT => {
-                    println!("„{CLIENT}“ freigegeben ({fingerprint}), er verbindet sich beim nächsten Versuch");
+                    println!("'{CLIENT}' approved ({fingerprint}); it connects on its next attempt");
                     TrustStore::load(&trust_file)?.trust(&name, &fingerprint)?;
                 }
                 Some(_) => {}
-                None => bail!("Server beendet"),
+                None => bail!("server stopped"),
             }
         }
         while !capture.0.lock().unwrap().contains(&CaptureCall::Remote) {
@@ -190,11 +190,11 @@ fn main() -> Result<()> {
             }
         }
         let what = match scenario {
-            Scenario::Files => format!("{FILES} kopierte Dateien zu {} KB über 50 Mbit/s", FILE_SIZE / 1024),
-            Scenario::Hang => format!("Leitung hängt nach {} s und {} s je 2 s", HANGS[0].0.as_secs(), HANGS[1].0.as_secs()),
+            Scenario::Files => format!("{FILES} copied files of {} KB over 50 Mbit/s", FILE_SIZE / 1024),
+            Scenario::Hang => format!("link hangs for 2 s each after {} s and {} s", HANGS[0].0.as_secs(), HANGS[1].0.as_secs()),
             _ => format!("{seconds} s"),
         };
-        println!("Cursor auf „{CLIENT}“, Bewegungen im Millisekundentakt, jede 20. mit Tastendruck; {what} …");
+        println!("Cursor on '{CLIENT}', a move every millisecond, every 20th with a key press; {what} …");
         let stop = Arc::new(AtomicBool::new(false));
         let hook = std::thread::spawn({
             let (events, stop) = (events.clone(), stop.clone());
@@ -218,13 +218,13 @@ fn main() -> Result<()> {
                 notice = notices.recv() => match notice {
                     Some(ServerNotice::Latency { summary, .. }) => last = Some(summary),
                     Some(ServerNotice::ClipboardFiles(FilesNotice::Sending { .. })) => sending = Some(Instant::now()),
-                    Some(ServerNotice::ClipboardFiles(FilesNotice::Failed { reason, .. })) => bail!("Übertragung fehlgeschlagen: {reason}"),
+                    Some(ServerNotice::ClipboardFiles(FilesNotice::Failed { reason, .. })) => bail!("transfer failed: {reason}"),
                     Some(_) => {}
-                    None => bail!("Server beendet"),
+                    None => bail!("server stopped"),
                 },
                 Some(notice) = client_notices.recv() => match notice {
                     ClientNotice::ClipboardFiles(FilesNotice::Ready { .. }) => ready = Some(Instant::now()),
-                    ClientNotice::ClipboardFiles(FilesNotice::Failed { reason, .. }) => bail!("Übertragung fehlgeschlagen: {reason}"),
+                    ClientNotice::ClipboardFiles(FilesNotice::Failed { reason, .. }) => bail!("transfer failed: {reason}"),
                     _ => {}
                 },
                 _ = print.tick() => {
@@ -242,7 +242,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        let sent = hook.join().expect("Hook-Thread");
+        let sent = hook.join().expect("hook thread panicked");
         let hangs = match hangs {
             Some(task) => task.await?,
             None => Vec::new(),
@@ -251,12 +251,12 @@ fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let summary = last.unwrap_or_default();
-        println!("\nErgebnis beim Server (µs, Median / 95 %):");
-        for (label, chain) in [("Maus", summary.mouse), ("Tasten", summary.keys)] {
+        println!("\nResult at the server (µs, median / 95%):");
+        for (label, chain) in [("Mouse", summary.mouse), ("Keys", summary.keys)] {
             let Some(chain) = chain else { continue };
             let spread = |s: Option<qross_proto::Spread>| s.map_or("–".to_owned(), |s| format!("{} / {}", s.p50_us, s.p95_us));
             println!(
-                "{label:7} gesamt {:>13}  Server {:>11}  Netz {:>11}  Client {:>11}  ({} Stichproben, {} mit Rückmeldung)",
+                "{label:7} total {:>13}  server {:>11}  network {:>11}  client {:>11}  ({} samples, {} reported back)",
                 spread(chain.total),
                 spread(Some(chain.server)),
                 spread(chain.network),
@@ -266,7 +266,7 @@ fn main() -> Result<()> {
             );
         }
         if let Some(us) = summary.uncertainty_us {
-            println!("Netz auf ± {us} µs genau (halbe Umlaufzeit des besten Austauschs)");
+            println!("Network accurate to ± {us} µs (half the round trip of the best exchange)");
         }
         if separate {
             return Ok(());
@@ -275,29 +275,29 @@ fn main() -> Result<()> {
         let injected = injected.0.lock().unwrap().clone();
         let mouse = mouse_latencies(&sent.moves, &injected);
         let keys = key_latencies(&sent.keys, &injected);
-        println!("\nVon Ende zu Ende, vom Hook bis eingespeist:");
+        println!("\nEnd to end, from the hook until injected:");
         header();
         // Bewegung 0 ist der Anfang der Bahn, kein Ereignis des Hooks
         let (moves, mouse) = (&sent.moves[1..], &mouse[1..]);
-        report("Maus", moves, mouse, |_| true);
-        report("Tasten", &sent.keys, &keys, |_| true);
+        report("Mouse", moves, mouse, |_| true);
+        report("Keys", &sent.keys, &keys, |_| true);
         if scenario == Scenario::Files {
-            let (Some(from), Some(to)) = (sending, ready) else { bail!("Die Übertragung wurde nicht fertig") };
+            let (Some(from), Some(to)) = (sending, ready) else { bail!("the transfer did not finish") };
             let during = |at: Instant| at >= from && at <= to;
             let bytes = (FILES * FILE_SIZE) as f64;
             let secs = (to - from).as_secs_f64();
             println!(
-                "\nÜbertragung: {:.0} MB in {} s ({} Mbit/s), {} s nach dem Wechsel begonnen",
+                "\nTransfer: {:.0} MB in {} s ({} Mbit/s), started {} s after the switch",
                 bytes / 1e6,
                 decimal(secs),
                 decimal(bytes * 8.0 / secs / 1e6),
                 decimal(from.saturating_duration_since(entered_at).as_secs_f64())
             );
             header();
-            report("Maus, währenddessen", moves, mouse, during);
-            report("Maus, sonst", moves, mouse, |at| !during(at));
-            report("Tasten, währenddessen", &sent.keys, &keys, during);
-            report("Tasten, sonst", &sent.keys, &keys, |at| !during(at));
+            report("Mouse, during transfer", moves, mouse, during);
+            report("Mouse, otherwise", moves, mouse, |at| !during(at));
+            report("Keys, during transfer", &sent.keys, &keys, during);
+            report("Keys, otherwise", &sent.keys, &keys, |at| !during(at));
             // Angekommene Dateien wieder wegräumen (sie liegen im Ablageordner der Zwischenablage)
             if let Some(dir) = client_clip.clone().files().first().and_then(|p| p.parent()) {
                 let _ = std::fs::remove_dir_all(dir);
@@ -306,8 +306,8 @@ fn main() -> Result<()> {
         for (i, (from, to)) in hangs.iter().enumerate() {
             let after = after_hang(&sent.moves, &injected, *to);
             println!(
-                "\nHänger {} ({} s): erste Bewegung {} ms danach, {} veraltete Positionen nachgespielt (über 100 ms alt, \
-                 die älteste {} ms), wieder aktuell nach {} ms",
+                "\nHang {} ({} s): first move {} ms after it, {} stale positions replayed (over 100 ms old, \
+                 the oldest {} ms), current again after {} ms",
                 i + 1,
                 decimal((*to - *from).as_secs_f64()),
                 after.first.map_or("–".into(), ms),
@@ -455,16 +455,16 @@ fn after_hang(sent: &[Instant], injected: &[(Instant, Inject)], end: Instant) ->
 }
 
 fn ms(d: Duration) -> String {
-    format!("{:.2}", d.as_secs_f64() * 1000.0).replace('.', ",")
+    format!("{:.2}", d.as_secs_f64() * 1000.0)
 }
 
-/// Eine Nachkommastelle, mit Komma
+/// Eine Nachkommastelle, mit Punkt
 fn decimal(value: f64) -> String {
-    format!("{value:.1}").replace('.', ",")
+    format!("{value:.1}")
 }
 
 fn header() {
-    println!("{:24} {:>8} {:>8} {:>8} {:>8} {:>7} {:>7} {:>5}", "ms", "p50", "p95", "p99", "max", ">50 ms", "Anzahl", "nie");
+    println!("{:24} {:>8} {:>8} {:>8} {:>8} {:>7} {:>7} {:>5}", "ms", "p50", "p95", "p99", "max", ">50 ms", "count", "never");
 }
 
 /// Median, 95. und 99. Perzentil, Maximum und Ruckler über 50 ms der Ereignisse, deren Versand `pick` wählt

@@ -40,15 +40,15 @@ mod imp {
     }
 
     pub fn start() -> super::Outcome {
-        super::Outcome::Unsupported("auf diesem System")
+        super::Outcome::Unsupported("on this system")
     }
 
     pub fn stop() -> super::Outcome {
-        super::Outcome::Unsupported("auf diesem System")
+        super::Outcome::Unsupported("on this system")
     }
 
     pub fn lock() -> super::Outcome {
-        super::Outcome::Unsupported("auf diesem System")
+        super::Outcome::Unsupported("on this system")
     }
 }
 
@@ -73,14 +73,14 @@ pub enum Outcome {
 impl fmt::Display for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Outcome::Started => f.write_str("gestartet"),
-            Outcome::Stopped => f.write_str("beendet"),
-            Outcome::Locked => f.write_str("Rechner gesperrt"),
-            Outcome::Unchanged => f.write_str("unverändert"),
-            Outcome::NotConfigured => f.write_str("hier ist keiner eingerichtet"),
-            Outcome::KeptAwake => f.write_str("ein Programm hält den Bildschirm wach"),
-            Outcome::Unsupported(why) => write!(f, "nicht möglich {why}"),
-            Outcome::Failed(e) => write!(f, "fehlgeschlagen: {e}"),
+            Outcome::Started => f.write_str("started"),
+            Outcome::Stopped => f.write_str("stopped"),
+            Outcome::Locked => f.write_str("computer locked"),
+            Outcome::Unchanged => f.write_str("unchanged"),
+            Outcome::NotConfigured => f.write_str("none configured here"),
+            Outcome::KeptAwake => f.write_str("a program is keeping the screen awake"),
+            Outcome::Unsupported(why) => write!(f, "not possible {why}"),
+            Outcome::Failed(e) => write!(f, "failed: {e}"),
         }
     }
 }
@@ -97,7 +97,7 @@ pub fn start(lock: bool) -> Outcome {
     if lock {
         match imp::lock() {
             Outcome::Locked => return Outcome::Locked,
-            other => tracing::warn!("Sperren nicht möglich ({other}) – starte nur den Bildschirmschoner"),
+            other => tracing::warn!("cannot lock the computer ({other}); starting only the screen saver"),
         }
     }
     imp::start()
@@ -114,11 +114,11 @@ pub fn stop() -> Outcome {
 /// Erfassung soll derweil weiterlaufen.
 pub fn stop_in_background() {
     let spawned = std::thread::Builder::new().name("qross-screensaver-stop".into()).spawn(|| match stop() {
-        Outcome::Failed(e) => tracing::debug!("Bildschirmschoner nicht beendet: {e}"),
-        outcome => tracing::debug!("Bildschirmschoner: {outcome}"),
+        Outcome::Failed(e) => tracing::debug!("failed to stop the screen saver: {e}"),
+        outcome => tracing::debug!("screen saver: {outcome}"),
     });
     if let Err(e) = spawned {
-        tracing::warn!("Bildschirmschoner nicht beendet: {e}");
+        tracing::warn!("failed to stop the screen saver: {e}");
     }
 }
 
@@ -208,8 +208,8 @@ mod tests {
 
     #[test]
     fn outcomes_read_well_in_the_log() {
-        assert_eq!(Outcome::NotConfigured.to_string(), "hier ist keiner eingerichtet");
-        assert_eq!(Outcome::Failed("x".into()).to_string(), "fehlgeschlagen: x");
-        assert_eq!(Outcome::Unsupported("in einer Remotedesktop-Sitzung").to_string(), "nicht möglich in einer Remotedesktop-Sitzung");
+        assert_eq!(Outcome::NotConfigured.to_string(), "none configured here");
+        assert_eq!(Outcome::Failed("x".into()).to_string(), "failed: x");
+        assert_eq!(Outcome::Unsupported("in a Remote Desktop session").to_string(), "not possible in a Remote Desktop session");
     }
 }

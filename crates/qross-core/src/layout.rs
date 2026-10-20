@@ -16,9 +16,9 @@ pub struct LinkConfig {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LayoutError {
-    #[error("„{0}“ kann nicht sein eigener Nachbar sein")]
+    #[error("'{0}' cannot be its own neighbor")]
     SelfLink(String),
-    #[error("Kante {edge:?} von „{screen}“ ist doppelt belegt („{first}“ und „{second}“)")]
+    #[error("edge {edge:?} of '{screen}' has two neighbors ('{first}' and '{second}')")]
     Conflict { screen: String, edge: Edge, first: String, second: String },
 }
 
@@ -104,13 +104,11 @@ mod tests {
 
     #[test]
     fn conflicts_and_self_links_are_rejected() {
-        assert!(matches!(
-            Layout::from_links(&[link("pc", Edge::Right, "a"), link("pc", Edge::Right, "b")]),
-            Err(LayoutError::Conflict { .. })
-        ));
-        assert_eq!(
-            Layout::from_links(&[link("pc", Edge::Top, "pc")]).unwrap_err(),
-            LayoutError::SelfLink("pc".into())
-        );
+        let conflict = Layout::from_links(&[link("pc", Edge::Right, "a"), link("pc", Edge::Right, "b")]).unwrap_err();
+        assert!(matches!(conflict, LayoutError::Conflict { .. }));
+        assert_eq!(conflict.to_string(), "edge Right of 'pc' has two neighbors ('a' and 'b')");
+        let own = Layout::from_links(&[link("pc", Edge::Top, "pc")]).unwrap_err();
+        assert_eq!(own, LayoutError::SelfLink("pc".into()));
+        assert_eq!(own.to_string(), "'pc' cannot be its own neighbor");
     }
 }

@@ -10,8 +10,9 @@ pub use qross_proto::CursorFinder;
 use qross_proto::FileEntry;
 
 use crate::client::Transition;
+use crate::lang::{ui_lang, Lang};
 use crate::server::Action;
-use crate::text::size_text;
+use crate::text::size_text_in;
 
 /// Was der Cursor-Finder auf diesem Rechner tun soll
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,13 +41,13 @@ pub fn on_client(transition: Transition, finder: CursorFinder) -> Option<Cue> {
     }
 }
 
-/// Fürs Log, z. B. „Ring und Name“
+/// Fürs Log, z. B. „ring and name“
 pub fn describe(finder: CursorFinder) -> &'static str {
     match (finder.ring, finder.name) {
-        (true, true) => "Ring und Name",
-        (true, false) => "nur Ring",
-        (false, true) => "nur Name",
-        (false, false) => "aus",
+        (true, true) => "ring and name",
+        (true, false) => "ring only",
+        (false, true) => "name only",
+        (false, false) => "off",
     }
 }
 
@@ -72,7 +73,13 @@ pub struct DragPreview {
 impl DragPreview {
     /// Aus den Einträgen einer Übertragung (`Input::DragStart`, `DragMessage::Offer`): Ordner
     /// stehen dort samt Inhalt, gezogen wurden die obersten Einträge. `None` ohne Einträge.
+    /// Texte in der Oberflächensprache des Prozesses ([`ui_lang`]).
     pub fn of(entries: &[FileEntry]) -> Option<Self> {
+        Self::of_in(entries, ui_lang())
+    }
+
+    /// Wie [`Self::of`], mit Texten in `lang`
+    pub fn of_in(entries: &[FileEntry], lang: Lang) -> Option<Self> {
         // Name und ob es ein Ordner ist, in der Reihenfolge der Einträge
         let mut tops: Vec<(&str, bool)> = Vec::new();
         for entry in entries {
@@ -92,15 +99,18 @@ impl DragPreview {
             [(name, false)] => (DragIcon::File, (*name).to_owned()),
             several => {
                 let folders = several.iter().filter(|(_, folder)| *folder).count();
-                let what = match folders {
-                    0 => "Dateien",
-                    n if n == several.len() => "Ordner",
-                    _ => "Elemente",
+                let what = match (folders, lang) {
+                    (0, Lang::De) => "Dateien",
+                    (0, Lang::En) => "files",
+                    (n, Lang::De) if n == several.len() => "Ordner",
+                    (n, Lang::En) if n == several.len() => "folders",
+                    (_, Lang::De) => "Elemente",
+                    (_, Lang::En) => "items",
                 };
                 (DragIcon::Several, format!("{} {what}", several.len()))
             }
         };
-        let size = size_text(entries.iter().map(|e| e.size).sum());
+        let size = size_text_in(entries.iter().map(|e| e.size).sum(), lang);
         Some(Self { icon, title, size })
     }
 }
@@ -184,9 +194,10 @@ mod tests {
             let (_, left) = c.on_input(Input::Leave);
             assert_eq!(on_client(left.unwrap(), BOTH), Some(Cue::Hide));
         }
-        assert_eq!(describe(BOTH), "Ring und Name");
-        assert_eq!(describe(NAME), "nur Name");
-        assert_eq!(describe(CursorFinder::OFF), "aus");
+        assert_eq!(describe(BOTH), "ring and name");
+        assert_eq!(describe(NAME), "name only");
+        assert_eq!(describe(CursorFinder { ring: true, name: false }), "ring only");
+        assert_eq!(describe(CursorFinder::OFF), "off");
     }
 
     fn file(path: &str, size: u64) -> FileEntry {
@@ -203,18 +214,41 @@ mod tests {
 
     #[test]
     fn the_drag_preview_names_what_was_picked_up() {
-        assert_eq!(DragPreview::of(&[file("Bericht.pdf", 3_141_592)]), preview(DragIcon::File, "Bericht.pdf", "3,1 MB"));
+        let of = |entries: &[FileEntry]| DragPreview::of_in(entries, Lang::De);
+        assert_eq!(of(&[file("Bericht.pdf", 3_141_592)]), preview(DragIcon::File, "Bericht.pdf", "3,1 MB"));
         // Ein Ordner kommt samt Inhalt; gezählt wird er einmal, seine Größe ist die seines Inhalts
         let project = [folder("Projekt"), folder("Projekt/sub"), file("Projekt/sub/notiz.txt", 600), file("Projekt/a.rs", 900)];
-        assert_eq!(DragPreview::of(&project), preview(DragIcon::Folder, "Projekt", "1,5 KB"));
-        assert_eq!(DragPreview::of(&[folder("leer")]), preview(DragIcon::Folder, "leer", "0 B"));
+        assert_eq!(of(&project), preview(DragIcon::Folder, "Projekt", "1,5 KB"));
+        assert_eq!(of(&[folder("leer")]), preview(DragIcon::Folder, "leer", "0 B"));
 
         let files = [file("a.jpg", 2_000_000), file("b.jpg", 2_000_000), file("c.jpg", 1_000_000)];
-        assert_eq!(DragPreview::of(&files), preview(DragIcon::Several, "3 Dateien", "5 MB"));
+        assert_eq!(of(&files), preview(DragIcon::Several, "3 Dateien", "5 MB"));
         let folders = [folder("x"), file("x/1", 10), folder("y")];
-        assert_eq!(DragPreview::of(&folders), preview(DragIcon::Several, "2 Ordner", "10 B"));
+        assert_eq!(of(&folders), preview(DragIcon::Several, "2 Ordner", "10 B"));
         let mixed = [file("Bericht.pdf", 1000), folder("Projekt"), file("Projekt/a.rs", 1000)];
-        assert_eq!(DragPreview::of(&mixed), preview(DragIcon::Several, "2 Elemente", "2 KB"));
-        assert_eq!(DragPreview::of(&[]), None);
+        assert_eq!(of(&mixed), preview(DragIcon::Several, "2 Elemente", "2 KB"));
+        assert_eq!(of(&[]), None);
+
+        let of = |entries: &[FileEntry]| DragPreview::of_in(entries, Lang::En);
+        assert_eq!(of(&[file("Bericht.pdf", 3_141_592)]), preview(DragIcon::File, "Bericht.pdf", "3.1 MB"));
+        assert_eq!(of(&project), preview(DragIcon::Folder, "Projekt", "1.5 KB"));
+        assert_eq!(of(&files), preview(DragIcon::Several, "3 files", "5 MB"));
+        assert_eq!(of(&folders), preview(DragIcon::Several, "2 folders", "10 B"));
+        assert_eq!(of(&mixed), preview(DragIcon::Several, "2 items", "2 KB"));
+        assert_eq!(of(&[]), None);
+    }
+
+    /// Der einzige Test, der die Oberflächensprache des Prozesses umstellt (die Tests laufen
+    /// parallel); alle anderen wählen die Sprache ausdrücklich.
+    #[test]
+    fn the_drag_preview_follows_the_ui_language() {
+        let files = [file("a.jpg", 2_000_000), file("b.jpg", 1_100_000)];
+        assert_eq!(crate::lang::ui_lang(), Lang::En, "Vorgabe, etwa für die Kommandozeile");
+        assert_eq!(DragPreview::of(&files), preview(DragIcon::Several, "2 files", "3.1 MB"));
+        crate::lang::set_ui_lang(Lang::De);
+        assert_eq!(crate::lang::ui_lang(), Lang::De);
+        assert_eq!(DragPreview::of(&files), preview(DragIcon::Several, "2 Dateien", "3,1 MB"));
+        crate::lang::set_ui_lang(Lang::En);
+        assert_eq!(DragPreview::of(&files), preview(DragIcon::Several, "2 files", "3.1 MB"));
     }
 }

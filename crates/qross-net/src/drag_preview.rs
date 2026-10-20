@@ -29,7 +29,7 @@ impl DragView {
     pub(crate) fn show(&mut self, transfer: u64, receiver: &Receiver) {
         let Some(overlay) = &self.overlay else { return };
         let Some(preview) = receiver.awaiting_drop(transfer).and_then(DragPreview::of) else { return };
-        debug!("Drag-Vorschau für Übertragung {transfer}: {} ({})", preview.title, preview.size);
+        debug!("drag preview for transfer {transfer}: {} ({})", preview.title, preview.size);
         overlay.show_drag(&preview);
         self.showing = Some(transfer);
     }
@@ -44,7 +44,7 @@ impl DragView {
     /// abzulegen, und die Vorschau verschwindet.
     pub(crate) fn check(&mut self, receiver: &Receiver) {
         if self.showing.is_some_and(|transfer| receiver.awaiting_drop(transfer).is_none()) {
-            debug!("Drag-Vorschau ausgeblendet: Übertragung abgebrochen");
+            debug!("drag preview hidden: transfer cancelled");
             self.hide();
         }
     }

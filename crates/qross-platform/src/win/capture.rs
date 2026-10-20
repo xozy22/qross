@@ -269,7 +269,7 @@ fn start(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<WinCapture> {
         settle: Settle::new(),
     };
     if SHARED.set(shared).is_err() {
-        bail!("die Eingabe-Erfassung läuft in diesem Prozess bereits");
+        bail!("input capture is already running in this process");
     }
     // Falls ein früherer Lauf im Remote-Modus abgestürzt ist
     cursor::restore();
@@ -282,16 +282,16 @@ fn start(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<WinCapture> {
         .spawn(move || unsafe { run_hook_thread(queue, forwarder, ready_tx) })?;
     let thread_id = ready_rx
         .recv()
-        .context("Hook-Thread hat sich unerwartet beendet")?
-        .map_err(|code| anyhow!("SetWindowsHookExW fehlgeschlagen (Fehlercode {code})"))?;
+        .context("hook thread exited unexpectedly")?
+        .map_err(|code| anyhow!("SetWindowsHookExW failed (error code {code})"))?;
     let rehook = move || unsafe {
         PostThreadMessageW(thread_id, WM_REHOOK, 0, 0);
     };
     if let Err(e) = watchdog::spawn(hook_calls, &HOOKS_RUNNING, rehook) {
-        tracing::warn!("Wächter für die Eingabe-Hooks läuft nicht: {e}");
+        tracing::warn!("watchdog for the input hooks is not running: {e}");
     }
     if let Err(e) = dnd::start() {
-        tracing::warn!("{e:#} – Dateien lassen sich nicht über die Kante ziehen");
+        tracing::warn!("{e:#}; files cannot be dragged across the edge");
     }
     Ok(WinCapture { thread_id })
 }
@@ -400,7 +400,7 @@ impl Hooks {
             Err(code) => {
                 *self = Hooks { mouse: null_mut(), keyboard: null_mut() };
                 // Ohne Hooks wartet hier nichts auf das Log; der Wächter versucht es wieder.
-                tracing::error!("Eingabe-Hooks lassen sich nicht neu setzen (Fehlercode {code})");
+                tracing::error!("cannot reinstall the input hooks (error code {code})");
             }
         }
     }
@@ -418,7 +418,7 @@ impl Hooks {
                 *self = hooks;
             }
             // Die bisherigen bleiben; nur der Vorrang fehlt.
-            Err(code) => tracing::debug!("Eingabe-Hooks nicht nach vorn gesetzt (Fehlercode {code})"),
+            Err(code) => tracing::debug!("input hooks not moved to the front (error code {code})"),
         }
     }
 }
@@ -501,12 +501,12 @@ fn forward(mut queue: Consumer<FromHook>, events: UnboundedSender<CaptureEvent>)
                     let _ = events.send(event);
                 }
                 FromHook::RestoreCursor => cursor::restore(),
-                FromHook::Unmapped { vk, scan } => tracing::debug!(vk, scan, "Taste ohne Zuordnung"),
+                FromHook::Unmapped { vk, scan } => tracing::debug!(vk, scan, "key without a mapping"),
             }
         }
         let dropped = DROPPED.swap(0, Ordering::Relaxed);
         if dropped > 0 {
-            tracing::warn!("{dropped} Eingaben verworfen: Der Server-Kern kam nicht hinterher");
+            tracing::warn!("dropped {dropped} input events: the server core could not keep up");
         }
         if closed {
             return;

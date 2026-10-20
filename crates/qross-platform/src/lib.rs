@@ -135,7 +135,7 @@ pub trait Injector: Send {
     /// `lock` beim Beginn stattdessen sperren (siehe [`screensaver::follow`]).
     fn screen_saver(&mut self, active: bool, lock: bool) -> screensaver::Outcome {
         let _ = (active, lock);
-        screensaver::Outcome::Unsupported("diese Einspeisung kann es nicht")
+        screensaver::Outcome::Unsupported("with this injector")
     }
 }
 
@@ -163,7 +163,7 @@ pub trait Clipboard: Send {
     /// das System beides zugleich erlaubt (Windows: ja; über `arboard` gewinnen die Dateien).
     fn write_files(&mut self, files: &[PathBuf], data: &ClipboardData) -> anyhow::Result<()> {
         let _ = (files, data);
-        anyhow::bail!("Dateien in der Zwischenablage werden auf diesem System nicht unterstützt")
+        anyhow::bail!("files on the clipboard are not supported on this system")
     }
 
     /// Kann dieses System kopierte Dateien einfügen, deren Inhalte erst beim Einfügen kommen
@@ -178,7 +178,7 @@ pub trait Clipboard: Send {
     /// sie einfügt (Windows: virtuelle Dateien), und dazu die Darstellungen aus `data`.
     fn write_virtual_files(&mut self, files: VirtualFiles, data: &ClipboardData) -> anyhow::Result<()> {
         let _ = (files, data);
-        anyhow::bail!("Dateien auf Abruf werden auf diesem System nicht unterstützt")
+        anyhow::bail!("paste on demand is not supported on this system")
     }
 
     fn text(&mut self) -> Option<String> {
@@ -301,7 +301,7 @@ impl std::fmt::Display for PortalProblem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PortalProblem::Missing(what) => f.write_str(what),
-            PortalProblem::Denied => f.write_str("Freigabe abgelehnt"),
+            PortalProblem::Denied => f.write_str("permission denied"),
             PortalProblem::Failed(error) => f.write_str(error),
         }
     }

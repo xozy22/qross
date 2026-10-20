@@ -79,7 +79,7 @@ pub fn running() -> bool {
             CFRunLoopRun();
         });
         if let Err(e) = spawned {
-            tracing::warn!("Bildschirmschoner: Beobachter nicht gestartet: {e}");
+            tracing::warn!("screen saver: failed to start the observer: {e}");
         }
     });
     RUNNING.load(Ordering::Relaxed)
@@ -176,16 +176,16 @@ pub fn lock() -> Outcome {
     let framework = c"/System/Library/PrivateFrameworks/login.framework/Versions/Current/login";
     let handle = unsafe { dlopen(framework.as_ptr(), RTLD_LAZY) };
     if handle.is_null() {
-        return Outcome::Unsupported("ohne login.framework");
+        return Outcome::Unsupported("without login.framework");
     }
     let symbol = unsafe { dlsym(handle, c"SACLockScreenImmediate".as_ptr()) };
     if symbol.is_null() {
-        return Outcome::Unsupported("ohne SACLockScreenImmediate");
+        return Outcome::Unsupported("without SACLockScreenImmediate");
     }
     // SAFETY: `int SACLockScreenImmediate(void)` aus login.framework
     let lock_now: extern "C" fn() -> c_int = unsafe { std::mem::transmute(symbol) };
     match lock_now() {
         0 => Outcome::Locked,
-        code => Outcome::Failed(format!("Fehlercode {code}")),
+        code => Outcome::Failed(format!("error code {code}")),
     }
 }

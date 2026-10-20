@@ -22,11 +22,11 @@ pub fn game_state() -> GameState {
 }
 
 pub fn start_capture(_events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Arc<dyn Capture>> {
-    bail!("Eingabe-Erfassung ist auf dieser Plattform noch nicht implementiert")
+    bail!("input capture is not implemented on this platform yet")
 }
 
 pub fn injector() -> anyhow::Result<Box<dyn Injector>> {
-    bail!("Eingabe-Einspeisung ist auf dieser Plattform noch nicht implementiert (Tipp: --dry-run)")
+    bail!("input injection is not implemented on this platform yet (hint: --dry-run)")
 }
 
 pub fn clipboard() -> Box<dyn Clipboard> {

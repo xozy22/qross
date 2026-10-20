@@ -62,7 +62,7 @@ static ROOT_PORT: AtomicU32 = AtomicU32::new(0);
 
 pub fn start() {
     if let Err(e) = std::thread::Builder::new().name("qross-sysevents".into()).spawn(run) {
-        warn!("Systemereignisse werden nicht beobachtet: {e}");
+        warn!("not watching system events: {e}");
     }
 }
 
@@ -73,7 +73,7 @@ fn run() {
     let mut notifier: IoPort = 0;
     let root = unsafe { IORegisterForSystemPower(null_mut(), &mut port, on_power, &mut notifier) };
     if root == 0 {
-        warn!("Ruhezustand wird nicht beobachtet (IORegisterForSystemPower)");
+        warn!("not watching for sleep (IORegisterForSystemPower)");
     } else {
         ROOT_PORT.store(root, Ordering::Release);
         unsafe { CFRunLoopAddSource(run_loop, IONotificationPortGetRunLoopSource(port), kCFRunLoopDefaultMode) };
@@ -83,7 +83,7 @@ fn run() {
     let name = CFString::new("Qross");
     let store = unsafe { SCDynamicStoreCreate(kCFAllocatorDefault, name.as_concrete_TypeRef(), Some(on_network), null_mut()) };
     if store.is_null() {
-        warn!("Netzwerk wird nicht beobachtet (SCDynamicStoreCreate)");
+        warn!("not watching the network (SCDynamicStoreCreate)");
     } else {
         // Standardroute und Adressen jeder Schnittstelle (WLAN gewechselt, Kabel, VPN)
         let keys = CFArray::from_CFTypes(&[CFString::new("State:/Network/Global/IPv4"), CFString::new("State:/Network/Global/IPv6")]);
@@ -95,7 +95,7 @@ fn run() {
             unsafe { SCDynamicStoreSetNotificationKeys(store, keys.as_concrete_TypeRef(), patterns.as_concrete_TypeRef()) };
         let source = unsafe { SCDynamicStoreCreateRunLoopSource(kCFAllocatorDefault, store, 0) };
         if watched == 0 || source.is_null() {
-            warn!("Netzwerk wird nicht beobachtet (SCDynamicStore)");
+            warn!("not watching the network (SCDynamicStore)");
         } else {
             unsafe { CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode) };
             ready(false);

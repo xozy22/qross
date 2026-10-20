@@ -24,18 +24,18 @@ pub fn watch(detect: Detector) -> watch::Receiver<GameState> {
         }
     });
     if let Err(e) = spawned {
-        warn!("Spielemodus: Abfrage nicht gestartet: {e}");
+        warn!("game mode: failed to start polling: {e}");
     }
     rx
 }
 
-/// Fürs Log, z. B. „Vollbildprogramm“
+/// Fürs Log, z. B. „fullscreen program“
 pub fn describe(game: GameState) -> &'static str {
     match (game.fullscreen, game.captured) {
-        (true, true) => "Vollbildprogramm mit eingefangenem Zeiger",
-        (true, false) => "Vollbildprogramm",
-        (false, true) => "Programm mit eingefangenem Zeiger",
-        (false, false) => "nichts im Vollbild",
+        (true, true) => "fullscreen program with captured pointer",
+        (true, false) => "fullscreen program",
+        (false, true) => "program with captured pointer",
+        (false, false) => "nothing in fullscreen",
     }
 }
 

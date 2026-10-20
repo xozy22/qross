@@ -12,71 +12,111 @@ use qross_proto::{Edge, KeyCode};
 use serde::{Deserialize, Serialize};
 
 use crate::input::CaptureEvent;
+use crate::lang::Lang;
 
-/// Name (`KeyboardEvent.code`) und deutsche Beschriftung je Taste
+/// Eine Taste in [`NAMES`]: HID-Code, Name, deutsche und englische Beschriftung
+type KeyEntry = (u16, &'static str, &'static str, &'static str);
+
+/// Name (`KeyboardEvent.code`), deutsche und englische Beschriftung je Taste
 #[rustfmt::skip]
-const NAMES: &[(u16, &str, &str)] = &[
-    (0x04, "KeyA", "A"), (0x05, "KeyB", "B"), (0x06, "KeyC", "C"), (0x07, "KeyD", "D"), (0x08, "KeyE", "E"),
-    (0x09, "KeyF", "F"), (0x0A, "KeyG", "G"), (0x0B, "KeyH", "H"), (0x0C, "KeyI", "I"), (0x0D, "KeyJ", "J"),
-    (0x0E, "KeyK", "K"), (0x0F, "KeyL", "L"), (0x10, "KeyM", "M"), (0x11, "KeyN", "N"), (0x12, "KeyO", "O"),
-    (0x13, "KeyP", "P"), (0x14, "KeyQ", "Q"), (0x15, "KeyR", "R"), (0x16, "KeyS", "S"), (0x17, "KeyT", "T"),
-    (0x18, "KeyU", "U"), (0x19, "KeyV", "V"), (0x1A, "KeyW", "W"), (0x1B, "KeyX", "X"), (0x1C, "KeyY", "Z (DE) / Y"),
-    (0x1D, "KeyZ", "Y (DE) / Z"),
-    (0x1E, "Digit1", "1"), (0x1F, "Digit2", "2"), (0x20, "Digit3", "3"), (0x21, "Digit4", "4"), (0x22, "Digit5", "5"),
-    (0x23, "Digit6", "6"), (0x24, "Digit7", "7"), (0x25, "Digit8", "8"), (0x26, "Digit9", "9"), (0x27, "Digit0", "0"),
-    (0x28, "Enter", "Eingabe"), (0x29, "Escape", "Esc"), (0x2A, "Backspace", "Rücktaste"), (0x2B, "Tab", "Tab"),
-    (0x2C, "Space", "Leertaste"), (0x2D, "Minus", "ß (DE) / -"), (0x2E, "Equal", "´ (DE) / ="),
-    (0x2F, "BracketLeft", "Ü (DE) / ["), (0x30, "BracketRight", "+ (DE) / ]"), (0x31, "Backslash", "\\"),
-    (0x32, "IntlHash", "# (DE)"), (0x33, "Semicolon", "Ö (DE) / ;"), (0x34, "Quote", "Ä (DE) / '"),
-    (0x35, "Backquote", "^ (DE) / `"), (0x36, "Comma", ","), (0x37, "Period", "."), (0x38, "Slash", "- (DE) / /"),
-    (0x39, "CapsLock", "Feststelltaste"),
-    (0x3A, "F1", "F1"), (0x3B, "F2", "F2"), (0x3C, "F3", "F3"), (0x3D, "F4", "F4"), (0x3E, "F5", "F5"),
-    (0x3F, "F6", "F6"), (0x40, "F7", "F7"), (0x41, "F8", "F8"), (0x42, "F9", "F9"), (0x43, "F10", "F10"),
-    (0x44, "F11", "F11"), (0x45, "F12", "F12"),
-    (0x46, "PrintScreen", "Druck"), (0x47, "ScrollLock", "Rollen"), (0x48, "Pause", "Pause"),
-    (0x49, "Insert", "Einfg"), (0x4A, "Home", "Pos1"), (0x4B, "PageUp", "Bild auf"), (0x4C, "Delete", "Entf"),
-    (0x4D, "End", "Ende"), (0x4E, "PageDown", "Bild ab"), (0x4F, "ArrowRight", "Pfeil rechts"),
-    (0x50, "ArrowLeft", "Pfeil links"), (0x51, "ArrowDown", "Pfeil runter"), (0x52, "ArrowUp", "Pfeil hoch"),
-    (0x53, "NumLock", "Num"), (0x54, "NumpadDivide", "Num /"), (0x55, "NumpadMultiply", "Num *"),
-    (0x56, "NumpadSubtract", "Num -"), (0x57, "NumpadAdd", "Num +"), (0x58, "NumpadEnter", "Num Eingabe"),
-    (0x59, "Numpad1", "Num 1"), (0x5A, "Numpad2", "Num 2"), (0x5B, "Numpad3", "Num 3"), (0x5C, "Numpad4", "Num 4"),
-    (0x5D, "Numpad5", "Num 5"), (0x5E, "Numpad6", "Num 6"), (0x5F, "Numpad7", "Num 7"), (0x60, "Numpad8", "Num 8"),
-    (0x61, "Numpad9", "Num 9"), (0x62, "Numpad0", "Num 0"), (0x63, "NumpadDecimal", "Num ,"),
-    (0x64, "IntlBackslash", "< (DE)"), (0x65, "ContextMenu", "Kontextmenü"), (0x67, "NumpadEqual", "Num ="),
-    (0x68, "F13", "F13"), (0x69, "F14", "F14"), (0x6A, "F15", "F15"), (0x6B, "F16", "F16"), (0x6C, "F17", "F17"),
-    (0x6D, "F18", "F18"), (0x6E, "F19", "F19"), (0x6F, "F20", "F20"), (0x70, "F21", "F21"), (0x71, "F22", "F22"),
-    (0x72, "F23", "F23"), (0x73, "F24", "F24"),
-    (0x7F, "AudioVolumeMute", "Stumm"), (0x80, "AudioVolumeUp", "Lauter"), (0x81, "AudioVolumeDown", "Leiser"),
-    (0xE0, "ControlLeft", "Strg links"), (0xE1, "ShiftLeft", "Umschalt links"), (0xE2, "AltLeft", "Alt links"),
-    (0xE3, "MetaLeft", "Windows/Cmd links"), (0xE4, "ControlRight", "Strg rechts"),
-    (0xE5, "ShiftRight", "Umschalt rechts"), (0xE6, "AltRight", "Alt Gr / Alt rechts"),
-    (0xE7, "MetaRight", "Windows/Cmd rechts"),
-    (KeyCode::MEDIA_PLAY_PAUSE.0, "MediaPlayPause", "Wiedergabe/Pause"),
-    (KeyCode::MEDIA_STOP.0, "MediaStop", "Stopp"),
-    (KeyCode::MEDIA_NEXT.0, "MediaTrackNext", "Nächster Titel"),
-    (KeyCode::MEDIA_PREVIOUS.0, "MediaTrackPrevious", "Vorheriger Titel"),
+const NAMES: &[KeyEntry] = &[
+    (0x04, "KeyA", "A", "A"), (0x05, "KeyB", "B", "B"), (0x06, "KeyC", "C", "C"), (0x07, "KeyD", "D", "D"),
+    (0x08, "KeyE", "E", "E"), (0x09, "KeyF", "F", "F"), (0x0A, "KeyG", "G", "G"), (0x0B, "KeyH", "H", "H"),
+    (0x0C, "KeyI", "I", "I"), (0x0D, "KeyJ", "J", "J"), (0x0E, "KeyK", "K", "K"), (0x0F, "KeyL", "L", "L"),
+    (0x10, "KeyM", "M", "M"), (0x11, "KeyN", "N", "N"), (0x12, "KeyO", "O", "O"), (0x13, "KeyP", "P", "P"),
+    (0x14, "KeyQ", "Q", "Q"), (0x15, "KeyR", "R", "R"), (0x16, "KeyS", "S", "S"), (0x17, "KeyT", "T", "T"),
+    (0x18, "KeyU", "U", "U"), (0x19, "KeyV", "V", "V"), (0x1A, "KeyW", "W", "W"), (0x1B, "KeyX", "X", "X"),
+    (0x1C, "KeyY", "Z (DE) / Y", "Y / Z (DE)"), (0x1D, "KeyZ", "Y (DE) / Z", "Z / Y (DE)"),
+    (0x1E, "Digit1", "1", "1"), (0x1F, "Digit2", "2", "2"), (0x20, "Digit3", "3", "3"), (0x21, "Digit4", "4", "4"),
+    (0x22, "Digit5", "5", "5"), (0x23, "Digit6", "6", "6"), (0x24, "Digit7", "7", "7"), (0x25, "Digit8", "8", "8"),
+    (0x26, "Digit9", "9", "9"), (0x27, "Digit0", "0", "0"),
+    (0x28, "Enter", "Eingabe", "Enter"), (0x29, "Escape", "Esc", "Esc"), (0x2A, "Backspace", "Rücktaste", "Backspace"),
+    (0x2B, "Tab", "Tab", "Tab"), (0x2C, "Space", "Leertaste", "Space"),
+    (0x2D, "Minus", "ß (DE) / -", "- / ß (DE)"), (0x2E, "Equal", "´ (DE) / =", "= / ´ (DE)"),
+    (0x2F, "BracketLeft", "Ü (DE) / [", "[ / Ü (DE)"), (0x30, "BracketRight", "+ (DE) / ]", "] / + (DE)"),
+    (0x31, "Backslash", "\\", "\\"), (0x32, "IntlHash", "# (DE)", "# (DE)"),
+    (0x33, "Semicolon", "Ö (DE) / ;", "; / Ö (DE)"), (0x34, "Quote", "Ä (DE) / '", "' / Ä (DE)"),
+    (0x35, "Backquote", "^ (DE) / `", "` / ^ (DE)"), (0x36, "Comma", ",", ","), (0x37, "Period", ".", "."),
+    (0x38, "Slash", "- (DE) / /", "/ / - (DE)"),
+    (0x39, "CapsLock", "Feststelltaste", "Caps Lock"),
+    (0x3A, "F1", "F1", "F1"), (0x3B, "F2", "F2", "F2"), (0x3C, "F3", "F3", "F3"), (0x3D, "F4", "F4", "F4"),
+    (0x3E, "F5", "F5", "F5"), (0x3F, "F6", "F6", "F6"), (0x40, "F7", "F7", "F7"), (0x41, "F8", "F8", "F8"),
+    (0x42, "F9", "F9", "F9"), (0x43, "F10", "F10", "F10"), (0x44, "F11", "F11", "F11"), (0x45, "F12", "F12", "F12"),
+    (0x46, "PrintScreen", "Druck", "Print Screen"), (0x47, "ScrollLock", "Rollen", "Scroll Lock"),
+    (0x48, "Pause", "Pause", "Pause"),
+    (0x49, "Insert", "Einfg", "Insert"), (0x4A, "Home", "Pos1", "Home"), (0x4B, "PageUp", "Bild auf", "Page Up"),
+    (0x4C, "Delete", "Entf", "Delete"), (0x4D, "End", "Ende", "End"), (0x4E, "PageDown", "Bild ab", "Page Down"),
+    (0x4F, "ArrowRight", "Pfeil rechts", "Right Arrow"), (0x50, "ArrowLeft", "Pfeil links", "Left Arrow"),
+    (0x51, "ArrowDown", "Pfeil runter", "Down Arrow"), (0x52, "ArrowUp", "Pfeil hoch", "Up Arrow"),
+    (0x53, "NumLock", "Num", "Num Lock"), (0x54, "NumpadDivide", "Num /", "Num /"),
+    (0x55, "NumpadMultiply", "Num *", "Num *"), (0x56, "NumpadSubtract", "Num -", "Num -"),
+    (0x57, "NumpadAdd", "Num +", "Num +"), (0x58, "NumpadEnter", "Num Eingabe", "Num Enter"),
+    (0x59, "Numpad1", "Num 1", "Num 1"), (0x5A, "Numpad2", "Num 2", "Num 2"), (0x5B, "Numpad3", "Num 3", "Num 3"),
+    (0x5C, "Numpad4", "Num 4", "Num 4"), (0x5D, "Numpad5", "Num 5", "Num 5"), (0x5E, "Numpad6", "Num 6", "Num 6"),
+    (0x5F, "Numpad7", "Num 7", "Num 7"), (0x60, "Numpad8", "Num 8", "Num 8"), (0x61, "Numpad9", "Num 9", "Num 9"),
+    (0x62, "Numpad0", "Num 0", "Num 0"), (0x63, "NumpadDecimal", "Num ,", "Num ."),
+    (0x64, "IntlBackslash", "< (DE)", "< (DE)"), (0x65, "ContextMenu", "Kontextmenü", "Context Menu"),
+    (0x67, "NumpadEqual", "Num =", "Num ="),
+    (0x68, "F13", "F13", "F13"), (0x69, "F14", "F14", "F14"), (0x6A, "F15", "F15", "F15"), (0x6B, "F16", "F16", "F16"),
+    (0x6C, "F17", "F17", "F17"), (0x6D, "F18", "F18", "F18"), (0x6E, "F19", "F19", "F19"), (0x6F, "F20", "F20", "F20"),
+    (0x70, "F21", "F21", "F21"), (0x71, "F22", "F22", "F22"), (0x72, "F23", "F23", "F23"), (0x73, "F24", "F24", "F24"),
+    (0x7F, "AudioVolumeMute", "Stumm", "Mute"), (0x80, "AudioVolumeUp", "Lauter", "Volume Up"),
+    (0x81, "AudioVolumeDown", "Leiser", "Volume Down"),
+    (0xE0, "ControlLeft", "Strg links", "Left Ctrl"), (0xE1, "ShiftLeft", "Umschalt links", "Left Shift"),
+    (0xE2, "AltLeft", "Alt links", "Left Alt"), (0xE3, "MetaLeft", "Windows/Cmd links", "Left Windows/Cmd"),
+    (0xE4, "ControlRight", "Strg rechts", "Right Ctrl"), (0xE5, "ShiftRight", "Umschalt rechts", "Right Shift"),
+    (0xE6, "AltRight", "Alt Gr / Alt rechts", "Right Alt / Alt Gr"),
+    (0xE7, "MetaRight", "Windows/Cmd rechts", "Right Windows/Cmd"),
+    (KeyCode::MEDIA_PLAY_PAUSE.0, "MediaPlayPause", "Wiedergabe/Pause", "Play/Pause"),
+    (KeyCode::MEDIA_STOP.0, "MediaStop", "Stopp", "Stop"),
+    (KeyCode::MEDIA_NEXT.0, "MediaTrackNext", "Nächster Titel", "Next Track"),
+    (KeyCode::MEDIA_PREVIOUS.0, "MediaTrackPrevious", "Vorheriger Titel", "Previous Track"),
 ];
+
+fn entry(key: KeyCode) -> Option<&'static KeyEntry> {
+    NAMES.iter().find(|(code, ..)| *code == key.0)
+}
+
+/// Beschriftung eines Eintrags in `lang`
+fn entry_label(&(_, _, de, en): &KeyEntry, lang: Lang) -> &'static str {
+    match lang {
+        Lang::De => de,
+        Lang::En => en,
+    }
+}
 
 /// Name nach `KeyboardEvent.code`, z. B. „ScrollLock“
 pub fn key_name(key: KeyCode) -> Option<&'static str> {
-    NAMES.iter().find(|(code, ..)| *code == key.0).map(|&(_, name, _)| name)
+    entry(key).map(|&(_, name, ..)| name)
 }
 
 pub fn key_from_name(name: &str) -> Option<KeyCode> {
-    NAMES.iter().find(|(_, n, _)| n.eq_ignore_ascii_case(name)).map(|&(code, ..)| KeyCode(code))
+    NAMES.iter().find(|(_, n, ..)| n.eq_ignore_ascii_case(name)).map(|&(code, ..)| KeyCode(code))
 }
 
-/// Beschriftung für die Oberfläche, z. B. „Rollen“ oder „Strg links“
+/// Englische Beschriftung fürs Log, z. B. „Scroll Lock“ oder „Left Ctrl“
 pub fn key_label(key: KeyCode) -> String {
-    NAMES
-        .iter()
-        .find(|(code, ..)| *code == key.0)
-        .map_or_else(|| format!("Taste {:#06x}", key.0), |&(.., label)| label.to_owned())
+    key_label_in(key, Lang::En)
 }
 
-/// Alle benennbaren Tasten: (Taste, Name, Beschriftung)
+/// Beschriftung für die Oberfläche, z. B. „Rollen“ oder „Strg links“ (englisch „Scroll Lock“,
+/// „Left Ctrl“)
+pub fn key_label_in(key: KeyCode, lang: Lang) -> String {
+    match (entry(key), lang) {
+        (Some(entry), _) => entry_label(entry, lang).to_owned(),
+        (None, Lang::De) => format!("Taste {:#06x}", key.0),
+        (None, Lang::En) => format!("Key {:#06x}", key.0),
+    }
+}
+
+/// Alle benennbaren Tasten: (Taste, Name, englische Beschriftung)
 pub fn all_keys() -> impl Iterator<Item = (KeyCode, &'static str, &'static str)> {
-    NAMES.iter().map(|&(code, name, label)| (KeyCode(code), name, label))
+    all_keys_in(Lang::En)
+}
+
+/// Alle benennbaren Tasten: (Taste, Name, Beschriftung in `lang`)
+pub fn all_keys_in(lang: Lang) -> impl Iterator<Item = (KeyCode, &'static str, &'static str)> {
+    NAMES.iter().map(move |entry| (KeyCode(entry.0), entry.1, entry_label(entry, lang)))
 }
 
 /// Gedrückte Zusatztasten einer Kombination (links und rechts gelten gleich)
@@ -132,16 +172,26 @@ impl Hotkey {
         self.mods.is_empty() && Mods::slot(self.key).is_some()
     }
 
-    /// Für die Oberfläche, z. B. „Strg+Alt+L“
+    /// Englisch fürs Log, z. B. „Ctrl+Alt+L“
     pub fn label(&self, mac: bool) -> String {
+        self.label_in(mac, Lang::En)
+    }
+
+    /// Für die Oberfläche, z. B. „Strg+Alt+L“ (englisch „Ctrl+Alt+L“)
+    pub fn label_in(&self, mac: bool, lang: Lang) -> String {
         let mut parts: Vec<String> = Vec::new();
-        let names = if mac { ["Ctrl", "Umschalt", "Option", "Cmd"] } else { ["Strg", "Umschalt", "Alt", "Windows"] };
+        let names = match (lang, mac) {
+            (Lang::De, false) => ["Strg", "Umschalt", "Alt", "Windows"],
+            (Lang::De, true) => ["Ctrl", "Umschalt", "Option", "Cmd"],
+            (Lang::En, false) => ["Ctrl", "Shift", "Alt", "Windows"],
+            (Lang::En, true) => ["Ctrl", "Shift", "Option", "Cmd"],
+        };
         for (on, name) in [self.mods.ctrl, self.mods.shift, self.mods.alt, self.mods.meta].into_iter().zip(names) {
             if on {
                 parts.push(name.to_owned());
             }
         }
-        parts.push(key_label(self.key));
+        parts.push(key_label_in(self.key, lang));
         parts.join("+")
     }
 }
@@ -166,18 +216,18 @@ impl FromStr for Hotkey {
     fn from_str(text: &str) -> Result<Self, String> {
         let mut mods = Mods::default();
         let mut parts: Vec<&str> = text.split('+').map(str::trim).collect();
-        let key = parts.pop().filter(|k| !k.is_empty()).ok_or_else(|| format!("„{text}“: Taste fehlt"))?;
+        let key = parts.pop().filter(|k| !k.is_empty()).ok_or_else(|| format!("'{text}': missing key"))?;
         for part in parts {
             let slot = match part.to_ascii_lowercase().as_str() {
                 "ctrl" | "control" | "strg" => &mut mods.ctrl,
                 "shift" | "umschalt" => &mut mods.shift,
                 "alt" | "option" => &mut mods.alt,
                 "meta" | "cmd" | "win" | "super" => &mut mods.meta,
-                _ => return Err(format!("„{part}“ ist keine Zusatztaste (Ctrl, Shift, Alt, Meta)")),
+                _ => return Err(format!("'{part}' is not a modifier key (Ctrl, Shift, Alt, Meta)")),
             };
             *slot = true;
         }
-        let key = key_from_name(key).ok_or_else(|| format!("unbekannte Taste „{key}“"))?;
+        let key = key_from_name(key).ok_or_else(|| format!("unknown key '{key}'"))?;
         Ok(Self { mods, key })
     }
 }
@@ -209,15 +259,22 @@ const DIRECTIONS: [(Edge, &str, &str); 4] =
     [(Edge::Left, "left", "links"), (Edge::Right, "right", "rechts"), (Edge::Top, "up", "oben"), (Edge::Bottom, "down", "unten")];
 
 fn direction(edge: Edge) -> (&'static str, &'static str) {
-    DIRECTIONS.iter().find(|(e, ..)| *e == edge).map(|&(_, name, label)| (name, label)).expect("alle Richtungen")
+    DIRECTIONS.iter().find(|(e, ..)| *e == edge).map(|&(_, name, label)| (name, label)).expect("every direction is listed")
 }
 
 impl SwitchTarget {
-    /// Für Log und Oberfläche, z. B. „nach links“ oder „zu „laptop““
+    /// Englisch fürs Log, z. B. „left“ oder „to 'laptop'“
     pub fn label(&self) -> String {
-        match self {
-            Self::Screen(name) => format!("zu „{name}“"),
-            Self::Direction(edge) => format!("nach {}", direction(*edge).1),
+        self.label_in(Lang::En)
+    }
+
+    /// Für die Oberfläche, z. B. „nach links“ oder „zu „laptop““ (englisch „left“, „to 'laptop'“)
+    pub fn label_in(&self, lang: Lang) -> String {
+        match (self, lang) {
+            (Self::Screen(name), Lang::De) => format!("zu „{name}“"),
+            (Self::Screen(name), Lang::En) => format!("to '{name}'"),
+            (Self::Direction(edge), Lang::De) => format!("nach {}", direction(*edge).1),
+            (Self::Direction(edge), Lang::En) => direction(*edge).0.to_owned(),
         }
     }
 }
@@ -245,7 +302,7 @@ impl FromStr for SwitchTarget {
         };
         match edge {
             Some(edge) => Ok(Self::Direction(edge)),
-            None if text.is_empty() => Err("Ziel fehlt (Rechner oder left, right, up, down)".into()),
+            None if text.is_empty() => Err("missing target (computer or left, right, up, down)".into()),
             None => Ok(Self::Screen(text.to_owned())),
         }
     }
@@ -411,20 +468,40 @@ impl KeyOptions {
         Some(CaptureEvent::SwitchTo(target.clone()))
     }
 
-    /// Doppelt belegte oder reservierte Kürzel, je eine Meldung
+    /// Doppelt belegte oder reservierte Kürzel, je eine Meldung, englisch für Log und Fehler
     pub fn conflicts(&self) -> Vec<String> {
+        self.conflicts_in(Lang::En)
+    }
+
+    /// Doppelt belegte oder reservierte Kürzel, je eine Meldung in `lang`
+    pub fn conflicts_in(&self, lang: Lang) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(lock) = self.lock.filter(Hotkey::is_emergency_exit) {
-            out.push(format!("Fang-Taste „{lock}“ ist der Notausgang"));
+            out.push(match lang {
+                Lang::De => format!("Fang-Taste „{lock}“ ist der Notausgang"),
+                Lang::En => format!("lock key '{lock}' is the emergency exit"),
+            });
         }
         for (i, (hotkey, target)) in self.switch.iter().enumerate() {
-            let what = format!("Kürzel „{hotkey}“ ({})", target.label());
+            let what = match lang {
+                Lang::De => format!("Kürzel „{hotkey}“ ({})", target.label_in(lang)),
+                Lang::En => format!("shortcut '{hotkey}' ({})", target.label_in(lang)),
+            };
             if hotkey.is_emergency_exit() {
-                out.push(format!("{what} ist der Notausgang"));
+                out.push(match lang {
+                    Lang::De => format!("{what} ist der Notausgang"),
+                    Lang::En => format!("{what} is the emergency exit"),
+                });
             } else if self.lock == Some(*hotkey) {
-                out.push(format!("{what} ist schon die Fang-Taste"));
+                out.push(match lang {
+                    Lang::De => format!("{what} ist schon die Fang-Taste"),
+                    Lang::En => format!("{what} is already the lock key"),
+                });
             } else if let Some((_, first)) = self.switch[..i].iter().find(|(h, _)| h == hotkey) {
-                out.push(format!("{what} ist schon belegt ({})", first.label()));
+                out.push(match lang {
+                    Lang::De => format!("{what} ist schon belegt ({})", first.label_in(lang)),
+                    Lang::En => format!("{what} is already taken ({})", first.label_in(lang)),
+                });
             }
         }
         out
@@ -448,11 +525,18 @@ pub enum KeyMode {
 }
 
 impl KeyMode {
-    /// Für Log und Oberfläche
+    /// Englisch fürs Log
     pub fn label(self) -> &'static str {
-        match self {
-            Self::Position => "Tastenposition",
-            Self::Chars => "Zeichen",
+        self.label_in(Lang::En)
+    }
+
+    /// Für die Oberfläche: „Tastenposition“ oder „Zeichen“ (englisch „Key position“, „Characters“)
+    pub fn label_in(self, lang: Lang) -> &'static str {
+        match (self, lang) {
+            (Self::Position, Lang::De) => "Tastenposition",
+            (Self::Chars, Lang::De) => "Zeichen",
+            (Self::Position, Lang::En) => "Key position",
+            (Self::Chars, Lang::En) => "Characters",
         }
     }
 }
@@ -472,7 +556,7 @@ pub fn parse_key_map(entries: &HashMap<String, String>) -> Result<KeyMap, String
     entries
         .iter()
         .map(|(from, to)| {
-            let key = |name: &str| key_from_name(name).ok_or_else(|| format!("unbekannte Taste „{name}“"));
+            let key = |name: &str| key_from_name(name).ok_or_else(|| format!("unknown key '{name}'"));
             Ok((key(from)?, key(to)?))
         })
         .collect()
@@ -484,7 +568,7 @@ pub fn parse_switch_keys(entries: &HashMap<String, String>) -> Result<Vec<(Hotke
         .iter()
         .map(|(hotkey, target)| {
             let hotkey = hotkey.parse::<Hotkey>()?;
-            let target = target.parse::<SwitchTarget>().map_err(|e| format!("„{hotkey}“: {e}"))?;
+            let target = target.parse::<SwitchTarget>().map_err(|e| format!("'{hotkey}': {e}"))?;
             Ok((hotkey, target))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -512,8 +596,32 @@ mod tests {
             assert_eq!(key_name(key), Some(name));
         }
         assert_eq!(key_from_name("scrolllock"), Some(KeyCode::SCROLL_LOCK), "Groß/klein egal");
-        assert_eq!(key_label(KeyCode(0xE3)), "Windows/Cmd links");
-        assert_eq!(key_label(KeyCode(0x99)), "Taste 0x0099");
+        assert_eq!(key_label_in(KeyCode(0xE3), Lang::De), "Windows/Cmd links");
+        assert_eq!(key_label_in(KeyCode(0x99), Lang::De), "Taste 0x0099");
+        assert_eq!(key_label_in(KeyCode::SCROLL_LOCK, Lang::De), "Rollen");
+        assert_eq!(key_label_in(KeyCode::MEDIA_NEXT, Lang::De), "Nächster Titel");
+    }
+
+    #[test]
+    fn keys_are_labelled_in_both_languages() {
+        let german: Vec<_> = all_keys_in(Lang::De).collect();
+        let english: Vec<_> = all_keys_in(Lang::En).collect();
+        assert_eq!(german.len(), english.len());
+        for ((key, name, de), (_, _, en)) in german.iter().zip(&english) {
+            assert!(!de.is_empty() && !en.is_empty(), "{name}");
+            assert_eq!(key_label_in(*key, Lang::De), *de);
+            assert_eq!(key_label_in(*key, Lang::En), *en);
+        }
+        assert!(all_keys().eq(all_keys_in(Lang::En)), "ohne Sprache: englisch");
+
+        assert_eq!(key_label(KeyCode(0xE3)), "Left Windows/Cmd");
+        assert_eq!(key_label(KeyCode(0x99)), "Key 0x0099");
+        assert_eq!(key_label(KeyCode::SCROLL_LOCK), "Scroll Lock");
+        assert_eq!(key_label_in(KeyCode::CAPS_LOCK, Lang::En), "Caps Lock");
+        assert_eq!(key_label_in(KeyCode::CAPS_LOCK, Lang::De), "Feststelltaste");
+        assert_eq!(key_label_in(KeyCode(0x2D), Lang::En), "- / ß (DE)");
+        assert_eq!(key_label_in(KeyCode(0x2D), Lang::De), "ß (DE) / -");
+        assert_eq!(key_label_in(KeyCode::MEDIA_NEXT, Lang::En), "Next Track");
     }
 
     #[test]
@@ -521,13 +629,22 @@ mod tests {
         let hotkey: Hotkey = "Ctrl+Alt+KeyL".parse().unwrap();
         assert_eq!(hotkey, Hotkey { mods: Mods { ctrl: true, alt: true, ..Mods::default() }, key: L });
         assert_eq!(hotkey.to_string(), "Ctrl+Alt+KeyL");
-        assert_eq!(hotkey.label(false), "Strg+Alt+L");
+        assert_eq!(hotkey.label_in(false, Lang::De), "Strg+Alt+L");
+        assert_eq!(hotkey.label_in(true, Lang::De), "Ctrl+Option+L");
+        assert_eq!(hotkey.label(false), "Ctrl+Alt+L");
         assert_eq!(hotkey.label(true), "Ctrl+Option+L");
         assert_eq!("ScrollLock".parse::<Hotkey>().unwrap(), Hotkey::SCROLL_LOCK);
-        assert_eq!("strg + umschalt + F12".parse::<Hotkey>().unwrap().to_string(), "Ctrl+Shift+F12");
-        assert!("Ctrl+".parse::<Hotkey>().is_err());
-        assert!("Hyper+KeyA".parse::<Hotkey>().is_err());
-        assert!("Ctrl+Nichts".parse::<Hotkey>().is_err());
+        let all: Hotkey = "strg + umschalt + F12".parse().unwrap();
+        assert_eq!(all.to_string(), "Ctrl+Shift+F12");
+        let all: Hotkey = "Ctrl+Shift+Alt+Meta+Delete".parse().unwrap();
+        assert_eq!(all.label_in(false, Lang::De), "Strg+Umschalt+Alt+Windows+Entf");
+        assert_eq!(all.label_in(true, Lang::De), "Ctrl+Umschalt+Option+Cmd+Entf");
+        assert_eq!(all.label_in(false, Lang::En), "Ctrl+Shift+Alt+Windows+Delete");
+        assert_eq!(all.label_in(true, Lang::En), "Ctrl+Shift+Option+Cmd+Delete");
+        assert_eq!(all.label(true), all.label_in(true, Lang::En));
+        assert_eq!("Ctrl+".parse::<Hotkey>().unwrap_err(), "'Ctrl+': missing key");
+        assert_eq!("Hyper+KeyA".parse::<Hotkey>().unwrap_err(), "'Hyper' is not a modifier key (Ctrl, Shift, Alt, Meta)");
+        assert_eq!("Ctrl+Nichts".parse::<Hotkey>().unwrap_err(), "unknown key 'Nichts'");
         assert!(!Hotkey::SCROLL_LOCK.swallow_locally() && hotkey.swallow_locally());
     }
 
@@ -657,13 +774,23 @@ mod tests {
         t.on_key(KeyCode(0xE1), true, &options);
         assert_eq!(t.on_key(KeyCode(0x29), true, &options), HotkeyEvent::None, "Notausgang bleibt Notausgang");
 
-        let conflicts = options.conflicts();
+        let conflicts = options.conflicts_in(Lang::De);
         assert_eq!(conflicts.len(), 2, "{conflicts:?}");
         assert!(conflicts[0].contains("„Ctrl+Alt+KeyL“ (zu „tablet“) ist schon die Fang-Taste"), "{conflicts:?}");
         assert!(conflicts[1].contains("Notausgang"), "{conflicts:?}");
+        let english = options.conflicts();
+        assert_eq!(english, options.conflicts_in(Lang::En));
+        assert_eq!(english[0], "shortcut 'Ctrl+Alt+KeyL' (to 'tablet') is already the lock key");
+        assert_eq!(english[1], "shortcut 'Ctrl+Shift+Alt+Escape' (to 'pc') is the emergency exit");
         options.switch.push(("Alt+Ctrl+Digit1".parse().unwrap(), SwitchTarget::Direction(Edge::Right)));
-        assert!(options.conflicts()[2].contains("ist schon belegt (zu „laptop“)"), "{:?}", options.conflicts());
+        let conflicts = options.conflicts_in(Lang::De);
+        assert!(conflicts[2].contains("ist schon belegt (zu „laptop“)"), "{conflicts:?}");
+        assert_eq!(options.conflicts()[2], "shortcut 'Ctrl+Alt+Digit1' (right) is already taken (to 'laptop')");
         assert!(switching().conflicts().is_empty());
+
+        let exit = KeyOptions { lock: Some(emergency), ..KeyOptions::default() };
+        assert_eq!(exit.conflicts_in(Lang::De), ["Fang-Taste „Ctrl+Shift+Alt+Escape“ ist der Notausgang"]);
+        assert_eq!(exit.conflicts(), ["lock key 'Ctrl+Shift+Alt+Escape' is the emergency exit"]);
     }
 
     #[test]
@@ -692,11 +819,15 @@ mod tests {
         assert_eq!(target(" laptop "), SwitchTarget::Screen("laptop".into()));
         assert_eq!(target("Mac Mini").to_string(), "Mac Mini");
         assert!("  ".parse::<SwitchTarget>().is_err());
-        assert_eq!(target("right").label(), "nach rechts");
-        assert_eq!(target("laptop").label(), "zu „laptop“");
+        assert_eq!(target("right").label_in(Lang::De), "nach rechts");
+        assert_eq!(target("up").label_in(Lang::De), "nach oben");
+        assert_eq!(target("laptop").label_in(Lang::De), "zu „laptop“");
+        assert_eq!(target("right").label(), "right");
+        assert_eq!(target("bottom").label_in(Lang::En), "down");
+        assert_eq!(target("laptop").label(), "to 'laptop'");
 
         let bad = HashMap::from([("Ctrl+Alt+Digit1".to_owned(), String::new())]);
-        assert!(parse_switch_keys(&bad).unwrap_err().contains("„Ctrl+Alt+Digit1“"));
+        assert_eq!(parse_switch_keys(&bad).unwrap_err(), "'Ctrl+Alt+Digit1': missing target (computer or left, right, up, down)");
         let bad = HashMap::from([("Ctrl+Nichts".to_owned(), "laptop".to_owned())]);
         assert!(parse_switch_keys(&bad).unwrap_err().contains("Nichts"));
         let keys: Vec<String> = switching().switch.iter().map(|(h, t)| format!("{h}={t}")).collect();
@@ -709,7 +840,8 @@ mod tests {
         let map = parse_key_map(&entries).unwrap();
         assert_eq!(map.get(&ALT), Some(&KeyCode(0xE3)));
         assert_eq!(map.get(&KeyCode(0x39)), Some(&CTRL));
-        assert!(parse_key_map(&HashMap::from([("Gibtsnicht".to_owned(), "KeyA".to_owned())])).is_err());
+        let unknown = parse_key_map(&HashMap::from([("Gibtsnicht".to_owned(), "KeyA".to_owned())]));
+        assert_eq!(unknown.unwrap_err(), "unknown key 'Gibtsnicht'");
         assert_eq!(KeyOptions::default().lock, Some(Hotkey::SCROLL_LOCK));
         #[derive(Deserialize)]
         struct Wrap {
@@ -729,7 +861,10 @@ mod tests {
         assert_eq!(mode("position"), Some(KeyMode::Position));
         assert_eq!(mode("zeichen"), None);
         assert_eq!(KeyMode::default(), KeyMode::Position, "wie bisher");
-        assert_eq!(KeyMode::Chars.label(), "Zeichen");
+        assert_eq!(KeyMode::Chars.label_in(Lang::De), "Zeichen");
+        assert_eq!(KeyMode::Position.label_in(Lang::De), "Tastenposition");
+        assert_eq!(KeyMode::Chars.label(), "Characters");
+        assert_eq!(KeyMode::Position.label_in(Lang::En), "Key position");
         assert!(KeyConfig::default().modes.is_empty());
     }
 

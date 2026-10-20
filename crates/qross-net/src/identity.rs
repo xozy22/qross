@@ -30,15 +30,15 @@ impl Identity {
         let cert_path = dir.join(IDENTITY_CERT_FILE);
         let key_path = dir.join(IDENTITY_KEY_FILE);
         if cert_path.exists() && key_path.exists() {
-            let cert = fs::read(&cert_path).with_context(|| format!("{} lesen", cert_path.display()))?;
-            let key = fs::read(&key_path).with_context(|| format!("{} lesen", key_path.display()))?;
+            let cert = fs::read(&cert_path).with_context(|| format!("failed to read {}", cert_path.display()))?;
+            let key = fs::read(&key_path).with_context(|| format!("failed to read {}", key_path.display()))?;
             return Ok(Self { cert: CertificateDer::from(cert), key: PrivatePkcs8KeyDer::from(key) });
         }
         let identity = Self::generate()?;
-        fs::create_dir_all(dir).with_context(|| format!("{} anlegen", dir.display()))?;
+        fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
         fs::write(&key_path, identity.key.secret_pkcs8_der())?;
         fs::write(&cert_path, identity.cert.as_ref())?;
-        tracing::info!("neue Identität in {} angelegt", dir.display());
+        tracing::info!("created new identity in {}", dir.display());
         Ok(identity)
     }
 
@@ -91,11 +91,11 @@ impl FromStr for Fingerprint {
     fn from_str(s: &str) -> Result<Self> {
         let hex: String = s.chars().filter(|c| !matches!(c, ':' | ' ' | '-')).collect();
         if hex.len() != 64 {
-            bail!("Fingerprint muss 64 Hex-Zeichen haben, hat {}", hex.len());
+            bail!("fingerprint must have 64 hex digits, has {}", hex.len());
         }
         let mut bytes = [0u8; 32];
         for (i, byte) in bytes.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).context("ungültiges Hex-Zeichen im Fingerprint")?;
+            *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).context("invalid hex digit in fingerprint")?;
         }
         Ok(Self(bytes))
     }

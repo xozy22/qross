@@ -19,8 +19,8 @@ pub struct LogInjector;
 impl Injector for LogInjector {
     fn inject(&mut self, event: &Inject) {
         match event {
-            Inject::MoveTo { .. } | Inject::MoveBy { .. } => tracing::trace!(?event, "würde einspeisen"),
-            _ => tracing::info!(?event, "würde einspeisen"),
+            Inject::MoveTo { .. } | Inject::MoveBy { .. } => tracing::trace!(?event, "would inject"),
+            _ => tracing::info!(?event, "would inject"),
         }
     }
 
@@ -37,11 +37,11 @@ impl Injector for LogInjector {
 
     fn screen_saver(&mut self, active: bool, lock: bool) -> Outcome {
         let what = match (active, lock) {
-            (true, true) => "den Rechner sperren",
-            (true, false) => "den Bildschirmschoner starten",
-            (false, _) => "den Bildschirmschoner beenden",
+            (true, true) => "lock the computer",
+            (true, false) => "start the screen saver",
+            (false, _) => "stop the screen saver",
         };
-        tracing::info!("würde {what}");
+        tracing::info!("would {what}");
         Outcome::Unchanged
     }
 }
@@ -175,7 +175,7 @@ impl Clipboard for MemoryClipboard {
     }
 
     fn write_virtual_files(&mut self, files: VirtualFiles, data: &ClipboardData) -> anyhow::Result<()> {
-        anyhow::ensure!(self.on_demand, "diese Zwischenablage fügt nicht auf Abruf ein");
+        anyhow::ensure!(self.on_demand, "this clipboard does not paste on demand");
         self.write(data)?;
         self.virtual_files = Some(files);
         Ok(())
