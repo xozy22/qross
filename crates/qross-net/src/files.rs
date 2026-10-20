@@ -6,9 +6,11 @@
 //! Verzeichnis (`*.part`, nach erfolgreicher Prüfung umbenannt) und verschiebt alles erst
 //! in den Zielordner, wenn die Dateien vollständig sind **und** abgelegt wurde.
 //! Eingaben bleiben dabei flüssig, weil sie auf eigenen Streams/Datagrammen mit höherer
-//! Priorität laufen. Fortschritt und Abbrechen: siehe `progress`.
+//! Priorität laufen und höchstens vier Datei-Streams zugleich auf ihre Bestätigung warten (sonst
+//! füllen sie quinns Sendefenster, und auch die Eingaben müssen warten). Fortschritt und Abbrechen:
+//! siehe `progress`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -84,9 +86,17 @@ fn walk(path: &Path, rel: String, out: &mut Vec<LocalEntry>, total: &mut u64, ma
     Ok(true)
 }
 
+/// Höchstens so viele fertig geschriebene Datei-Streams warten auf die Bestätigung der Gegenstelle;
+/// mit dem, der gerade geschrieben wird, sind es vier. Ohne Grenze legt quinn bei vielen Dateien bis
+/// zu seinem Sendefenster in den Puffer (10 MB je Verbindung, alle Streams zusammen). Ist es voll,
+/// wartet auch jeder Tastendruck auf dem Input-Stream, bis die Gegenstelle etwas bestätigt hat –
+/// gemessen bis zu 2,4 s. So bleiben es höchstens vier Empfangsfenster eines Streams (je 1,25 MB).
+const UNACKED_FILES: usize = 3;
+
 /// Sendet alle Dateien einer Übertragung nacheinander auf je einem eigenen Stream
-/// (`kind`: `File` für Drag & Drop, `ClipboardFile` für die Zwischenablage). Zählt die Bytes in
-/// `job`; bei „Abbrechen“ wird der laufende Stream zurückgesetzt und keiner mehr geöffnet.
+/// (`kind`: `File` für Drag & Drop, `ClipboardFile` für die Zwischenablage) und kehrt zurück, wenn
+/// die Gegenstelle alles bestätigt hat. Zählt die Bytes in `job`; bei „Abbrechen“ werden die
+/// laufenden Streams zurückgesetzt und keiner mehr geöffnet.
 pub async fn send_files(
     conn: Connection,
     kind: StreamKind,
@@ -95,21 +105,61 @@ pub async fn send_files(
     job: &Outgoing,
 ) -> Result<()> {
     let mut buf = vec![0u8; CHUNK];
-    for (index, local) in entries.iter().enumerate() {
-        if local.entry.is_dir {
-            continue;
+    // Fertig geschrieben, aber noch nicht bestätigt, die ältesten vorn
+    let mut unacked: VecDeque<SendStream> = VecDeque::new();
+    let result: Result<()> = async {
+        for (index, local) in entries.iter().enumerate() {
+            if local.entry.is_dir {
+                continue;
+            }
+            if unacked.len() == UNACKED_FILES {
+                acknowledged(&unacked[0], job).await?;
+                unacked.pop_front();
+            }
+            if job.is_cancelled() {
+                bail!(Cancelled { by_peer: false });
+            }
+            let mut stream = conn.open_uni().await?;
+            // Jede Datei eine Stufe nach der vorigen: Gleich wichtige Streams teilt quinn reihum auf,
+            // dann würden die wartenden zugleich fertig, und bis die nächsten nachrücken, stünde die
+            // Leitung kurz still und bekäme danach einen Schwall. So geht die älteste zuerst hinaus.
+            stream.set_priority(BULK_PRIORITY.saturating_sub(index as i32))?;
+            stream.write_all(&[kind as u8]).await.map_err(write_error)?;
+            let header = FileHeader { transfer, index: index as u32, path: local.entry.path.clone(), size: local.entry.size };
+            write_frame(&mut stream, &header).await.map_err(frame_write_error)?;
+            send_body(&mut stream, local, &mut buf, job).await?;
+            unacked.push_back(stream);
         }
-        if job.is_cancelled() {
-            bail!(Cancelled { by_peer: false });
+        while let Some(stream) = unacked.front() {
+            acknowledged(stream, job).await?;
+            unacked.pop_front();
         }
-        let mut stream = conn.open_uni().await?;
-        stream.set_priority(BULK_PRIORITY)?;
-        stream.write_all(&[kind as u8]).await.map_err(write_error)?;
-        let header = FileHeader { transfer, index: index as u32, path: local.entry.path.clone(), size: local.entry.size };
-        write_frame(&mut stream, &header).await.map_err(frame_write_error)?;
-        send_body(&mut stream, local, &mut buf, job).await?;
+        Ok(())
     }
-    Ok(())
+    .await;
+    if result.is_err() {
+        // Abgebrochen oder fehlgeschlagen: Was davon noch im Puffer liegt, nicht mehr senden
+        for mut stream in unacked {
+            let _ = stream.reset(0u32.into());
+        }
+    }
+    result
+}
+
+/// Wartet, bis die Gegenstelle alles auf dem fertig geschriebenen `stream` bestätigt hat;
+/// „Abbrechen“ wirkt dabei sofort.
+async fn acknowledged(stream: &SendStream, job: &Outgoing) -> Result<()> {
+    let stopped = stream.stopped();
+    tokio::select! {
+        biased;
+        () = job.cancelled() => bail!(Cancelled { by_peer: false }),
+        stopped = stopped => match stopped {
+            Ok(None) => Ok(()),
+            // Angehalten (`STOP_SENDING`): Der Empfänger hat abgebrochen oder die Übertragung verworfen.
+            Ok(Some(_)) => Err(Cancelled { by_peer: true }.into()),
+            Err(e) => Err(e.into()),
+        },
+    }
 }
 
 async fn send_body(stream: &mut SendStream, local: &LocalEntry, buf: &mut [u8], job: &Outgoing) -> Result<()> {
@@ -715,6 +765,95 @@ mod tests {
         receiver.on_drag_start("pc", 3, entries);
         assert!(receiver.awaiting_drop(3).is_none());
         drop(receiver);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// So lange steht der Empfänger in `many_files_leave_room_for_keystrokes` still
+    const STALL: Duration = Duration::from_millis(400);
+
+    /// Empfänger in einem eigenen Thread: liest alle Streams und zählt die Bytes. Sobald der dritte
+    /// Stream da ist, steht er `STALL` lang ganz still, wie ein Laptop im Funkloch: Nichts wird
+    /// bestätigt, der Sender muss mit seinem Puffer auskommen.
+    fn stalling_receiver(config: quinn::ServerConfig) -> (std::net::SocketAddr, Arc<AtomicU64>) {
+        let received = Arc::new(AtomicU64::new(0));
+        let (addr_tx, addr) = std::sync::mpsc::channel();
+        let counted = received.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let endpoint = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+                addr_tx.send(endpoint.local_addr().unwrap()).unwrap();
+                let conn = endpoint.accept().await.unwrap().await.unwrap();
+                let mut streams = 0;
+                while let Ok(mut stream) = conn.accept_uni().await {
+                    streams += 1;
+                    if streams == 3 {
+                        std::thread::sleep(STALL);
+                    }
+                    let counted = counted.clone();
+                    tokio::spawn(async move {
+                        if let Ok(data) = stream.read_to_end(usize::MAX).await {
+                            counted.fetch_add(data.len() as u64, Ordering::Relaxed);
+                        }
+                    });
+                }
+            });
+        });
+        (addr.recv().unwrap(), received)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn many_files_leave_room_for_keystrokes() {
+        // Sendefenster auf 256 KB verkleinert: 200 Dateien zu 32 KB füllten es ohne Grenze, sobald
+        // nichts mehr bestätigt wird; so liegen höchstens vier davon im Puffer.
+        let base = std::env::temp_dir().join(format!("qross-files-room-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("Fotos")).unwrap();
+        for i in 0..200u32 {
+            fs::write(base.join(format!("Fotos/{i:03}.jpg")), vec![i as u8; 32 * 1024]).unwrap();
+        }
+        let entries = collect(&[base.join("Fotos")]).unwrap();
+        let (server_id, client_id) = (crate::Identity::generate().unwrap(), crate::Identity::generate().unwrap());
+        let (addr, received) = stalling_receiver(crate::tls::server_config(&server_id).unwrap());
+        let mut config = crate::tls::client_config(&client_id).unwrap();
+        let mut transport = crate::tls::transport();
+        transport.send_window(256 * 1024);
+        config.transport_config(Arc::new(transport));
+        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(config);
+        let sender = endpoint.connect(addr, crate::tls::SERVER_NAME).unwrap().await.unwrap();
+
+        let transfers = Transfers::new();
+        let info = Info { kind: Kind::Drag, peer: "laptop".into(), names: vec!["Fotos".into()], total: 200 * 32 * 1024 };
+        let job = transfers.begin_sending(1, info);
+        let mut keys = sender.open_uni().await.unwrap();
+        keys.set_priority(10).unwrap();
+        // Wie im Server: Dateien und Eingaben schreiben in eigenen Tasks.
+        let send = tokio::spawn({
+            let sender = sender.clone();
+            async move { send_files(sender, StreamKind::File, 1, entries, &job).await }
+        });
+        // Währenddessen jede Millisekunde ein „Tastendruck“: Er muss sofort in den Puffer passen.
+        let (mut presses, mut slowest) = (0, Duration::ZERO);
+        while !send.is_finished() {
+            let started = std::time::Instant::now();
+            keys.write_all(&[0x04; 16]).await.unwrap();
+            slowest = slowest.max(started.elapsed());
+            presses += 1;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        send.await.unwrap().unwrap();
+        assert!(presses > 0);
+        assert!(slowest < STALL / 4, "ein Tastendruck wartete {} ms auf Platz im Puffer", slowest.as_millis());
+        // Bestätigt heißt angekommen: Der Empfänger kann alles lesen.
+        for _ in 0..500 {
+            if received.load(Ordering::Relaxed) >= 200 * 32 * 1024 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(received.load(Ordering::Relaxed) >= 200 * 32 * 1024, "nicht alles angekommen");
+        sender.close(0u32.into(), b"");
         let _ = fs::remove_dir_all(&base);
     }
 

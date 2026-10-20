@@ -14,9 +14,9 @@ use qross_core::sharing::{describe as describe_sharing, SharingRules};
 use qross_core::{CaptureEvent, Layout};
 use qross_platform::{Capture, Clipboard, FinderOverlay, SecureInput};
 use qross_proto::{
-    encode_datagram, is_sampled_input, is_sampled_move, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData,
-    Control, CursorFinder, Datagram, DragMessage, FileEntry, GameState, Input, Latency, LatencySummary, Platform, Rect,
-    SampleId, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
+    encode_datagram, is_sampled_input, is_sampled_move, read_frame, read_frame_up_to, write_frame, Clipboard as ClipboardMsg,
+    ClipboardData, Control, CursorFinder, Datagram, DragMessage, FileEntry, GameState, Input, Latency, LatencySummary,
+    Platform, Rect, SampleId, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -33,6 +33,7 @@ use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
 use crate::screensaver;
 use crate::secure_input;
+use crate::settle::{self, MouseActivity};
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
 use crate::switch_trace::{EdgeHits, ServerTrace};
@@ -517,6 +518,8 @@ impl Server {
                 }
             })
         };
+        // Große Inhalte der Zwischenablage warten nach einem Wechsel, bis die Maus ruht.
+        let mouse = MouseActivity::default();
         let mut local_screen = screen();
         let mut local_monitors = monitors();
         let mut state = ServerState::new(self.config.name.clone(), self.config.layout.clone(), local_screen);
@@ -597,8 +600,11 @@ impl Server {
                                 }
                             }
                         }
-                        if let (Some(trace), Some(at)) = (&mut switching, captured) {
-                            trace.on_move(at, dx, dy);
+                        if let Some(at) = captured {
+                            mouse.moved(at);
+                            if let Some(trace) = &mut switching {
+                                trace.on_move(at, dx, dy);
+                            }
                         }
                         let mut actions = state.handle(ServerEvent::Capture(CaptureEvent::MouseDelta { dx, dy }));
                         if let Some(event) = next {
@@ -889,7 +895,8 @@ impl Server {
                     Action::DropIncoming { .. } | Action::CancelIncoming { .. } => drag_view.hide(),
                     _ => {}
                 }
-                let files = FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers };
+                let files =
+                    FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers, mouse: &mouse };
                 let (step, started) = (platform_step(&action), Instant::now());
                 apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops, captured);
                 let took = started.elapsed();
@@ -1050,11 +1057,13 @@ fn describe_monitors(monitors: &[Rect]) -> String {
 /// Je Client die zuletzt übertragene Clipboard-Sequenznummer
 type ClipSynced = Arc<Mutex<HashMap<String, u64>>>;
 
-/// Für ausgehende Dateien: Grenze für kopierte Dateien (0 = nie), Meldungen, Fortschritt
+/// Für die ausgehende Zwischenablage und Dateien: Grenze für kopierte Dateien (0 = nie), Meldungen,
+/// Fortschritt und wann sich die Maus zuletzt bewegt hat
 struct FileSide<'a> {
     limit: u64,
     notify: &'a Notify,
     transfers: &'a Transfers,
+    mouse: &'a MouseActivity,
 }
 
 /// Fertig übertragene Dateien eines Clients in die Zwischenablage legen.
@@ -1142,16 +1151,26 @@ fn apply(
             }
             let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), client.conn.clone());
             let (limit, notify, transfers) = (files.limit, files.notify.clone(), files.transfers.clone());
+            let (mouse, since) = (files.mouse.clone(), Instant::now());
             // Lesen und PNG-Kodierung im Clipboard-Thread; die Ereignisschleife läuft weiter.
             tokio::spawn(async move {
                 let known = synced.lock().unwrap().get(&to).copied();
                 let (seq, content) = clipboard.changed_since(known).await;
                 synced.lock().unwrap().insert(to.clone(), seq);
                 let Some(content) = content else { return };
-                match rights::content(content, allowed) {
-                    Some(content) => clipfiles::send(conn, content, limit, to, notify, transfers).await,
-                    None => debug!("Zwischenablage nicht an „{to}“: nicht erlaubt"),
+                let Some(content) = rights::content(content, allowed) else {
+                    return debug!("Zwischenablage nicht an „{to}“: nicht erlaubt");
+                };
+                // Bilder und Dateien erst, wenn die Maus drüben zur Ruhe kommt (siehe `settle`)
+                if settle::is_bulky(&content, limit) {
+                    settle::settled(&mouse, since).await;
+                    // Inzwischen kam Neueres an ihn oder von ihm: das Ältere nicht hinterherschicken
+                    if synced.lock().unwrap().get(&to) != Some(&seq) || conn.close_reason().is_some() {
+                        return debug!("Zwischenablage an „{to}“ entfällt: überholt oder getrennt, bevor die Maus ruhte");
+                    }
+                    debug!("Zwischenablage an „{to}“ geht {} ms nach dem Wechsel hinaus", since.elapsed().as_millis());
                 }
+                clipfiles::send(conn, content, limit, to, notify, transfers).await
             });
         }
         Action::ProbeDrag { x, y } => capture.probe_drag(x, y),
@@ -1293,8 +1312,15 @@ async fn handle_connection(
     let remote = incoming.remote_address();
     let conn = incoming.await.context("QUIC-Handshake")?;
     let fingerprint = peer_fingerprint(&conn)?;
-    let (mut send, mut recv) = conn.accept_bi().await?;
-    let Some(Control::Hello { version, name, screen, platform }) = read_frame(&mut recv).await? else {
+    let (mut send, mut recv, hello) = match receive_hello(&conn).await {
+        Ok(received) => received,
+        Err(e) => {
+            conn.close(0u32.into(), b"no hello");
+            return Err(e.context("kein gültiges Hello"));
+        }
+    };
+    let Control::Hello { version, name, screen, platform } = hello else {
+        conn.close(0u32.into(), b"no hello");
         bail!("{remote} hat kein Hello gesendet");
     };
 
@@ -1359,6 +1385,25 @@ async fn handle_connection(
     conn.close(0u32.into(), b"");
     let _ = tx.send(NetEvent::Closed { name, id });
     Ok(())
+}
+
+/// Höchstens so groß darf das `Hello` sein; es braucht ein paar Dutzend Bytes.
+const HELLO_MAX: usize = 16 * 1024;
+/// So lange darf es nach dem Handshake auf sich warten lassen
+const HELLO_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Das `Hello` auf dem Control-Stream, den der Client öffnet. Bis hierher kommt jeder mit irgendeinem
+/// Zertifikat; vertraut wird erst danach. Deshalb gilt eine eigene kleine Grenze statt der für Frames
+/// (64 MB, der Puffer entsteht schon mit dem Längenfeld), und es muss bald kommen.
+async fn receive_hello(conn: &Connection) -> Result<(SendStream, RecvStream, Control)> {
+    let receive = async {
+        let (send, mut recv) = conn.accept_bi().await?;
+        let hello = read_frame_up_to(&mut recv, HELLO_MAX).await?.context("Control-Stream ohne Nachricht beendet")?;
+        anyhow::Ok((send, recv, hello))
+    };
+    tokio::time::timeout(HELLO_TIMEOUT, receive)
+        .await
+        .map_err(|_| anyhow!("nichts binnen {} s nach dem Handshake", HELLO_TIMEOUT.as_secs()))?
 }
 
 /// Schickt dem Client nach dem `Welcome` seine Rechte und den Cursor-Finder (diesen nur, wenn er

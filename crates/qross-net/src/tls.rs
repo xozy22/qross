@@ -50,7 +50,7 @@ pub fn client_config(identity: &Identity) -> Result<quinn::ClientConfig> {
     Ok(config)
 }
 
-fn transport() -> quinn::TransportConfig {
+pub(crate) fn transport() -> quinn::TransportConfig {
     let mut t = quinn::TransportConfig::default();
     // Verbindungsabbrüche schnell erkennen, damit der Server die Eingaben zurückholt: Jede Seite meldet
     // sich spätestens nach 1 s, nach 5 s Stille gilt die Verbindung als tot. Nicht kürzer: WLAN hakt
@@ -66,8 +66,16 @@ fn transport() -> quinn::TransportConfig {
     // Wiederholen nur ein Paket.
     t.initial_rtt(Duration::from_millis(100));
     t.datagram_receive_buffer_size(Some(1 << 20));
+    // Mausbewegungen, die nicht gleich hinauskönnen (Funkloch, volle Leitung), nur 4 KB lang aufheben:
+    // rund 100 Datagramme, bei 1000 Hz eine Zehntelsekunde; ältere verdrängt die neueste. Mit quinns
+    // Standard von 1 MB waren es über 20 s, und nach einem Hänger fuhr der Cursor drüben die alte Bahn
+    // nach.
+    t.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER);
     t
 }
+
+/// Warteschlange für ausgehende Datagramme (siehe `transport`)
+const DATAGRAM_SEND_BUFFER: usize = 4 * 1024;
 
 /// Fingerprint des Zertifikats der Gegenseite.
 pub fn peer_fingerprint(conn: &quinn::Connection) -> Result<Fingerprint> {
@@ -175,5 +183,60 @@ impl ClientCertVerifier for AcceptAnyCert {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    use super::*;
+
+    /// Der Server im eigenen Thread steht `stall` lang still, sobald der Client verbunden ist (wie ein
+    /// Laptop im Funkloch), und liest danach eine Weile alle Datagramme. Liefert ihre Nummern.
+    fn stalled_server(identity: &Identity, stall: Duration) -> (std::net::SocketAddr, mpsc::Receiver<Vec<u32>>) {
+        let config = server_config(identity).unwrap();
+        let (addr_tx, addr) = mpsc::channel();
+        let (numbers_tx, numbers) = mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let endpoint = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+                addr_tx.send(endpoint.local_addr().unwrap()).unwrap();
+                let conn = endpoint.accept().await.unwrap().await.unwrap();
+                std::thread::sleep(stall);
+                let mut received = Vec::new();
+                let reading = async {
+                    while let Ok(bytes) = conn.read_datagram().await {
+                        received.push(u32::from_be_bytes(bytes[..4].try_into().unwrap()));
+                    }
+                };
+                let _ = tokio::time::timeout(Duration::from_millis(1500), reading).await;
+                numbers_tx.send(received).unwrap();
+            });
+        });
+        (addr.recv().unwrap(), numbers)
+    }
+
+    #[tokio::test]
+    async fn after_a_hang_only_the_latest_moves_arrive() {
+        let (server_id, client_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let (addr, numbers) = stalled_server(&server_id, Duration::from_millis(400));
+        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(client_config(&client_id).unwrap());
+        let conn = endpoint.connect(addr, SERVER_NAME).unwrap().await.unwrap();
+        assert!(conn.datagram_send_buffer_space() <= DATAGRAM_SEND_BUFFER);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Bewegungen, die während des Hängers anfallen
+        const MOVES: u32 = 5000;
+        let started = Instant::now();
+        for n in 0..MOVES {
+            conn.send_datagram(n.to_be_bytes().repeat(2).into()).unwrap();
+        }
+        assert!(started.elapsed() < Duration::from_millis(300), "Senden wartet nie");
+        let received = tokio::task::spawn_blocking(move || numbers.recv().unwrap()).await.unwrap();
+        assert!(received.contains(&(MOVES - 1)), "die neueste Bewegung kommt an");
+        assert!(received.len() < 2500, "{} von {MOVES} alten Bewegungen kamen noch an", received.len());
     }
 }

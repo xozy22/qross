@@ -36,7 +36,7 @@ use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
 use crate::screensaver;
 use crate::streams::{read_kind, send_drag_message};
-use crate::switch_trace::{ClientTrace, Discarded};
+use crate::switch_trace::{ClientTrace, EarlyMoves};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
 use crate::wake::{self, Backoff, SystemEvent};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
@@ -224,6 +224,79 @@ fn inject_all(inject: &Sender<ToInjector>, events: impl IntoIterator<Item = Inje
     }
 }
 
+/// Einspeise-Thread: erledigt die Aufträge der Reihe nach. Warten schon mehrere Bewegungen, etwa
+/// weil nach einer Lücke im Netz viele auf einmal ankamen, gehen sie zusammen hinaus (siehe
+/// [`coalesce`]): Der Cursor springt an die neueste Stelle, statt die alte Bahn nachzufahren.
+fn inject_loop(mut injector: Box<dyn Injector>, jobs: std::sync::mpsc::Receiver<ToInjector>) {
+    let mut next = None;
+    while let Some(job) = next.take().or_else(|| jobs.recv().ok()) {
+        let started = Instant::now();
+        let step = match job {
+            ToInjector::Inject(event @ (Inject::MoveTo { .. } | Inject::MoveBy { .. })) => {
+                let (event, marks, after) = coalesce(event, &jobs);
+                next = after;
+                tracing::trace!(?event, "einspeisen");
+                injector.inject(&event);
+                let done = Instant::now();
+                for (stamp, to) in marks {
+                    let _ = to.send(Measured { id: stamp.id, received: stamp.received, done });
+                }
+                InjectStep::Inject(event)
+            }
+            ToInjector::Inject(event) => {
+                debug!(?event, "einspeisen");
+                injector.inject(&event);
+                InjectStep::Inject(event)
+            }
+            ToInjector::DropFolder { x, y, reply } => {
+                let _ = reply.send(injector.drop_folder(x, y));
+                InjectStep::Named("Ablageordner suchen")
+            }
+            ToInjector::TakeDragged { x, y, reply } => {
+                let _ = reply.send(injector.take_dragged_files(x, y));
+                InjectStep::Named("gezogene Dateien abholen")
+            }
+            ToInjector::ScreenSaver { active, lock } => {
+                screensaver::report(active, &injector.screen_saver(active, lock));
+                InjectStep::Named("Bildschirmschoner abgleichen")
+            }
+            ToInjector::Measured { stamp, done } => {
+                let _ = done.send(Measured { id: stamp.id, received: stamp.received, done: Instant::now() });
+                continue;
+            }
+        };
+        let took = started.elapsed();
+        if took >= SLOW_INJECT {
+            warn!("Einspeisen hing {} ms ({step}) – so lange warteten alle folgenden Eingaben", took.as_millis());
+        }
+    }
+}
+
+/// Höchstens so viele wartende Aufträge fasst das Einspeisen auf einmal zusammen
+const COALESCE_MAX: usize = 1024;
+
+/// Stichprobe der Eingabekette mit dem Kanal, an den die Rückmeldung geht
+type Mark = (Stamp, mpsc::UnboundedSender<Measured>);
+
+/// Nimmt die Bewegungen dazu, die hinter `first` schon warten: Von Positionen zählt nur die letzte,
+/// relative Bewegungen (Spielemodus) werden zusammengezählt. Stichproben dazwischen kommen mit; sie
+/// werden nach dem Einspeisen beantwortet. Liefert auch den ersten Auftrag, der nicht dazugehört.
+fn coalesce(first: Inject, jobs: &std::sync::mpsc::Receiver<ToInjector>) -> (Inject, Vec<Mark>, Option<ToInjector>) {
+    let (mut event, mut marks) = (first, Vec::new());
+    for _ in 0..COALESCE_MAX {
+        let Ok(job) = jobs.try_recv() else { break };
+        match (event, job) {
+            (Inject::MoveTo { .. }, ToInjector::Inject(next @ Inject::MoveTo { .. })) => event = next,
+            (Inject::MoveBy { dx, dy }, ToInjector::Inject(Inject::MoveBy { dx: x, dy: y })) => {
+                event = Inject::MoveBy { dx: dx.saturating_add(x), dy: dy.saturating_add(y) };
+            }
+            (_, ToInjector::Measured { stamp, done }) => marks.push((stamp, done)),
+            (_, other) => return (event, marks, Some(other)),
+        }
+    }
+    (event, marks, None)
+}
+
 /// Zustandsmeldungen für eine Oberfläche (siehe [`run_with_notices`]).
 #[derive(Debug, Clone)]
 pub enum ClientNotice {
@@ -330,7 +403,7 @@ async fn run_inner(
     transfers: Transfers,
     events: Option<Events>,
 ) -> Result<()> {
-    let ClientPlatform { mut injector, clipboard, screen, monitors, game, finder } = platform;
+    let ClientPlatform { injector, clipboard, screen, monitors, game, finder } = platform;
     let (types_text, syncs_locks, follows_saver) =
         (injector.types_text(), injector.syncs_locks(), injector.follows_screen_saver());
     let screen =
@@ -366,41 +439,7 @@ async fn run_inner(
 
     // Eigener Thread, damit SendInput nie die Netzwerk-Tasks blockiert.
     let (inject_tx, inject_rx) = std::sync::mpsc::channel::<ToInjector>();
-    std::thread::Builder::new().name("qross-inject".into()).spawn(move || {
-        while let Ok(job) = inject_rx.recv() {
-            let started = Instant::now();
-            let step = match job {
-                ToInjector::Inject(event) => {
-                    match event {
-                        Inject::MoveTo { .. } | Inject::MoveBy { .. } => tracing::trace!(?event, "einspeisen"),
-                        _ => debug!(?event, "einspeisen"),
-                    }
-                    injector.inject(&event);
-                    InjectStep::Inject(event)
-                }
-                ToInjector::DropFolder { x, y, reply } => {
-                    let _ = reply.send(injector.drop_folder(x, y));
-                    InjectStep::Named("Ablageordner suchen")
-                }
-                ToInjector::TakeDragged { x, y, reply } => {
-                    let _ = reply.send(injector.take_dragged_files(x, y));
-                    InjectStep::Named("gezogene Dateien abholen")
-                }
-                ToInjector::ScreenSaver { active, lock } => {
-                    screensaver::report(active, &injector.screen_saver(active, lock));
-                    InjectStep::Named("Bildschirmschoner abgleichen")
-                }
-                ToInjector::Measured { stamp, done } => {
-                    let _ = done.send(Measured { id: stamp.id, received: stamp.received, done: Instant::now() });
-                    continue;
-                }
-            };
-            let took = started.elapsed();
-            if took >= SLOW_INJECT {
-                warn!("Einspeisen hing {} ms ({step}) – so lange warteten alle folgenden Eingaben", took.as_millis());
-            }
-        }
-    })?;
+    std::thread::Builder::new().name("qross-inject".into()).spawn(move || inject_loop(injector, inject_rx))?;
 
     let mut backoff = Backoff::new();
     let events = events.unwrap_or_else(wake::system_events);
@@ -619,9 +658,9 @@ async fn session(
     let mut probe: Option<Probe> = None;
     // Was der Cursor-Finder hier zeigt; ältere Server melden nichts, dann bleibt er aus.
     let mut finder_style = CursorFinder::OFF;
-    // Protokoll des Betretens (siehe `switch_trace`): verworfene Bewegungen, das laufende Protokoll
+    // Protokoll des Betretens (siehe `switch_trace`): Bewegungen vor dem `Enter`, das laufende Protokoll
     // und die Rückmeldungen des Einspeise-Threads dazu
-    let mut discarded = Discarded::default();
+    let mut early_moves = EarlyMoves::default();
     let mut entering: Option<ClientTrace> = None;
     let (traced_tx, mut traced_rx) = mpsc::unbounded_channel::<Measured>();
 
@@ -641,7 +680,7 @@ async fn session(
                             let id = SampleId::Mouse { epoch: mv.epoch, seq: mv.seq };
                             trace_move(&mut entering, inject, &traced_tx, id, received);
                         }
-                        None => discarded.add(mv.epoch, received),
+                        None => early_moves.add(mv.epoch, received),
                     },
                     FromServer::Delta(delta, received) => match state.on_delta(delta) {
                         Some(event) => {
@@ -651,7 +690,7 @@ async fn session(
                             let id = SampleId::Mouse { epoch: delta.epoch, seq: delta.seq };
                             trace_move(&mut entering, inject, &traced_tx, id, received);
                         }
-                        None => discarded.add(delta.epoch, received),
+                        None => early_moves.add(delta.epoch, received),
                     },
                     FromServer::Input(input, stamp) => {
                         let entered = match &input {
@@ -678,6 +717,13 @@ async fn session(
                             _ => None,
                         };
                         let (events, transition) = state.on_input(input);
+                        // Eine Bewegung, die ihr Enter überholt hatte, folgt ihm gleich.
+                        if entered.is_some() && events.len() > 1 {
+                            moves += 1;
+                            if let Some(&Inject::MoveTo { x, y }) = events.last() {
+                                last_pos = (x, y);
+                            }
+                        }
                         let injects = !events.is_empty();
                         inject_all(inject, events);
                         if injects {
@@ -704,7 +750,7 @@ async fn session(
                                     earlier.log();
                                 }
                                 if let Some(epoch) = entered {
-                                    entering = Some(ClientTrace::start(epoch, Instant::now(), &mut discarded));
+                                    entering = Some(ClientTrace::start(epoch, Instant::now(), &mut early_moves));
                                 }
                             }
                             Some(Transition::Left) => {
@@ -1122,4 +1168,71 @@ async fn read_server_stream(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use qross_platform::dryrun::RecordingInjector;
+    use qross_proto::KeyCode;
+
+    use super::*;
+
+    fn mark(seq: u32, done: &mpsc::UnboundedSender<Measured>) -> ToInjector {
+        ToInjector::Measured { stamp: Stamp { id: SampleId::Mouse { epoch: 1, seq }, received: Instant::now() }, done: done.clone() }
+    }
+
+    fn move_to(x: i32) -> ToInjector {
+        ToInjector::Inject(Inject::MoveTo { x, y: 0 })
+    }
+
+    #[test]
+    fn waiting_moves_go_out_together() {
+        let (jobs, waiting) = std::sync::mpsc::channel();
+        let (done, _answers) = mpsc::unbounded_channel();
+        // Von Positionen zählt nur die letzte; die Stichproben dazwischen kommen mit.
+        for job in [mark(1, &done), move_to(2), mark(2, &done), move_to(3)] {
+            jobs.send(job).unwrap();
+        }
+        jobs.send(ToInjector::Inject(Inject::Key { key: KeyCode::A, down: true })).unwrap();
+        let (event, marks, next) = coalesce(Inject::MoveTo { x: 1, y: 0 }, &waiting);
+        assert_eq!((event, marks.len()), (Inject::MoveTo { x: 3, y: 0 }, 2));
+        assert!(matches!(next, Some(ToInjector::Inject(Inject::Key { .. }))), "danach der Reihe nach weiter");
+
+        // Relative Bewegungen zählen alle, eine Position beendet sie.
+        for (dx, dy) in [(3, -1), (4, -2)] {
+            jobs.send(ToInjector::Inject(Inject::MoveBy { dx, dy })).unwrap();
+        }
+        jobs.send(move_to(9)).unwrap();
+        let (event, _, next) = coalesce(Inject::MoveBy { dx: 1, dy: 0 }, &waiting);
+        assert_eq!(event, Inject::MoveBy { dx: 8, dy: -3 });
+        assert!(matches!(next, Some(ToInjector::Inject(Inject::MoveTo { x: 9, y: 0 }))));
+
+        let (event, marks, next) = coalesce(Inject::MoveTo { x: 9, y: 0 }, &waiting);
+        assert_eq!((event, marks.len()), (Inject::MoveTo { x: 9, y: 0 }, 0));
+        assert!(next.is_none(), "nichts wartet");
+    }
+
+    #[test]
+    fn a_burst_of_moves_is_injected_once_and_every_sample_answered() {
+        let (jobs, waiting) = std::sync::mpsc::channel();
+        let (done, mut answers) = mpsc::unbounded_channel();
+        // Nach einem Hänger kommen viele Bewegungen auf einmal an.
+        for x in 1..=100 {
+            jobs.send(move_to(x)).unwrap();
+            if x % 32 == 0 {
+                jobs.send(mark(x as u32, &done)).unwrap();
+            }
+        }
+        jobs.send(ToInjector::Inject(Inject::Key { key: KeyCode::A, down: true })).unwrap();
+        drop(jobs);
+        let injected = RecordingInjector::default();
+        inject_loop(Box::new(injected.clone()), waiting);
+        assert_eq!(
+            *injected.0.lock().unwrap(),
+            [Inject::MoveTo { x: 100, y: 0 }, Inject::Key { key: KeyCode::A, down: true }],
+            "die alte Bahn wird nicht nachgefahren"
+        );
+        let answered: Vec<_> = std::iter::from_fn(|| answers.try_recv().ok()).collect();
+        assert_eq!(answered.len(), 3, "jede Stichprobe bekommt ihre Antwort");
+    }
 }

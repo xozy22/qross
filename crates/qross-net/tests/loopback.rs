@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use qross_core::chars::{KeyChars, Produces};
 use qross_core::finder::{DragIcon, DragPreview};
@@ -19,9 +19,9 @@ use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, FinderCall, RecordingCapture, RecordingFinder, RecordingInjector, SharedClipboard};
 use qross_platform::Clipboard;
 use qross_proto::{
-    read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, DragMessage, Edge,
-    FileEntry, FrameError, GameState, KeyCode, Latency, LatencySummary, LockState, MouseButton, MouseMove, Platform,
-    Rect, ScreenInfo, StreamKind, LATENCY_SINCE, PROTOCOL_VERSION, SERVER_VERSION,
+    encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
+    DragMessage, Edge, FileEntry, FrameError, GameState, Input, KeyCode, Latency, LatencySummary, LockState, MouseButton,
+    MouseMove, Platform, Rect, ScreenInfo, StreamKind, LATENCY_SINCE, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -435,6 +435,63 @@ async fn images_and_html_travel_through_the_clipboard() {
     wait_for("Bild beim Server", || server_clip.clone().read().as_ref() == Some(&from_client)).await;
 }
 
+/// Ein Bild, das größer ist als das, was beim Wechsel sofort mitgeht (64 KB)
+fn large_image() -> ClipboardData {
+    let image = ClipboardData { png: Some(screenshot_png(800, 450)), ..ClipboardData::default() };
+    assert!(image.png.as_ref().unwrap().len() > 64 * 1024);
+    image
+}
+
+/// Drüben die Maus bewegen, bis `until` gilt oder `limit` um ist; `true`, wenn `until` galt
+async fn keep_moving(s: &Setup, limit: Duration, mut until: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < limit {
+        if until() {
+            return true;
+        }
+        s.events.send(CaptureEvent::MouseDelta { dx: 1, dy: 0 }).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    until()
+}
+
+#[tokio::test]
+async fn large_clipboard_content_waits_until_the_mouse_rests() {
+    let mut s = start(true, None);
+    let image = large_image();
+    s.server_clip.write(&image).unwrap();
+    enter_laptop(&s).await;
+    // Solange sich die Maus drüben bewegt, hat sie die Leitung für sich.
+    let client_clip = s.client_clip.clone();
+    let arrived = keep_moving(&s, Duration::from_millis(500), || client_clip.clone().read().is_some()).await;
+    assert!(!arrived, "das Bild kam, während sich die Maus bewegte");
+    wait_for("Bild beim Client, sobald die Maus ruht", || client_clip.clone().read().as_ref() == Some(&image)).await;
+
+    // Text geht dagegen sofort mit.
+    leave_laptop(&s).await;
+    s.server_clip.set_text("Gruß").unwrap();
+    reenter_laptop(&s).await;
+    let arrived = keep_moving(&s, Duration::from_millis(500), || client_clip.clone().text().as_deref() == Some("Gruß")).await;
+    assert!(arrived, "Text muss nicht warten, bis die Maus ruht");
+}
+
+#[tokio::test]
+async fn a_waiting_image_never_overwrites_newer_content() {
+    let mut s = start(true, None);
+    s.server_clip.write(&large_image()).unwrap();
+    enter_laptop(&s).await;
+    // Während das Bild noch wartet, wird auf dem Laptop kopiert, und der Cursor geht zurück.
+    s.client_clip.set_text("Neu vom Laptop").unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let server_clip = s.server_clip.clone();
+    let arrived =
+        keep_moving(&s, Duration::from_secs(5), || server_clip.clone().text().as_deref() == Some("Neu vom Laptop")).await;
+    assert!(arrived, "Text vom Laptop beim Server");
+    // Länger, als ein großer Inhalt höchstens wartet
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(s.client_clip.read(), Some(ClipboardData::from_text("Neu vom Laptop")), "das ältere Bild bleibt beim Server");
+}
+
 /// Kopiert wie ein Passwortmanager: Inhalt plus Markierung
 fn copy_secret(clipboard: &SharedClipboard, text: &str, marker: &'static str) {
     let mut inner = clipboard.0.lock().unwrap();
@@ -669,6 +726,40 @@ async fn unknown_client_is_rejected() {
     }
     assert!(s.capture.0.lock().unwrap().is_empty(), "ein nicht freigegebener Client darf keine Eingaben bekommen");
     assert!(!s.client_task.is_finished(), "Client versucht es weiter (Freigabe kann nachträglich erfolgen)");
+}
+
+#[tokio::test]
+async fn an_unchecked_peer_gets_little_room_and_time_for_its_hello() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let layout =
+        Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let server = Server::bind(config, &Identity::generate().unwrap(), TrustStore::in_memory()).unwrap();
+    let addr = server.local_addr().unwrap();
+    let (_events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(RecordingCapture::default()),
+        events: events_rx,
+        clipboard: Box::new(SharedClipboard::default()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+        finder: None,
+    }));
+
+    // Mit irgendeinem Zertifikat kommt jeder bis zum Hello. Ein Längenfeld von fast 64 MB wird gleich
+    // abgewiesen, statt dafür Speicher anzulegen und auf den Rest zu warten.
+    let (_endpoint, conn) = connect_raw(addr, &Identity::generate().unwrap()).await;
+    let (mut control, _control_rx) = conn.open_bi().await.unwrap();
+    control.write_all(&(64 * 1024 * 1024 - 1u32).to_be_bytes()).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(2), conn.closed()).await.is_ok(), "zu großes Hello: getrennt");
+
+    // Wer nach dem Handshake nichts schickt, ist nach 3 s draußen.
+    let (_endpoint, conn) = connect_raw(addr, &Identity::generate().unwrap()).await;
+    let started = Instant::now();
+    assert!(tokio::time::timeout(Duration::from_secs(10), conn.closed()).await.is_ok(), "ohne Hello: getrennt");
+    assert!(started.elapsed() >= Duration::from_millis(2500), "schon nach {:?}", started.elapsed());
+    server_task.abort();
 }
 
 #[tokio::test]
@@ -1045,6 +1136,53 @@ async fn an_older_client_stays_connected_and_gets_positions() {
     assert!(conn.close_reason().is_none(), "der alte Client bleibt verbunden");
     reader.abort();
     server_task.abort();
+}
+
+#[tokio::test]
+async fn a_move_that_overtakes_its_enter_is_not_lost() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let endpoint =
+        quinn::Endpoint::server(qross_net::tls::server_config(&server_id).unwrap(), "127.0.0.1:0".parse().unwrap())
+            .unwrap();
+    let addr = endpoint.local_addr().unwrap();
+    let injected = RecordingInjector::default();
+    let client_task = tokio::spawn(client::run(
+        ClientConfig {
+            name: "laptop".into(),
+            server: addr.to_string(),
+            server_fingerprint: Some(server_id.fingerprint()),
+            clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+            share_concealed: false,
+        },
+        Identity::generate().unwrap(),
+        TrustStore::in_memory(),
+        ClientPlatform {
+            injector: Box::new(injected.clone()),
+            clipboard: Box::new(SharedClipboard::default()),
+            screen: Box::new(|| LAPTOP),
+            monitors: Box::new(Vec::new),
+            game: Box::new(GameState::default),
+            finder: None,
+        },
+    ));
+    let conn = endpoint.accept().await.unwrap().await.unwrap();
+    let (mut control, mut control_rx) = conn.accept_bi().await.unwrap();
+    read_frame::<_, Control>(&mut control_rx).await.unwrap();
+    let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
+    write_frame(&mut control, &welcome).await.unwrap();
+
+    // Das Enter muss auf dem Input-Stream nachgeschickt werden; die erste Bewegung des Besuchs ist schneller.
+    let first = Datagram::MouseMove(MouseMove { epoch: 1, seq: 1, x: 500, y: 300 });
+    conn.send_datagram(encode_datagram(&first).into()).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut input = conn.open_uni().await.unwrap();
+    input.write_all(&[StreamKind::Input as u8]).await.unwrap();
+    write_frame(&mut input, &Input::Enter { epoch: 1, x: 1, y: 399 }).await.unwrap();
+    let recorded = injected.clone();
+    wait_for("Bewegung gleich nach dem Enter", || recorded.0.lock().unwrap().contains(&Inject::MoveTo { x: 500, y: 300 }))
+        .await;
+    client_task.abort();
 }
 
 /// Ein Server wie Qross 0.5 bzw. 0.6 (`welcome_version`). Ein Client mit Vollbildprogramm meldet

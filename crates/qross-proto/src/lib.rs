@@ -18,7 +18,7 @@ mod latency;
 
 use serde::{Deserialize, Serialize};
 
-pub use frame::{decode_datagram, encode_datagram, read_frame, write_frame, FrameError, MAX_FRAME_LEN};
+pub use frame::{decode_datagram, encode_datagram, read_frame, read_frame_up_to, write_frame, FrameError, MAX_FRAME_LEN};
 pub use geometry::{Edge, Rect};
 pub use input::{KeyCode, MouseButton};
 pub use latency::{

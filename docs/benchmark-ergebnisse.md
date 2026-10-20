@@ -59,7 +59,7 @@ Cursor p99 4,2 ms mit Datagrammen gegenüber 12,2 ms mit einem gemeinsamen Strea
    Getrennte Streams lösen das bei Verlust komplett. Ohne Verlust bleibt ein Rest (p99 32 ms), weil der
    Clipboard-Transfer die Leitung füllt und die Eingaben in der Netzwerk-Warteschlange mitwarten.
    → Bulk-Transfers müssen wir zusätzlich **drosseln bzw. priorisieren** (z. B. Senderate des
-   Clipboard-Streams begrenzen, Eingaben bevorzugen).
+   Clipboard-Streams begrenzen, Eingaben bevorzugen). Stand in Qross: siehe 3c.
 
 ## 3a. Congestion-Controller bei großen Dateien
 
@@ -98,12 +98,68 @@ Datagrammen+Streams, 200 Tastendrücke/s (ca. 4.000 je Lauf), 20 s.
 Ergebnis: kein messbarer Vorteil, die Unterschiede liegen in der Streuung. Qross bleibt bei den
 Standard-ACKs. Zum Vergleich: TCP+TLS im Synergy-Stil lag unter denselben Verlustraten bei p99 33–590 ms.
 
+## 3c. Qross selbst: Eingaben während Dateiübertragungen und nach einem Hänger
+
+Werkzeug: [`crates/qross-net/examples/latency_probe.rs`](../crates/qross-net/examples/latency_probe.rs),
+Datum: 2026-10-20. Anders als `netbench` misst das die echten Server und Clients von Qross (Release-Build unter
+Windows, beide in einem Prozess mit je eigener Laufzeit, dazwischen ein UDP-Vermittler im Userspace). Der Hook ist
+nachgestellt: eine Bewegung im Millisekundentakt (unter Windows rund 620 je Sekunde), mit jeder 20. ein
+Tastendruck. Gemessen wird von Ende zu Ende, vom Hook bis eingespeist; „Maus“ = bis diese oder eine neuere
+Position eingespeist ist. Je Szenario zwei Läufe (Lauf 1 / Lauf 2). Alle Werte in ms.
+
+**Dateien** (`files`): 50 Mbit/s, 64 KB Warteschlange am Engpass (gut 10 ms), 1 ms Laufzeit je Richtung. Beim
+Wechsel gehen 320 kopierte Dateien zu 256 KB (84 MB) zum Client. Werte, solange die Übertragung läuft:
+
+| Stand | Maus p50 | p95 | p99 | max | Taste p50 | p95 | p99 | max | Mbit/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| vorher | 10,1 / 9,8 | 24,9 / 24,4 | 29,8 / 27,8 | 169 / 32 | 114 / 85 | 1.800 / 928 | 2.234 / 1.500 | 2.389 / 1.696 | 32,5 / 32,6 |
+| Zwischenstand: drei Streams, reihum | 6,8 / 10,1 | 25,4 / 43,3 | 63 / 179 | 344 / 613 | 6,7 / 9,2 | 24,6 / 37,2 | 65 / 168 | 302 / 363 | 25,9 / 27,5 |
+| nachher | 9,7 / 9,8 | 24,7 / 24,8 | 29,1 / 29,2 | 42 / 43 | 10,8 / 9,6 | 25,5 / 24,3 | 29,9 / 28,3 | 50 / 32 | 33,3 / 32,6 |
+
+Ohne Übertragung lagen Maus und Tasten in allen Läufen bei p50 2,0–2,4 ms und p99 3,6–6,4 ms; ganz ohne
+Vermittler (Loopback) vorher wie nachher bei p50 0,2 ms und p99 0,8–1,7 ms.
+
+1. **Vorher warteten Tastendrücke bis zu 2,4 s**, fast ganz beim Schreiben auf den Input-Stream (Server-Anteil der
+   Eingabekette): Jede Datei lief auf einem eigenen Stream, und der Sender schrieb weiter, ohne auf Bestätigung zu
+   warten. Die fertig geschriebenen Streams füllten quinns Sendefenster (10 MB je Verbindung); dann kam auch der
+   Input-Stream erst wieder zum Zug, wenn etwas bestätigt war. Die Maus betraf das nicht, Datagramme zählen nicht
+   zum Sendefenster.
+2. **Jetzt warten höchstens drei fertig geschriebene Datei-Streams** auf ihre Bestätigung, und jede Datei hat eine
+   Stufe niedrigere Priorität als die vorige. Tasten liegen damit wie die Maus bei p99 29 ms.
+3. **Die Grenze allein machte die Maus schlechter** (Zwischenstand): Streams gleicher Priorität teilt quinn reihum
+   auf, die wartenden wurden also zugleich fertig. Bis die nächsten nachrückten, stand die Leitung kurz still, danach
+   kam ein Schwall, an dessen Ende Pakete in der vollen Warteschlange verloren gingen; erst die Verlusterkennung per
+   Zeitablauf löste das. Mit gestaffelter Priorität geht die älteste Datei zuerst ganz hinaus, der Strom bleibt
+   gleichmäßig, und der Durchsatz ist wieder der alte.
+4. **Was bleibt**, ist die Warteschlange am Engpass: Füllt die Übertragung die Leitung, warten Maus und Tasten darin
+   mit (hier p95 25 ms). Große Inhalte der Zwischenablage gehen deshalb erst, wenn die Maus nach dem Wechsel 200 ms
+   ruht, höchstens 1 s danach; im Test ruht sie nie, die Übertragung beginnt dort nach 1 s statt sofort.
+
+**Hänger** (`hang`): ohne Engpass, 1 ms Laufzeit je Richtung; zweimal 2 s lang kommt nichts durch (Funkloch). Je
+Lauf zwei Hänger, also vier Werte je Stand. „Veraltet“: beim Einspeisen über 100 ms alt.
+
+| Stand | danach veraltet nachgespielt | die älteste | erste Bewegung nach dem Hänger | wieder aktuell |
+|---|---:|---:|---:|---:|
+| vorher | 1.593–1.762 Positionen | 2,6–2,8 s | 1,9–2,2 s | 1,95–2,23 s |
+| nachher | 0–1 Position | 0,2 s | 2,0–2,2 s | 2,0–2,2 s |
+
+Vorher hielt quinns Warteschlange für Datagramme (1 MB, über 20 s Bewegungen) alles fest, was während des Hängers
+anfiel, und schickte es danach der Reihe nach: Der Cursor fuhr die alte Bahn nach. Jetzt fasst sie 4 KB (etwa 100
+Bewegungen), und der Client fasst wartende Bewegungen zusammen.
+
+**Nicht behoben:** Bis nach einem Hänger überhaupt wieder etwas ankommt, vergeht etwa noch einmal so viel Zeit,
+wie er dauerte. Solange nichts bestätigt wird, verdoppelt quinn die Wartezeit bis zur nächsten Sondierung (PTO);
+die erste nach dem Ende des Hängers kommt entsprechend spät.
+
 ## 4. Entscheidung (Empfehlung)
 
 **Eigenes Protokoll auf QUIC** (`quinn` + `rustls`):
 - Maus-Bewegung: QUIC-Datagramme mit Sequenznummer, neueste gewinnt
 - Tasten/Maustasten/Rad/Enter/Leave: eigener zuverlässiger Stream
-- Clipboard/Dateien: je Übertragung ein eigener Stream, Senderate gedrosselt
+- Clipboard/Dateien: je Übertragung ein eigener Stream, Senderate gedrosselt. Stand 2026-10-20: Die Rate ist nicht
+  begrenzt (dafür müsste Qross die Kapazität der Leitung kennen, und die schwankt im WLAN). Stattdessen warten
+  höchstens drei Datei-Streams auf ihre Bestätigung, nacheinander priorisiert, und große Inhalte der
+  Zwischenablage gehen erst, wenn die Maus nach dem Wechsel ruht (siehe 3c).
 - Control: Hello, Bildschirm-Info, Keepalive
 
 Optional später ein Kompatibilitäts-Adapter für das Synergy/Deskflow-Protokoll (TCP 24800).
@@ -116,3 +172,5 @@ Optional später ein Kompatibilitäts-Adapter für das Synergy/Deskflow-Protokol
 - Gemessen wird nur der Netzwerkpfad, ohne Hook- und `SendInput`-Latenz. Nur ein Lauf je Konfiguration
   (außer TCP), es gibt also Lauf-zu-Lauf-Streuung im einstelligen ms-Bereich bei p99.9/max.
 - Rohdaten: `bench/netbench/results-netem.csv`, `results-netem-clipboard.csv`, `final-run.log`.
+- 3c: ein Rechner, Vermittler im Userspace (Zeitgeber mit etwa 1 ms Auflösung), Hook und Einspeisen nachgestellt,
+  zwei Läufe je Szenario. Der Engpass verliert nur, wenn seine Warteschlange voll ist, nicht zufällig.
