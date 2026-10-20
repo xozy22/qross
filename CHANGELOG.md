@@ -8,6 +8,16 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.12.1] - 2026-10-20
+
+### Behoben
+
+- **Kürzel aus einer einzelnen Zusatztaste:** War etwa „Strg links“ als Kürzel belegt, löste es schon beim
+  Drücken aus. Strg+C wechselte so sofort auf den anderen Rechner, mitten auf den Bildschirm, und das C
+  landete dort statt im Programm; kopiert wurde nichts. Eine Zusatztaste allein wirkt jetzt erst beim
+  Loslassen und nur, wenn dazwischen keine andere Taste kam: Strg+C bleibt Strg+C. Das gilt für Wechsel-Kürzel
+  und die Fang-Taste. Unter Windows öffnet ein so getipptes Win oder Alt kein Startmenü bzw. keine Menüleiste.
+
 ## [0.12.0] - 2026-10-20
 
 ### Neu
@@ -484,6 +494,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.12.1]: https://github.com/xozy22/qross/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/xozy22/qross/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/xozy22/qross/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/xozy22/qross/compare/v0.9.0...v0.10.0
