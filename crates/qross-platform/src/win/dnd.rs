@@ -74,7 +74,7 @@ pub fn start() -> anyhow::Result<()> {
             ready_rx.recv().map_err(|e| e.to_string())?
         })
         .clone()
-        .map_err(|e| anyhow!("Drag-&-Drop-Erkennung nicht verfügbar: {e}"))
+        .map_err(|e| anyhow!("drag and drop detection not available: {e}"))
 }
 
 /// Fordert eine Prüfung an; `reply` bekommt die gezogenen Dateien (leer: kein Datei-Drag).
@@ -196,7 +196,7 @@ fn finish(hwnd: HWND, files: Vec<PathBuf>) {
         p.active = false;
         p.empty_at = files.is_empty().then(|| BUTTON_RELEASES.load(Ordering::Acquire));
         if !files.is_empty() {
-            tracing::info!("{} Datei(en) werden über die Kante gezogen", files.len());
+            tracing::info!("{} file(s) being dragged across the edge", files.len());
         }
         if let Some(reply) = p.reply.take() {
             reply(files);

@@ -1,6 +1,7 @@
 //! Startet und stoppt Server bzw. Client im eigenen Prozess und führt den Status für das Fenster.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use qross_core::sharing::SharingRules;
 use qross_core::CaptureEvent;
+use qross_gui::i18n::{self, Lang};
 use qross_gui::lifecycle::AppState;
 use qross_gui::profiles::{self, Place, ProfileEdit, Profiles};
 use qross_gui::secure_input::{self, SecureInputHint};
@@ -84,12 +86,56 @@ pub struct PendingClient {
     pub last_seen: u64,
 }
 
+/// Woraus [`Status::message`] entsteht. `Runtime::update` bildet daraus bei jeder Änderung den Text in
+/// der aktuellen Sprache, so passt er auch nach einem Sprachwechsel.
+#[derive(Clone, Debug, Default)]
+pub enum StatusText {
+    #[default]
+    None,
+    Starting,
+    /// Server wartet auf Clients (UDP-Port)
+    Listening(u16),
+    /// Client versucht es bei dieser Adresse
+    Connecting(SocketAddr),
+    Connected { server: String, addr: SocketAddr },
+    /// Verbindung verloren (Grund aus `qross_net`), gleich folgt ein neuer Versuch
+    Retrying(String),
+    /// Server bzw. Client hat sich beendet
+    Finished,
+    /// Fertiger Text, etwa ein Fehler; bleibt, wie er ist
+    Text(String),
+}
+
+impl StatusText {
+    fn render(&self, lang: Lang) -> String {
+        match (self, lang) {
+            (Self::None, _) => String::new(),
+            (Self::Starting, Lang::De) => "Startet …".into(),
+            (Self::Starting, Lang::En) => "Starting …".into(),
+            (Self::Listening(port), Lang::De) => format!("Wartet auf Clients (UDP {port})"),
+            (Self::Listening(port), Lang::En) => format!("Waiting for clients (UDP {port})"),
+            (Self::Connecting(addr), Lang::De) => format!("Verbinde mit {addr} …"),
+            (Self::Connecting(addr), Lang::En) => format!("Connecting to {addr} …"),
+            (Self::Connected { server, addr }, Lang::De) => format!("Verbunden mit „{server}“ ({addr})"),
+            (Self::Connected { server, addr }, Lang::En) => format!("Connected to “{server}” ({addr})"),
+            (Self::Retrying(reason), Lang::De) => format!("{reason} – neuer Versuch in Kürze"),
+            (Self::Retrying(reason), Lang::En) => format!("{reason} – retrying shortly"),
+            (Self::Finished, Lang::De) => "Beendet".into(),
+            (Self::Finished, Lang::En) => "Stopped".into(),
+            (Self::Text(text), _) => text.clone(),
+        }
+    }
+}
+
 #[derive(Serialize, Clone, Debug, Default)]
 pub struct Status {
     /// Rolle der laufenden Instanz (`None`, wenn gestoppt)
     pub role: Option<Role>,
     pub phase: Phase,
+    /// In Worten, aus `text` in der aktuellen Sprache
     pub message: String,
+    #[serde(skip)]
+    pub text: StatusText,
     /// Server: Bildschirm, auf dem der Cursor gerade ist
     pub cursor_on: Option<String>,
     /// Server: Cursor per Rollen-Taste auf `cursor_on` festgehalten
@@ -161,7 +207,7 @@ pub struct FoundServer {
 pub struct QualityEvent {
     /// Server: Name des Clients; Client: `None` (die Verbindung zum Server)
     pub peer: Option<String>,
-    /// „Sehr gut“, „Gut“, „Mäßig“ oder „Schlecht“
+    /// Stufe in Worten, englisch wie im Log; das Fenster bildet seinen Text selbst
     pub label: &'static str,
     #[serde(flatten)]
     pub quality: Quality,
@@ -304,7 +350,7 @@ impl Runtime {
         let mut state = self.app_state.lock().unwrap();
         change(&mut state);
         if let Err(e) = state.save(&self.data_dir) {
-            warn!("App-Zustand nicht gespeichert: {e:#}");
+            warn!("failed to save app state: {e:#}");
         }
     }
 
@@ -334,16 +380,24 @@ impl Runtime {
         Identity::load_or_create(&self.data_dir)
     }
 
-    /// Ändert den Status und meldet ihn an Fenster und Tray.
+    /// Ändert den Status und meldet ihn an Fenster und Tray. Texte entstehen dabei in der aktuellen
+    /// Sprache.
     fn update(&self, change: impl FnOnce(&mut Status)) {
+        let lang = i18n::lang();
         let status = {
             let mut status = self.status.lock().unwrap();
             change(&mut status);
-            status.secure_input = secure_input::hint(status.secure_holder.as_ref(), status.clients.len());
+            status.message = status.text.render(lang);
+            status.secure_input = secure_input::hint(status.secure_holder.as_ref(), status.clients.len(), lang);
             status.clone()
         };
         crate::tray::update(&self.app);
         let _ = self.app.emit("status", status);
+    }
+
+    /// Nach einem Sprachwechsel: die Texte des Status neu bilden und an Fenster und Tray melden
+    pub fn language_changed(&self) {
+        self.update(|_| {});
     }
 
     fn is_current(&self, generation: u64) -> bool {
@@ -365,7 +419,7 @@ impl Runtime {
         }
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.update(|s| {
-            *s = Status { role: Some(settings.role), phase: Phase::Starting, message: "Startet …".into(), ..Status::default() }
+            *s = Status { role: Some(settings.role), phase: Phase::Starting, text: StatusText::Starting, ..Status::default() }
         });
         // Schon vor dem Start, damit auch die ersten Eingaben nicht gebremst ankommen
         let responsive = qross_platform::keep_responsive();
@@ -382,9 +436,9 @@ impl Runtime {
             }
             Err(e) => {
                 *self.responsive.lock().unwrap() = None;
-                warn!("Start fehlgeschlagen: {e:#}");
-                let message = format!("{e:#}");
-                self.update(|s| *s = Status { phase: Phase::Error, message, ..Status::default() });
+                warn!("failed to start: {e:#}");
+                let text = StatusText::Text(format!("{e:#}"));
+                self.update(|s| *s = Status { phase: Phase::Error, text, ..Status::default() });
                 Err(e)
             }
         }
@@ -402,7 +456,7 @@ impl Runtime {
         if let Some(old) = running.take() {
             self.generation.fetch_add(1, Ordering::SeqCst);
             self.shutdown(old).await;
-            info!("gestoppt");
+            info!("stopped");
         }
         *self.responsive.lock().unwrap() = None;
         self.update(|s| *s = Status::default());
@@ -448,7 +502,7 @@ impl Runtime {
         let mut profiles = self.profiles.lock().unwrap();
         if profiles.sync(&settings) {
             if let Err(e) = profiles.save(&self.data_dir) {
-                warn!("Profil nicht gespeichert: {e:#}");
+                warn!("failed to save profile: {e:#}");
             }
         }
         Ok(Some((old, settings.clone())))
@@ -456,9 +510,9 @@ impl Runtime {
 
     /// `qross.toml` für `qross server --config`, sofern das Layout gültig ist
     fn export(&self, settings: &Settings) {
-        if settings.server.validate().is_ok() {
+        if settings.server.validate(i18n::lang()).is_ok() {
             if let Err(e) = std::fs::write(self.data_dir.join(EXPORT_FILE), settings.server_toml()) {
-                warn!("{EXPORT_FILE} nicht geschrieben: {e}");
+                warn!("failed to write {EXPORT_FILE}: {e}");
             }
         }
     }
@@ -481,7 +535,7 @@ impl Runtime {
             let settings = self.settings.lock().unwrap();
             let mut profiles = self.profiles.lock().unwrap();
             let mut changed = profiles.clone();
-            let note = changed.edit(edit, &settings)?;
+            let note = changed.edit(edit, &settings, i18n::lang())?;
             changed.save(&self.data_dir).map_err(|e| format!("{e:#}"))?;
             *profiles = changed;
             note
@@ -497,7 +551,7 @@ impl Runtime {
             let mut settings = self.settings.lock().unwrap();
             let mut profiles = self.profiles.lock().unwrap();
             let (mut next_settings, mut next_profiles) = (settings.clone(), profiles.clone());
-            next_profiles.activate(id, &mut next_settings).map_err(|e| anyhow!(e))?;
+            next_profiles.activate(id, &mut next_settings, i18n::lang()).map_err(|e| anyhow!(e))?;
             // Erst gui.json: Sie nennt das Profil, zu dem ihre Werte gehören (siehe Profiles::attach).
             next_settings.save(&self.data_dir)?;
             next_profiles.save(&self.data_dir)?;
@@ -506,11 +560,11 @@ impl Runtime {
             *profiles = next_profiles;
             (std::mem::replace(&mut *settings, next_settings.clone()), next_settings, name)
         };
-        info!("Profil „{name}“ aktiv");
+        info!("profile '{name}' active");
         self.profiles_changed();
         let _ = self.app.emit("settings", &new);
         if self.status().running() && Place::capture(&old) != Place::capture(&new) {
-            info!("{} startet mit dem Profil neu", if new.role == Role::Server { "Server" } else { "Client" });
+            info!("{} restarting with the profile", if new.role == Role::Server { "server" } else { "client" });
             return self.start().await;
         }
         Ok(None)
@@ -542,10 +596,11 @@ impl Runtime {
 
     async fn start_server(self: &Arc<Self>, settings: &Settings, generation: u64) -> Result<Running> {
         let s = &settings.server;
-        let layout = s.validate().map_err(|e| anyhow!(e))?;
-        let keys = s.effective_keys().config().map_err(|e| anyhow!(e))?;
+        // Die Meldungen stehen im Fenster, deshalb in der Sprache der Oberfläche
+        let layout = s.validate(i18n::lang()).map_err(|e| anyhow!(e))?;
+        let keys = s.effective_keys().config(i18n::lang()).map_err(|e| anyhow!(e))?;
         let identity = self.identity()?;
-        info!("Fingerprint dieses Servers: {}", identity.fingerprint());
+        info!("fingerprint of this server: {}", identity.fingerprint());
 
         // Nach einem Neustart kann der Port noch kurz belegt sein.
         let mut attempt = 0;
@@ -556,14 +611,14 @@ impl Runtime {
                 Ok(server) => break server,
                 Err(e) if attempt < 5 => {
                     attempt += 1;
-                    warn!("{e:#} – neuer Versuch");
+                    warn!("{e:#}; retrying");
                     tokio::time::sleep(Duration::from_millis(400)).await;
                 }
                 Err(e) => return Err(e),
             }
         };
         for name in s.isolated() {
-            warn!("„{name}“ hat im Layout keinen Nachbarn – der Cursor kann ihn nicht erreichen");
+            warn!("'{name}' has no neighbor in the layout; the cursor can't reach it");
         }
 
         let (capture, events) = self.capture_events()?;
@@ -649,7 +704,7 @@ impl Runtime {
         match notice {
             ServerNotice::Listening { addr } => self.update(|s| {
                 s.phase = Phase::Listening;
-                s.message = format!("Wartet auf Clients (UDP {})", addr.port());
+                s.text = StatusText::Listening(addr.port());
                 s.cursor_on = Some(settings.name.clone());
             }),
             ServerNotice::ClientConnected { name, addr, screen } => self.update(|s| {
@@ -749,7 +804,7 @@ impl Runtime {
     /// Hinweis nicht ohnehin vorn ist.
     fn on_secure_input_hold(&self, from: Option<String>) {
         let app = self.status.lock().unwrap().secure_holder.as_ref().and_then(|h| h.app.clone());
-        let (title, body) = secure_input::notification(from.as_deref(), app.as_deref());
+        let (title, body) = secure_input::notification(from.as_deref(), app.as_deref(), i18n::lang());
         if !crate::window_in_front(&self.app) {
             crate::notify(&self.app, &title, &body);
         }
@@ -760,7 +815,7 @@ impl Runtime {
         let fingerprint: Fingerprint = fingerprint.parse()?;
         let path = self.data_dir.join(TRUSTED_CLIENTS_FILE);
         TrustStore::load(&path)?.trust(name, &fingerprint)?;
-        info!("„{name}“ ist freigegeben ({fingerprint})");
+        info!("'{name}' approved ({fingerprint})");
         self.update(|s| s.pending.retain(|p| p.name != name));
         Ok(())
     }
@@ -778,7 +833,10 @@ impl Runtime {
     async fn needs_confirmation(&self, settings: &Settings) -> Result<Option<ServerProbe>> {
         let address = settings.client.address.trim();
         if address.is_empty() {
-            return Err(anyhow!("Bitte die Adresse des Servers eingeben."));
+            return Err(anyhow!(match i18n::lang() {
+                Lang::De => "Bitte die Adresse des Servers eingeben.",
+                Lang::En => "Please enter the server's address.",
+            }));
         }
         let trust = TrustStore::load(&self.data_dir.join(KNOWN_SERVERS_FILE))?;
         if trust.expected(address).is_some() {
@@ -788,13 +846,21 @@ impl Runtime {
         Ok(Some(self.probe_server(address).await?))
     }
 
-    /// Fragt den Fingerprint des Servers ab, ohne sich anzumelden.
+    /// Fragt den Fingerprint des Servers ab, ohne sich anzumelden. Fehler mit Überschrift in der
+    /// Sprache der Oberfläche (das Fenster zeigt sie), Einzelheiten englisch.
     pub async fn probe_server(&self, address: &str) -> Result<ServerProbe> {
         let identity = self.identity()?;
+        let lang = i18n::lang();
         let (addr, fingerprint) = tokio::time::timeout(Duration::from_secs(8), client::probe_fingerprint(address, &identity))
             .await
-            .map_err(|_| anyhow!("Server {address} antwortet nicht"))?
-            .with_context(|| format!("Server {address} nicht erreichbar"))?;
+            .map_err(|_| match lang {
+                Lang::De => anyhow!("Server {address} antwortet nicht"),
+                Lang::En => anyhow!("Server {address} isn't responding"),
+            })?
+            .with_context(|| match lang {
+                Lang::De => format!("Server {address} nicht erreichbar"),
+                Lang::En => format!("Can't reach server {address}"),
+            })?;
         let trust = TrustStore::load(&self.data_dir.join(KNOWN_SERVERS_FILE))?;
         let outcome = trust.check(address, &fingerprint);
         let expected = match outcome {
@@ -834,7 +900,7 @@ impl Runtime {
             })
             .collect();
         servers.sort_by(|a, b| a.name.cmp(&b.name));
-        info!("Server-Suche: {} gefunden", servers.len());
+        info!("server search: found {}", servers.len());
         Ok(servers)
     }
 
@@ -842,7 +908,7 @@ impl Runtime {
     pub fn trust_server(&self, address: &str, fingerprint: &str) -> Result<()> {
         let fingerprint: Fingerprint = fingerprint.parse()?;
         TrustStore::load(&self.data_dir.join(KNOWN_SERVERS_FILE))?.trust(address.trim(), &fingerprint)?;
-        info!("Server {address} bestätigt ({fingerprint})");
+        info!("server {address} trusted ({fingerprint})");
         Ok(())
     }
 
@@ -850,7 +916,7 @@ impl Runtime {
         let c = &settings.client;
         let identity = self.identity()?;
         let name = if c.name.trim().is_empty() { crate::hostname() } else { c.name.trim().to_owned() };
-        info!("Dieser Rechner: „{name}“, Fingerprint {}", identity.fingerprint());
+        info!("this computer: '{name}', fingerprint {}", identity.fingerprint());
         let trust = TrustStore::load(&self.data_dir.join(KNOWN_SERVERS_FILE))?;
         let config = ClientConfig {
             name,
@@ -860,7 +926,7 @@ impl Runtime {
             share_concealed: settings.clipboard_share_concealed,
         };
         let platform = if c.dry_run {
-            info!("Testmodus: Eingaben werden nur protokolliert");
+            info!("dry run: input is only logged");
             ClientPlatform {
                 injector: Box::new(LogInjector),
                 clipboard: Box::new(MemoryClipboard::default()),
@@ -904,11 +970,11 @@ impl Runtime {
         match notice {
             ClientNotice::Connecting { addr } => self.update(|s| {
                 s.phase = Phase::Connecting;
-                s.message = format!("Verbinde mit {addr} …");
+                s.text = StatusText::Connecting(addr);
             }),
             ClientNotice::Connected { server_name, addr } => self.update(|s| {
                 s.phase = Phase::Connected;
-                s.message = format!("Verbunden mit „{server_name}“ ({addr})");
+                s.text = StatusText::Connected { server: server_name.clone(), addr };
                 s.retry_reason = None;
                 s.server_name = Some(server_name);
                 // Die Rechte meldet ein Server ab Qross 0.7 gleich danach, den Cursor-Finder ab 0.8.
@@ -917,7 +983,7 @@ impl Runtime {
             }),
             ClientNotice::Disconnected { reason } => self.update(|s| {
                 s.phase = Phase::Connecting;
-                s.message = format!("{reason} – neuer Versuch in Kürze");
+                s.text = StatusText::Retrying(reason.clone());
                 s.retry_reason = Some(reason);
                 s.server_name = None;
                 s.cursor_here = false;
@@ -954,7 +1020,8 @@ impl Runtime {
     /// zusammen mit allen anderen laufenden an Tray und Taskleiste. Am Ende einer längeren
     /// Übertragung zusätzlich eine Systembenachrichtigung, wenn das Fenster im Hintergrund ist.
     pub fn on_transfer(&self, progress: Progress) {
-        if let Some((title, body)) = transfers::end_notice(&progress) {
+        let lang = i18n::lang();
+        if let Some((title, body)) = transfers::end_notice(&progress, lang) {
             if !crate::window_in_front(&self.app) {
                 crate::notify(&self.app, &title, &body);
             }
@@ -962,15 +1029,15 @@ impl Runtime {
         let overall = {
             let mut ongoing = self.ongoing.lock().unwrap();
             ongoing.update(&progress);
-            ongoing.overall()
+            ongoing.overall(lang)
         };
         crate::tray::set_transfers(&self.app, overall);
-        let _ = self.app.emit("transfer", transfers::view(&progress));
+        let _ = self.app.emit("transfer", transfers::view(&progress, lang));
     }
 
     /// „Abbrechen“ in der Fortschrittsanzeige. `false`, wenn die Übertragung schon zu Ende ist.
     pub fn cancel_transfer(&self, id: &str) -> Result<bool> {
-        let (direction, transfer) = transfers::parse_id(id).with_context(|| format!("unbekannte Übertragung {id}"))?;
+        let (direction, transfer) = transfers::parse_id(id).with_context(|| format!("unknown transfer {id}"))?;
         let running = self.transfers.lock().unwrap().clone();
         Ok(running.is_some_and(|t| t.cancel(direction, transfer)))
     }
@@ -979,7 +1046,7 @@ impl Runtime {
     /// Systembenachrichtigung für „bereit“ (nach längerer Übertragung) und „zu groß“.
     /// Das Protokoll schreibt `qross_net` selbst.
     pub fn on_files_notice(&self, notice: FilesNotice) {
-        let message = clipboard_files::describe(&notice, Platform::current() == Platform::MacOs);
+        let message = clipboard_files::describe(&notice, Platform::current() == Platform::MacOs, i18n::lang());
         let system = {
             let mut since = self.receiving_since.lock().unwrap();
             match &notice {
@@ -1008,25 +1075,29 @@ impl Runtime {
     /// Ein vertraulich markierter Inhalt blieb hier: dezenter Hinweis im Fenster, ohne den Inhalt.
     /// Das Protokoll schreibt `qross_net` selbst.
     fn on_concealed(&self) {
-        let text = "Vertraulicher Inhalt der Zwischenablage bleibt auf diesem Rechner".to_owned();
-        let _ = self.app.emit("app-notice", crate::updates::AppNotice { tone: "info", text, action: None });
+        let text = match i18n::lang() {
+            Lang::De => "Vertraulicher Inhalt der Zwischenablage bleibt auf diesem Rechner",
+            Lang::En => "Confidential clipboard content stays on this computer",
+        };
+        let notice = crate::updates::AppNotice { tone: "info", text: text.to_owned(), action: None };
+        let _ = self.app.emit("app-notice", notice);
     }
 
     fn finished(&self, generation: u64, result: Result<()>) {
         if !self.is_current(generation) {
             return;
         }
-        let (phase, message) = match result {
-            Ok(()) => (Phase::Stopped, "Beendet".to_owned()),
+        let (phase, text) = match result {
+            Ok(()) => (Phase::Stopped, StatusText::Finished),
             Err(e) => {
                 warn!("{e:#}");
-                (Phase::Error, format!("{e:#}"))
+                (Phase::Error, StatusText::Text(format!("{e:#}")))
             }
         };
         // Die Instanz läuft nicht mehr; ein erneuter Start räumt `running` auf.
         *self.responsive.lock().unwrap() = None;
         self.ongoing.lock().unwrap().clear();
         crate::tray::set_transfers(&self.app, None);
-        self.update(|s| *s = Status { phase, message, ..Status::default() });
+        self.update(|s| *s = Status { phase, text, ..Status::default() });
     }
 }

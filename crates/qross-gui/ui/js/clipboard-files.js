@@ -1,6 +1,7 @@
 // Kopierte Dateien
 
 import { $$, state } from "./core.js";
+import { t } from "./i18n.js";
 import { saveSoon, updatePreview } from "./store.js";
 
 export const TOAST_KIND = { info: "", success: "success", warn: "warn", error: "error" };
@@ -12,12 +13,8 @@ export function renderClipLimit() {
 }
 
 export function setupClipboardFiles() {
-  const mod = state.platform === "macos" ? "Cmd" : "Strg";
-  for (const hint of $$("[data-clip-hint]")) {
-    hint.textContent =
-      `${mod}+C auf Dateien, drüben ${mod}+V. Größeres per Drag & Drop; fügt drüben Windows ein, kommen sie erst ` +
-      "beim Einfügen und ohne Grenze. 0 schaltet es aus.";
-  }
+  const mod = state.platform === "macos" ? "Cmd" : t("keys.ctrl");
+  for (const hint of $$("[data-clip-hint]")) hint.textContent = t("clipboardFiles.hint", { mod });
   for (const input of $$("[data-clip-limit]")) {
     input.addEventListener("input", () => {
       const value = Number(input.value);

@@ -3,29 +3,36 @@
 
 import { invoke } from "./core.js";
 import { el, infoIcon } from "./util.js";
-import { NBSP, decimal, formatPct } from "./quality.js";
+import { formatNumber, t, tn } from "./i18n.js";
+import { NBSP, formatPct } from "./quality.js";
 
-/** Texte dieses Abschnitts, beisammen für eine spätere Übersetzung */
+/** Texte dieses Abschnitts aus dem Wörterbuch (Bereich „usage.“); CPU und RAM heißen überall so */
 export const USAGE_TEXT = {
-  here: "Qross hier",
-  there: "Qross dort",
+  get here() {
+    return t("usage.here");
+  },
+  get there() {
+    return t("usage.there");
+  },
   cpu: "CPU",
-  core: "eines Kerns",
+  get core() {
+    return t("usage.core");
+  },
   memory: "RAM",
-  processes: (n) => (n === 1 ? "in 1 Prozess" : `in ${n} Prozessen`),
-  measuring: "Wird gemessen …",
-  silent: (name) => `„${name}“ meldet das nicht (Qross vor 0.14).`,
-  help: [
-    "Was Qross auf diesem Rechner braucht, einschließlich seiner Web-Oberfläche und aller Hilfsprozesse.",
-    "CPU: Rechenzeit der letzten 2 Sekunden in Prozent eines Prozessorkerns (100 % = ein Kern voll ausgelastet).",
-    "RAM: Arbeitsspeicher, den Qross für sich belegt, wie im Task-Manager bzw. in der Aktivitätsanzeige (unter Linux zählen geteilte Seiten anteilig).",
-  ].join("\n\n"),
+  processes: (n) => tn("usage.processes", n),
+  get measuring() {
+    return t("usage.measuring");
+  },
+  silent: (name) => t("usage.silent", { name }),
+  get help() {
+    return t("usage.help");
+  },
 };
 
 /** So oft fragt die Oberfläche die eigenen Werte ab, solange sie zu sehen sind */
 export const USAGE_POLL_MS = 2000;
 
-/** Prozent eines Kerns, z. B. „0,4 %“ */
+/** Prozent eines Kerns, z. B. „0,4 %“ bzw. „0.4%“ */
 export function formatCpu(percent) {
   return percent == null ? "–" : formatPct(percent);
 }
@@ -33,14 +40,14 @@ export function formatCpu(percent) {
 /** Arbeitsspeicher wie im Task-Manager und in der Aktivitätsanzeige (1 MB = 1024 KB), z. B. „128 MB“ */
 export function formatMemory(bytes) {
   const mb = bytes / 1048576;
-  if (mb >= 1024) return `${decimal(mb / 1024, 1)}${NBSP}GB`;
-  return `${decimal(mb, mb < 10 ? 1 : 0)}${NBSP}MB`;
+  if (mb >= 1024) return `${formatNumber(mb / 1024, 1)}${NBSP}GB`;
+  return `${formatNumber(mb, mb < 10 ? 1 : 0)}${NBSP}MB`;
 }
 
 /** Eine Zeile, z. B. „CPU 0,4 % eines Kerns · RAM 128 MB“; ohne Werte „Wird gemessen …“ */
 export function usageLine(usage) {
   if (!usage) return USAGE_TEXT.measuring;
-  return `${USAGE_TEXT.cpu} ${formatCpu(usage.cpu)} ${USAGE_TEXT.core} · ${USAGE_TEXT.memory} ${formatMemory(usage.memory)}`;
+  return t("usage.line", { cpu: formatCpu(usage.cpu), memory: formatMemory(usage.memory) });
 }
 
 /** Zuletzt gemessen: hier und beim Client, dessen Werte der Server gerade zeigt */

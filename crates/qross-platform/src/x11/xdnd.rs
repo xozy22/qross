@@ -44,7 +44,7 @@ impl Xdnd {
         let (conn, root) = super::connect()?;
         let version = conn.xfixes_query_version(5, 0)?.reply()?;
         if version.major_version < 1 {
-            bail!("der X-Server kann kein XFixes");
+            bail!("the X server does not support XFixes");
         }
         let atom = |name: &str| -> Result<Atom> { Ok(conn.intern_atom(false, name.as_bytes())?.reply()?.atom) };
         let (selection, uri_list, incr, property) =
@@ -79,7 +79,7 @@ impl Xdnd {
         match self.request_files() {
             Ok(files) => files,
             Err(e) => {
-                tracing::debug!("Dateiliste des Ziehens nicht lesbar: {e:#}");
+                tracing::debug!("cannot read the file list of the drag: {e:#}");
                 Vec::new()
             }
         }
@@ -100,7 +100,7 @@ impl Xdnd {
                 }
                 Some(event) => self.count(&event),
                 None if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
-                None => bail!("keine Antwort vom ziehenden Programm"),
+                None => bail!("no answer from the dragging program"),
             }
         };
         if property == NONE {
@@ -110,7 +110,7 @@ impl Xdnd {
         // Bis 4 MB; größere Listen kämen stückweise (INCR), das braucht es für Dateinamen nicht.
         let reply = self.conn.get_property(true, self.window, property, AtomEnum::ANY, 0, 1 << 20)?.reply()?;
         if reply.type_ == self.incr {
-            bail!("Dateiliste zu groß");
+            bail!("file list too large");
         }
         Ok(parse_uri_list(&reply.value))
     }
@@ -125,7 +125,7 @@ pub struct DragState {
 impl DragState {
     pub fn new() -> Self {
         let xdnd = Xdnd::new()
-            .map_err(|e| tracing::warn!("{e:#} – laufendes Drag & Drop wird nicht erkannt"))
+            .map_err(|e| tracing::warn!("{e:#}; ongoing drag and drop will not be detected"))
             .ok();
         Self { xdnd, tracker: DragTracker::default() }
     }
@@ -149,7 +149,7 @@ impl DragState {
         match self.xdnd.as_mut().map(Xdnd::generation) {
             Some(Ok(generation)) => self.tracker.take(generation),
             Some(Err(e)) => {
-                tracing::debug!("XDND nicht abfragbar: {e:#}");
+                tracing::debug!("cannot query XDND: {e:#}");
                 false
             }
             None => false,
@@ -167,7 +167,7 @@ pub fn tap_escape(conn: &impl Connection, root: Window) {
     let code = (KEY_ESC + X11_OFFSET) as u8;
     for kind in [KEY_PRESS_EVENT, KEY_RELEASE_EVENT] {
         if let Err(e) = conn.xtest_fake_input(kind, code, CURRENT_TIME, root, 0, 0, 0) {
-            tracing::warn!("XTest fehlgeschlagen: {e}");
+            tracing::warn!("XTest failed: {e}");
         }
     }
     let _ = conn.flush();

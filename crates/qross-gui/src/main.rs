@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use qross_gui::autostart::{self, Autostart};
 use qross_gui::changelog::{self, Release};
+use qross_gui::i18n::{self, Lang};
 use qross_gui::lifecycle;
 use qross_gui::profiles::{NetworkMark, ProfileEdit, Profiles};
 use qross_gui::{Role, Settings, GRID_COLS, GRID_ROWS};
@@ -30,7 +31,14 @@ type Rt<'a> = State<'a, Arc<Runtime>>;
 
 /// Mit diesem Argument startet das System Qross bei der Anmeldung (unsichtbar im Tray).
 const PROJECT_URL: &str = "https://github.com/xozy22/qross";
-const DEV_AUTOSTART: &str = "Im Entwicklungsbuild trägt sich Qross nicht in den Autostart ein.";
+
+/// Hinweis, warum sich der Autostart im Entwicklungsbuild nicht einschalten lässt
+fn dev_autostart(lang: Lang) -> &'static str {
+    match lang {
+        Lang::De => "Im Entwicklungsbuild trägt sich Qross nicht in den Autostart ein.",
+        Lang::En => "Development builds of Qross don't add themselves to autostart.",
+    }
+}
 
 /// Rechnername in Kleinbuchstaben (Windows liefert ihn in Großbuchstaben).
 pub fn hostname() -> String {
@@ -62,7 +70,7 @@ fn page_shown(window: &tauri::WebviewWindow, shown: bool) {
         if SHOWN.swap(shown, Ordering::Relaxed) != shown {
             let page: &tauri::Webview = window.as_ref();
             if let Err(e) = if shown { page.show() } else { page.hide() } {
-                warn!("Seite nicht {}: {e}", if shown { "gezeigt" } else { "versteckt" });
+                warn!("failed to {} the page: {e}", if shown { "show" } else { "hide" });
             }
         }
     }
@@ -102,10 +110,10 @@ pub fn window_in_front(app: &AppHandle) -> bool {
 /// Schlägt sie fehl, bleibt es beim Hinweis in der App.
 pub fn notify(app: &AppHandle, title: &str, body: &str) {
     use tauri_plugin_notification::NotificationExt;
-    tracing::debug!("Systembenachrichtigung: {title}");
+    tracing::debug!("system notification: {title}");
     let result = app.notification().builder().title(title).body(body).show();
     if let Err(e) = result {
-        warn!("Systembenachrichtigung nicht möglich: {e}");
+        warn!("system notification failed: {e}");
     }
 }
 
@@ -126,6 +134,8 @@ struct Snapshot {
     desktop: &'static str,
     /// Version dieser App (für „Neuigkeiten“)
     version: &'static str,
+    /// Sprache des Systems wie „de-DE“ (leer, wenn unbekannt); gilt bei der Einstellung „auto“
+    system_language: String,
     logs: Vec<LogLine>,
 }
 
@@ -157,6 +167,7 @@ fn get_state(rt: Rt<'_>, logs: State<'_, Arc<LogBuffer>>) -> Result<Snapshot, St
             Desktop::Other => "other",
         },
         version: env!("CARGO_PKG_VERSION"),
+        system_language: i18n::system_locale().unwrap_or_default(),
         logs: logs.snapshot(),
     })
 }
@@ -179,17 +190,18 @@ struct Prefs {
 
 #[tauri::command]
 fn get_prefs(app: AppHandle, rt: Rt<'_>, autostart: State<'_, Autostart>) -> Prefs {
+    let lang = i18n::lang();
     let enabled = autostart.is_enabled();
     let note = if cfg!(debug_assertions) {
-        Some(DEV_AUTOSTART.to_owned())
+        Some(dev_autostart(lang).to_owned())
     } else {
-        autostart.unsuitable().map(str::to_owned)
+        autostart.unsuitable(lang).map(str::to_owned)
     };
     Prefs {
         autostart: enabled,
         autostart_editable: !cfg!(debug_assertions) && (note.is_none() || enabled),
         autostart_note: note,
-        autostart_place: autostart.place(),
+        autostart_place: autostart.place(lang),
         update: app.state::<Arc<Updates>>().status(),
         data_dir: rt.data_dir.display().to_string(),
     }
@@ -198,10 +210,14 @@ fn get_prefs(app: AppHandle, rt: Rt<'_>, autostart: State<'_, Autostart>) -> Pre
 /// „Mit dem System starten“; liefert den Zustand danach.
 #[tauri::command]
 fn set_autostart(rt: Rt<'_>, autostart: State<'_, Autostart>, enabled: bool) -> Result<bool, String> {
+    let lang = i18n::lang();
     if cfg!(debug_assertions) {
-        return Err(DEV_AUTOSTART.into());
+        return Err(dev_autostart(lang).into());
     }
-    autostart.set(enabled).map_err(|e| format!("Autostart nicht geändert: {e:#}"))?;
+    autostart.set(enabled).map_err(|e| match lang {
+        Lang::De => format!("Autostart nicht geändert: {e:#}"),
+        Lang::En => format!("Autostart not changed: {e:#}"),
+    })?;
     // Ab jetzt entscheidet der Nutzer; der erste Start schaltet nichts mehr ein
     rt.update_app_state(|s| s.autostart_configured = true);
     Ok(autostart.is_enabled())
@@ -251,7 +267,7 @@ fn open_permission_settings(app: AppHandle, permission: String) -> Result<(), St
     let (permission, pane) = match permission.as_str() {
         "accessibility" => (Permission::Accessibility, "Privacy_Accessibility"),
         "input_monitoring" => (Permission::InputMonitoring, "Privacy_ListenEvent"),
-        other => return Err(format!("unbekanntes Recht: {other}")),
+        other => return Err(format!("unknown permission: {other}")),
     };
     qross_platform::request_permission(permission);
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
@@ -309,26 +325,26 @@ async fn portal_state() -> Option<PortalInfo> {
 #[tauri::command]
 fn forget_portal_permissions() -> Result<(), String> {
     qross_platform::forget_portal_permissions().map_err(|e| format!("{e:#}"))?;
-    info!("Gemerkte Wayland-Freigaben gelöscht");
+    info!("forgot the remembered Wayland portal permissions");
     Ok(())
 }
 
 /// Fehlende Rechte gleich beim Start ins Protokoll schreiben, nicht erst beim ersten Ereignis.
 fn log_permissions() {
-    let missing: Vec<&str> = [(Permission::Accessibility, "Bedienungshilfen"), (Permission::InputMonitoring, "Eingabeüberwachung")]
+    let missing: Vec<&str> = [(Permission::Accessibility, "Accessibility"), (Permission::InputMonitoring, "Input Monitoring")]
         .into_iter()
         .filter(|&(permission, _)| !qross_platform::has_permission(permission))
         .map(|(_, name)| name)
         .collect();
     if !missing.is_empty() {
-        warn!("macOS erlaubt Qross noch nicht: {}", missing.join(", "));
+        warn!("macOS has not yet granted Qross: {}", missing.join(", "));
     }
 }
 
 #[tauri::command]
 fn preview_layout(settings: Settings) -> LayoutPreview {
     let s = &settings.server;
-    LayoutPreview { toml: settings.server_toml(), error: s.validate().err(), isolated: s.isolated() }
+    LayoutPreview { toml: settings.server_toml(), error: s.validate(i18n::lang()).err(), isolated: s.isolated() }
 }
 
 /// Speichert die Einstellungen (samt aktivem Profil). Was ein laufender Server oder Client erst
@@ -339,6 +355,12 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
     let Some((old, settings)) = rt.store_settings(settings).map_err(|e| format!("{e:#}"))? else {
         return Ok(());
     };
+    // Andere Sprache: Tray, Status und alles Folgende gleich in der neuen
+    if settings.language != old.language && i18n::apply(&settings.language) {
+        info!("language: {:?} (setting '{}')", i18n::lang(), settings.language);
+        tray::language_changed(rt.app_handle());
+        rt.language_changed();
+    }
 
     let status = rt.status();
     let server_changed = settings.server.needs_restart(&old.server);
@@ -352,10 +374,11 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
     // Den Bildschirmschoner gleicht nur der Server ab
     let saver_changed = settings.screensaver_sync != old.screensaver_sync
         || settings.screensaver_lock_clients != old.screensaver_lock_clients;
+    let layout_valid = settings.server.validate(i18n::lang()).is_ok();
     match status.role {
         Some(role) if role != settings.role => rt.stop().await,
-        Some(Role::Server) if (server_changed || limit_changed || saver_changed) && settings.server.validate().is_ok() => {
-            info!("Einstellungen geändert – Server startet neu");
+        Some(Role::Server) if (server_changed || limit_changed || saver_changed) && layout_valid => {
+            info!("settings changed, restarting the server");
             rt.start().await.map_err(|e| format!("{e:#}"))?;
         }
         Some(Role::Server) if sharing_changed || finder_changed => {
@@ -363,7 +386,7 @@ async fn save_settings(rt: Rt<'_>, settings: Settings) -> Result<(), String> {
             rt.set_cursor_finder(settings.cursor_finder).await;
         }
         Some(Role::Client) if limit_changed => {
-            info!("Einstellungen geändert – Client verbindet neu");
+            info!("settings changed, reconnecting the client");
             rt.start().await.map_err(|e| format!("{e:#}"))?;
         }
         _ => {}
@@ -441,14 +464,14 @@ async fn probe_server(rt: Rt<'_>, address: String) -> Result<ServerProbe, String
 struct KeyName {
     /// Wie `KeyboardEvent.code`, z. B. „AltLeft“
     name: &'static str,
-    /// Deutsche Beschriftung, z. B. „Alt links“
+    /// Beschriftung in der Sprache der Oberfläche, z. B. „Alt links“ bzw. „Left Alt“
     label: &'static str,
 }
 
 /// Alle Tasten, die sich als Fang-Taste oder für die Umbelegung eintragen lassen
 #[tauri::command]
 fn key_names() -> Vec<KeyName> {
-    qross_core::keys::all_keys().map(|(_, name, label)| KeyName { name, label }).collect()
+    qross_core::keys::all_keys_in(i18n::lang()).map(|(_, name, label)| KeyName { name, label }).collect()
 }
 
 /// Neuigkeiten aus dem eingebetteten CHANGELOG.md, neueste Version zuerst.
@@ -469,7 +492,7 @@ async fn discover_servers(rt: Rt<'_>) -> Result<Vec<FoundServer>, String> {
 async fn simulate_clipboard_files(rt: Rt<'_>, kind: String) -> Result<(), String> {
     use qross_net::clipfiles::FilesNotice;
     if !cfg!(debug_assertions) {
-        return Err("nur in Debug-Builds verfügbar".into());
+        return Err("only available in debug builds".into());
     }
     let rt = rt.inner().clone();
     let (peer, names) = ("pc".to_owned(), vec!["Bericht.pdf".to_owned()]);
@@ -481,8 +504,8 @@ async fn simulate_clipboard_files(rt: Rt<'_>, kind: String) -> Result<(), String
             rt.on_files_notice(FilesNotice::Ready { peer, names, bytes: 3_141_592 });
         }
         "large" => rt.on_files_notice(FilesNotice::TooLarge { peer, names: vec!["Film.mkv".into()], limit: 1_000_000_000 }),
-        "failed" => rt.on_files_notice(FilesNotice::Failed { peer, reason: "Verbindung getrennt".into() }),
-        other => return Err(format!("unbekannt: {other}")),
+        "failed" => rt.on_files_notice(FilesNotice::Failed { peer, reason: "connection lost".into() }),
+        other => return Err(format!("unknown kind: {other}")),
     }
     Ok(())
 }
@@ -542,7 +565,7 @@ fn show_window(app: &AppHandle) {
     if !autostarted {
         let _ = window.show();
     } else if tray::available() {
-        info!("Autostart: Qross läuft im Tray");
+        info!("autostart: Qross is running in the tray");
         page_shown(&window, false);
     } else {
         // Erst minimieren, dann zeigen: umgekehrt geht das Minimieren beim frisch gezeigten Fenster verloren.
@@ -558,12 +581,12 @@ pub fn resume(app: &AppHandle) {
     let Some(role) = lifecycle::resume_role(settings.resume_role, rt.app_state().last_running, settings.role) else {
         return;
     };
-    info!("Setze {} fort", if role == Role::Server { "den Server" } else { "den Client" });
+    info!("resuming the {}", if role == Role::Server { "server" } else { "client" });
     tauri::async_runtime::spawn(async move {
         match rt.start().await {
             Ok(None) => {}
-            Ok(Some(_)) => warn!("Fortsetzen: Der Server ist unbekannt und muss erst bestätigt werden"),
-            Err(e) => warn!("Fortsetzen fehlgeschlagen: {e:#}"),
+            Ok(Some(_)) => warn!("resume: the server is unknown and must be confirmed first"),
+            Err(e) => warn!("failed to resume: {e:#}"),
         }
     });
 }
@@ -576,7 +599,7 @@ fn load_profiles(data_dir: &std::path::Path, settings: &mut Settings, loaded: bo
         Err(e) => {
             // Nicht überschreiben: Vielleicht lässt sich die Datei von Hand retten.
             let broken = data_dir.join(format!("{}.defekt", qross_gui::profiles::PROFILES_FILE));
-            warn!("{e:#} – Profile beginnen neu, die alte Datei liegt unter {}", broken.display());
+            warn!("{e:#}; starting with new profiles, the old file was moved to {}", broken.display());
             let _ = std::fs::rename(data_dir.join(qross_gui::profiles::PROFILES_FILE), &broken);
             Profiles::default()
         }
@@ -584,14 +607,14 @@ fn load_profiles(data_dir: &std::path::Path, settings: &mut Settings, loaded: bo
     if !loaded {
         profiles.restore(settings);
     }
-    if profiles.attach(settings) {
+    if profiles.attach(settings, i18n::lang()) {
         let saved = profiles.save(data_dir).and_then(|()| settings.save(data_dir));
         if let Err(e) = saved {
-            warn!("Profile nicht gespeichert: {e:#}");
+            warn!("failed to save profiles: {e:#}");
         }
     }
     let active = profiles.active_profile().map(|p| p.name.as_str()).unwrap_or_default();
-    info!("Profil „{active}“ ({} Profile)", profiles.list.len());
+    info!("profile '{active}' ({} profiles)", profiles.list.len());
     profiles
 }
 
@@ -613,12 +636,16 @@ fn main() {
         Ok(Some(settings)) => (settings, true),
         Ok(None) => (Settings::for_host(&hostname()), false),
         Err(e) => {
-            warn!("{e:#} – verwende Standardeinstellungen");
+            warn!("{e:#}; using default settings");
             (Settings::for_host(&hostname()), false)
         }
     };
+    // Vor Profilen, Tray und erstem Status: alles für Menschen gleich in der richtigen Sprache
+    let system = i18n::system_locale();
+    i18n::set_lang(i18n::resolve(&settings.language, system.as_deref()));
+    info!("language: {:?} (setting '{}', system '{}')", i18n::lang(), settings.language, system.unwrap_or_default());
     let profiles = load_profiles(&data_dir, &mut settings, loaded);
-    info!("Daten in {}", data_dir.display());
+    info!("data in {}", data_dir.display());
     log_permissions();
 
     #[allow(unused_mut)]
@@ -693,7 +720,7 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(e) = window.set_decorations(false) {
-                    warn!("Fensterrahmen nicht abgeschaltet: {e}");
+                    warn!("failed to turn off the window frame: {e}");
                 }
             }
             show_window(app.handle());
@@ -724,5 +751,5 @@ fn main() {
             _ => {}
         })
         .run(tauri::generate_context!())
-        .expect("Qross-Oberfläche konnte nicht starten");
+        .expect("failed to start the Qross GUI");
 }

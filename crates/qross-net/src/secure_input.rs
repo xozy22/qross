@@ -29,7 +29,7 @@ pub fn watch(detect: Detector) -> watch::Receiver<Option<SecureInput>> {
         }
     });
     if let Err(e) = spawned {
-        warn!("Sichere Tastatureingabe: Abfrage nicht gestartet: {e}");
+        warn!("Secure Keyboard Entry: failed to start polling: {e}");
     }
     rx
 }

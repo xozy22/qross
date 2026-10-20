@@ -39,9 +39,9 @@ impl AppState {
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
-        fs::create_dir_all(dir).with_context(|| format!("{} anlegen", dir.display()))?;
+        fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
         let path = dir.join(STATE_FILE);
-        fs::write(&path, serde_json::to_string_pretty(self)?).with_context(|| format!("{} schreiben", path.display()))
+        fs::write(&path, serde_json::to_string_pretty(self)?).with_context(|| format!("failed to write {}", path.display()))
     }
 }
 

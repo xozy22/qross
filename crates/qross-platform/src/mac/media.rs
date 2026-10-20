@@ -29,7 +29,7 @@ pub fn post(key: KeyCode, down: bool) -> bool {
         return false;
     }
     let Some(nx) = nx_key(key) else {
-        tracing::debug!(?key, "Medientaste ohne macOS-Gegenstück");
+        tracing::debug!(?key, "media key without a macOS counterpart");
         return true;
     };
     let state: isize = if down { 0xA } else { 0xB };
@@ -47,7 +47,7 @@ pub fn post(key: KeyCode, down: bool) -> bool {
     );
     match event.and_then(|e| e.CGEvent()) {
         Some(cg) => CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&cg)),
-        None => tracing::warn!(?key, "Medientaste ließ sich nicht erzeugen"),
+        None => tracing::warn!(?key, "failed to create the media key event"),
     }
     true
 }

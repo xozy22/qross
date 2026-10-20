@@ -177,7 +177,7 @@ where
         if network {
             let now = addresses().await;
             if now != known {
-                debug!("eigene Adressen geändert: {now:?}");
+                debug!("local addresses changed: {now:?}");
                 known = now;
                 let _ = tx.send(SystemEvent::NetworkChanged);
             }

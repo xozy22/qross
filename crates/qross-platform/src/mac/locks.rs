@@ -47,14 +47,14 @@ fn open() -> Option<MachPort> {
         }
         let service = IOServiceGetMatchingService(0, matching);
         if service == 0 {
-            tracing::debug!("IOHIDSystem nicht gefunden");
+            tracing::debug!("IOHIDSystem not found");
             return None;
         }
         let mut connect: MachPort = 0;
         let opened = IOServiceOpen(service, mach_task_self_, HID_PARAM_CONNECT_TYPE, &mut connect);
         IOObjectRelease(service);
         if opened != KERN_SUCCESS {
-            tracing::debug!("IOHIDSystem nicht geöffnet (Fehler {opened:#x})");
+            tracing::debug!("failed to open IOHIDSystem (error {opened:#x})");
             return None;
         }
         Some(connect)
@@ -106,6 +106,6 @@ pub fn set(target: LockState) {
         (result == KERN_SUCCESS).then_some(())
     });
     if done.is_none() {
-        tracing::warn!("Feststelltaste nicht umgeschaltet (IOHIDSetModifierLockState)");
+        tracing::warn!("failed to toggle Caps Lock (IOHIDSetModifierLockState)");
     }
 }

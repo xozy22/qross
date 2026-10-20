@@ -119,14 +119,14 @@ fn run(shared: Arc<Shared>, ready: Sender<Result<(), String>>) {
         move |_proxy, kind, event| handle(&callback_shared, &state, kind, event),
     );
     let Ok(tap) = tap else {
-        let _ = ready.send(Err("CGEventTap nicht erlaubt – Qross unter Systemeinstellungen → Datenschutz & \
-                                Sicherheit für „Bedienungshilfen“ und „Eingabeüberwachung“ freigeben. Ist es \
-                                dort schon eingeschaltet, den Eintrag entfernen und neu hinzufügen"
+        let _ = ready.send(Err("CGEventTap not allowed: grant Qross 'Accessibility' and 'Input Monitoring' under \
+                                System Settings → Privacy & Security. If it is already turned on there, remove \
+                                the entry and add it again"
             .into()));
         return;
     };
     let Ok(source) = tap.mach_port().create_runloop_source(0) else {
-        let _ = ready.send(Err("Run-Loop-Quelle für den Event-Tap fehlt".into()));
+        let _ = ready.send(Err("run loop source for the event tap is missing".into()));
         return;
     };
     CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
@@ -261,7 +261,7 @@ fn handle(s: &Shared, state: &RefCell<TapState>, kind: CGEventType, event: &CGEv
             (dx != 0 || dy != 0).then_some(CaptureEvent::Wheel { dx: clamp(dx), dy: clamp(dy) })
         }
         KeyDown | KeyUp | FlagsChanged => {
-            let (code, down) = key_change.expect("Tastenereignis");
+            let (code, down) = key_change.expect("key event");
             if st.local_keys.contains(&code) {
                 if !down {
                     st.local_keys.remove(&code);
@@ -376,7 +376,7 @@ impl Capture for MacCapture {
     fn probe_drag(&self, _x: i32, _y: i32) {
         let files = self.0.drag.lock().unwrap_or_else(|e| e.into_inner()).probe();
         if !files.is_empty() {
-            tracing::info!("{} Datei(en) werden über die Kante gezogen", files.len());
+            tracing::info!("{} file(s) being dragged across the edge", files.len());
         }
         let _ = self.0.events.send(CaptureEvent::DragProbeResult { files });
     }

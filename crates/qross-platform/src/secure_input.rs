@@ -22,7 +22,7 @@ impl SecureInput {
             (Some(app), Some(pid)) => format!("{app} (PID {pid})"),
             (Some(app), None) => app.clone(),
             (None, Some(pid)) => format!("PID {pid}"),
-            (None, None) => "unbekanntes Programm".to_owned(),
+            (None, None) => "unknown app".to_owned(),
         }
     }
 }
@@ -68,6 +68,6 @@ mod tests {
         let full = SecureInput { pid: Some(412), app: Some("Terminal".into()) };
         assert_eq!(full.describe(), "Terminal (PID 412)");
         assert_eq!(SecureInput { pid: Some(7), app: None }.describe(), "PID 7");
-        assert_eq!(SecureInput::default().describe(), "unbekanntes Programm");
+        assert_eq!(SecureInput::default().describe(), "unknown app");
     }
 }

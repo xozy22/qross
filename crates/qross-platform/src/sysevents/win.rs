@@ -32,19 +32,19 @@ pub fn start() {
     if result == NO_ERROR {
         ready(true);
     } else {
-        warn!("Ruhezustand wird nicht beobachtet (PowerRegisterSuspendResumeNotification: Fehler {result})");
+        warn!("not watching for sleep (PowerRegisterSuspendResumeNotification: error {result})");
     }
 
     // Die erste Meldung (`MibInitialNotification`) bestätigt nur die Anmeldung.
     let mut handle: HANDLE = null_mut();
     let result = unsafe { NotifyIpInterfaceChange(AF_UNSPEC, Some(on_interface), null(), true, &mut handle) };
     if result != NO_ERROR {
-        warn!("Netzwerkkarten werden nicht beobachtet (NotifyIpInterfaceChange: Fehler {result})");
+        warn!("not watching the network adapters (NotifyIpInterfaceChange: error {result})");
     }
     let mut handle: HANDLE = null_mut();
     let result = unsafe { NotifyUnicastIpAddressChange(AF_UNSPEC, Some(on_address), null(), true, &mut handle) };
     if result != NO_ERROR {
-        warn!("Netzwerkadressen werden nicht beobachtet (NotifyUnicastIpAddressChange: Fehler {result})");
+        warn!("not watching the network addresses (NotifyUnicastIpAddressChange: error {result})");
     }
 }
 

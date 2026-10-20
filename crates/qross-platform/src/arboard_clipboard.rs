@@ -25,7 +25,7 @@ impl ArboardClipboard {
         if self.inner.is_none() {
             match arboard::Clipboard::new() {
                 Ok(clipboard) => self.inner = Some(clipboard),
-                Err(e) => tracing::debug!("Clipboard nicht verfügbar: {e}"),
+                Err(e) => tracing::debug!("clipboard not available: {e}"),
             }
         }
         self.inner.as_mut()
@@ -55,14 +55,14 @@ impl Clipboard for ArboardClipboard {
         let Raw { text, html, image, .. } = self.raw()?;
         let png = image.and_then(|img| {
             let rgba = Rgba { width: img.width as u32, height: img.height as u32, pixels: img.bytes.into_owned() };
-            rgba_to_png(&rgba).map_err(|e| tracing::debug!("Bild nicht kodierbar: {e:#}")).ok()
+            rgba_to_png(&rgba).map_err(|e| tracing::debug!("failed to encode the image: {e:#}")).ok()
         });
         let data = ClipboardData { text, html, png };
         (!data.is_empty()).then_some(data)
     }
 
     fn write(&mut self, data: &ClipboardData) -> anyhow::Result<()> {
-        let cb = self.inner().ok_or_else(|| anyhow!("Clipboard nicht verfügbar"))?;
+        let cb = self.inner().ok_or_else(|| anyhow!("clipboard not available"))?;
         // arboard setzt jeweils eine Art. Ein Bild ohne Text ist ein Bild (Screenshot,
         // „Bild kopieren“); sonst gewinnt HTML mit Text als Alternative.
         let text_empty = data.text.as_deref().is_none_or(str::is_empty);
@@ -79,7 +79,7 @@ impl Clipboard for ArboardClipboard {
             (_, None, Some(text)) => cb.set_text(text.as_str()),
             _ => return Ok(()),
         };
-        result.map_err(|e| anyhow!("Clipboard setzen: {e}"))
+        result.map_err(|e| anyhow!("failed to set the clipboard: {e}"))
     }
 
     /// Ohne Änderungszähler im System: Hash des Inhalts – ändert sich mit jedem neuen Inhalt.
@@ -107,7 +107,7 @@ impl Clipboard for ArboardClipboard {
 
     /// `arboard` setzt nur eine Art von Inhalt: Die Dateien gewinnen, `data` entfällt.
     fn write_files(&mut self, files: &[PathBuf], _data: &ClipboardData) -> anyhow::Result<()> {
-        let cb = self.inner().ok_or_else(|| anyhow!("Clipboard nicht verfügbar"))?;
-        cb.set().file_list(files).map_err(|e| anyhow!("Dateien in die Zwischenablage legen: {e}"))
+        let cb = self.inner().ok_or_else(|| anyhow!("clipboard not available"))?;
+        cb.set().file_list(files).map_err(|e| anyhow!("failed to put files on the clipboard: {e}"))
     }
 }

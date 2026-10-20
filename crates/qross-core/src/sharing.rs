@@ -30,24 +30,24 @@ impl SharingRules {
     }
 }
 
-/// Fürs Log, z. B. „Zwischenablage nur zum Client, kopierte Dateien aus“; „alles erlaubt“, wenn
+/// Fürs Log, z. B. „clipboard to the client only, copied files off“; „everything allowed“, wenn
 /// nichts eingeschränkt ist.
 pub fn describe(sharing: Sharing) -> String {
-    let parts: Vec<String> = [("Zwischenablage", sharing.clipboard), ("kopierte Dateien", sharing.files), ("Drag & Drop", sharing.drag)]
+    let parts: Vec<String> = [("clipboard", sharing.clipboard), ("copied files", sharing.files), ("drag and drop", sharing.drag)]
         .into_iter()
         .filter(|(_, share)| *share != Share::Both)
         .map(|(what, share)| {
             let how = match share {
-                Share::Both => "in beide Richtungen",
-                Share::ToClient => "nur zum Client",
-                Share::FromClient => "nur vom Client",
-                Share::Off => "aus",
+                Share::Both => "in both directions",
+                Share::ToClient => "to the client only",
+                Share::FromClient => "from the client only",
+                Share::Off => "off",
             };
             format!("{what} {how}")
         })
         .collect();
     if parts.is_empty() {
-        "alles erlaubt".to_owned()
+        "everything allowed".to_owned()
     } else {
         parts.join(", ")
     }
@@ -74,8 +74,8 @@ mod tests {
 
     #[test]
     fn descriptions_name_only_restrictions() {
-        assert_eq!(describe(Sharing::ALL), "alles erlaubt");
+        assert_eq!(describe(Sharing::ALL), "everything allowed");
         let sharing = Sharing { clipboard: Share::ToClient, files: Share::Off, drag: Share::FromClient };
-        assert_eq!(describe(sharing), "Zwischenablage nur zum Client, kopierte Dateien aus, Drag & Drop nur vom Client");
+        assert_eq!(describe(sharing), "clipboard to the client only, copied files off, drag and drop from the client only");
     }
 }

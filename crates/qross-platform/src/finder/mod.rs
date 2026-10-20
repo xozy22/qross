@@ -115,15 +115,15 @@ impl Overlay {
         let warn_once = !self.warned.swap(true, Ordering::Relaxed);
         let spawned = std::thread::Builder::new().name("qross-finder".into()).spawn(move || match make() {
             Ok(surface) => run(surface, rx, fullscreen),
-            Err(e) if warn_once => warn!("Cursor-Finder nicht verfügbar: {e:#}"),
-            Err(e) => debug!("Cursor-Finder nicht verfügbar: {e:#}"),
+            Err(e) if warn_once => warn!("cursor finder not available: {e:#}"),
+            Err(e) => debug!("cursor finder not available: {e:#}"),
         });
         match spawned {
             Ok(_) => {
                 let _ = tx.send(command);
                 *thread = Some(tx);
             }
-            Err(e) => warn!("Cursor-Finder: Thread nicht gestartet: {e}"),
+            Err(e) => warn!("cursor finder: failed to start the thread: {e}"),
         }
     }
 }
@@ -156,7 +156,7 @@ fn font(slot: &mut FontSlot) -> Option<&font::Font> {
     slot.get_or_insert_with(|| {
         let found = font::Font::system();
         if found.is_none() {
-            warn!("Cursor-Finder: keine Schrift gefunden, Namen fehlen");
+            warn!("cursor finder: no font found, names will be missing");
         }
         found
     })
@@ -255,14 +255,14 @@ fn run(mut surface: Box<dyn Surface>, commands: Receiver<Command>, fullscreen: f
                 Command::Show { style, name, at } => {
                     showing = None;
                     if dragging.is_some() {
-                        debug!("Cursor-Finder: die Drag-Vorschau ist zu sehen, nichts weiter gezeigt");
+                        debug!("cursor finder: the drag preview is visible, nothing else shown");
                     } else if at.elapsed() > TOO_LATE {
-                        debug!("Cursor-Finder: zu spät, nichts gezeigt");
+                        debug!("cursor finder: too late, nothing shown");
                     } else if fullscreen() {
-                        debug!("Cursor-Finder: Vollbild im Vordergrund, nichts gezeigt");
+                        debug!("cursor finder: full screen in the foreground, nothing shown");
                     } else if surface.prepare() {
                         prepared = true;
-                        debug!("Cursor-Finder: {} für „{name}“", qross_core::finder::describe(style));
+                        debug!("cursor finder: {} for '{name}'", qross_core::finder::describe(style));
                         showing = Some(Showing { style, name, since: at, text: None, presented: 0 });
                     }
                 }
@@ -271,10 +271,10 @@ fn run(mut surface: Box<dyn Surface>, commands: Receiver<Command>, fullscreen: f
                     // Die Vorschau hat Vorrang, Ring und Name machen ihr Platz
                     (showing, dragging) = (None, None);
                     if fullscreen() {
-                        debug!("Drag-Vorschau: Vollbild im Vordergrund, nichts gezeigt");
+                        debug!("drag preview: full screen in the foreground, nothing shown");
                     } else if surface.prepare() {
                         prepared = true;
-                        debug!("Drag-Vorschau: {} ({})", preview.title, preview.size);
+                        debug!("drag preview: {} ({})", preview.title, preview.size);
                         dragging = Some(Dragging { preview, since: Instant::now(), card: None });
                     }
                 }
@@ -291,7 +291,7 @@ fn run(mut surface: Box<dyn Surface>, commands: Receiver<Command>, fullscreen: f
                     current.presented += 1;
                 } else if current.since.elapsed() >= DURATION {
                     if current.presented == 0 {
-                        debug!("Cursor-Finder: nichts gezeigt, Cursor oder Monitor nicht abfragbar");
+                        debug!("cursor finder: nothing shown, cannot query the cursor or monitor");
                     }
                     finished = true;
                 }

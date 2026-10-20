@@ -2,6 +2,7 @@
 
 import { $, invoke, state } from "./core.js";
 import { el, icon, toast } from "./util.js";
+import { t, tn, tx } from "./i18n.js";
 import { askName, confirmRoleChange, showDialog } from "./dialog.js";
 import { saveSoon } from "./store.js";
 import { startFlow } from "./start.js";
@@ -28,15 +29,21 @@ export function profileSummary(profile) {
   const place = profile.id === state.profiles.active ? state.settings : profile.place;
   if (place.role === "client") {
     const address = place.client.address.trim();
-    return address ? `Client · verbindet mit ${address}` : "Client · noch ohne Server-Adresse";
+    return address ? t("profiles.clientTo", { address }) : t("profiles.clientNoAddress");
   }
-  const count = place.server.screens.length;
-  return count === 1 ? "Server · nur dieser Rechner" : `Server · ${count} Bildschirme`;
+  return tn("profiles.serverScreens", place.server.screens.length);
 }
 
 export function netDetails(n) {
-  const mac = n.gateway_mac ? `MAC ${n.gateway_mac}` : "MAC unbekannt";
-  return [`Gateway ${n.gateway}`, mac, n.subnet && `Subnetz ${n.subnet}`, n.interface && `über ${n.interface}`].filter(Boolean).join(" · ");
+  const mac = n.gateway_mac ? t("profiles.mac", { mac: n.gateway_mac }) : t("profiles.macUnknown");
+  return [
+    t("profiles.gateway", { gateway: n.gateway }),
+    mac,
+    n.subnet && t("profiles.subnet", { subnet: n.subnet }),
+    n.interface && t("profiles.via", { interface: n.interface }),
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 /** Auswahl in der Kopfzeile */
@@ -47,14 +54,14 @@ export function renderProfilePick() {
   select.replaceChildren(
     ...profiles.list.map((p) => el("option", { value: p.id, text: p.name })),
     el("option", { value: "", disabled: true, text: "──────────" }),
-    el("option", { value: "manage", text: "Profile verwalten …" }),
+    el("option", { value: "manage", text: t("profiles.manage") }),
   );
   select.value = profiles.active;
   const active = activeProfile();
   const auto = profiles.auto && profiles.list.some((p) => p.auto && p.networks.length);
   $("#profilePick").title = active
-    ? `Profil „${active.name}“: ${profileSummary(active)}${auto ? ". Wird nach Netzwerk gewählt." : ""}`
-    : "Profil";
+    ? t(auto ? "profiles.pickTitleAuto" : "profiles.pickTitle", { name: active.name, summary: profileSummary(active) })
+    : t("topbar.profile");
 }
 
 /** Wechselt das Profil nach Rückfrage, falls es die Rolle wechselt, während Qross läuft. */
@@ -109,11 +116,11 @@ export function renderNetNow() {
   const box = $("#netNow");
   const nets = state.networks;
   if (nets == null) {
-    box.replaceChildren(el("span", { class: "hint", text: "Netzwerk wird ermittelt …" }));
+    box.replaceChildren(el("span", { class: "hint", text: t("profiles.netDetecting") }));
     return;
   }
   if (!nets.length) {
-    box.replaceChildren(icon("wifi"), el("span", { class: "net-text", text: "Kein Netzwerk mit Router erkannt. Ohne Netzwerk bleibt das Profil, wie es ist." }));
+    box.replaceChildren(icon("wifi"), el("span", { class: "net-text", text: t("profiles.netNone") }));
     return;
   }
   const [first, ...others] = nets;
@@ -123,10 +130,12 @@ export function renderNetNow() {
     el(
       "span",
       { class: "net-text" },
-      el("span", { class: "net-title" }, "Aktuelles Netzwerk: ", el("strong", { text: first.label })),
+      el("span", { class: "net-title" }, ...tx("profiles.netCurrent", { network: el("strong", { text: first.label }) })),
       el("span", { class: "hint", text: netDetails(first) }),
-      el("span", { class: "hint", text: owner ? `Gehört zum Profil „${owner.name}“.` : "Noch keinem Profil zugeordnet." }),
-      others.length ? el("span", { class: "hint", text: `Außerdem: ${others.map((n) => `${n.label} (${n.interface})`).join(", ")}` }) : null,
+      el("span", { class: "hint", text: owner ? t("profiles.netOwner", { name: owner.name }) : t("profiles.netNoOwner") }),
+      others.length
+        ? el("span", { class: "hint", text: t("profiles.netOthers", { networks: others.map((n) => `${n.label} (${n.interface})`).join(", ") }) })
+        : null,
     ),
   );
 }
@@ -150,8 +159,8 @@ export function profileCard(profile) {
         "button",
         {
           type: "button",
-          title: "Zuordnung entfernen",
-          "aria-label": `Netzwerk „${n.label}“ von „${name}“ entfernen`,
+          title: t("profiles.unassign"),
+          "aria-label": t("profiles.unassignLabel", { network: n.label, name }),
           onclick: () => editProfiles({ action: "remove_network", id: profile.id, index }),
         },
         icon("x"),
@@ -164,11 +173,11 @@ export function profileCard(profile) {
       type: "button",
       class: "btn small ghost",
       disabled: !current,
-      title: current ? `${current.label}: ${netDetails(current)}` : "Kein Netzwerk erkannt",
+      title: current ? `${current.label}: ${netDetails(current)}` : t("profiles.noNetwork"),
       onclick: () => editProfiles({ action: "add_network", id: profile.id, network: current }),
     },
     icon("plus"),
-    "Aktuelles Netzwerk übernehmen",
+    t("profiles.addNetwork"),
   );
 
   const auto = el("input", {
@@ -188,20 +197,20 @@ export function profileCard(profile) {
         "span",
         { class: "profile-title" },
         el("span", { class: "profile-name", text: name }),
-        active ? el("span", { class: "profile-badge", text: "aktiv" }) : null,
+        active ? el("span", { class: "profile-badge", text: t("profiles.active") }) : null,
         profiles.fallback === profile.id
-          ? el("span", { class: "profile-badge other", text: "andere Netzwerke", title: "Gilt, wenn kein Profil zum Netzwerk passt" })
+          ? el("span", { class: "profile-badge other", text: t("profiles.otherNetworks"), title: t("profiles.otherNetworksHint") })
           : null,
       ),
       el(
         "span",
         { class: "profile-actions" },
-        active ? null : el("button", { type: "button", class: "btn small", text: "Aktivieren", onclick: () => activateProfile(profile.id) }),
-        action("Umbenennen", "pencil", () => renameProfile(profile)),
-        action("Duplizieren", "copy", () => editProfiles({ action: "duplicate", id: profile.id })),
-        action("Löschen", "trash", () => removeProfile(profile), {
+        active ? null : el("button", { type: "button", class: "btn small", text: t("profiles.activate"), onclick: () => activateProfile(profile.id) }),
+        action(t("common.rename"), "pencil", () => renameProfile(profile)),
+        action(t("profiles.duplicate"), "copy", () => editProfiles({ action: "duplicate", id: profile.id })),
+        action(t("profiles.delete"), "trash", () => removeProfile(profile), {
           disabled: active,
-          title: active ? "Das aktive Profil lässt sich nicht löschen" : "Löschen",
+          title: active ? t("profiles.deleteActive") : t("profiles.delete"),
         }),
       ),
       el("span", { class: "profile-summary", text: profileSummary(profile) }),
@@ -209,7 +218,7 @@ export function profileCard(profile) {
     el(
       "div",
       { class: "profile-nets" },
-      chips.length ? chips : el("span", { class: "hint", text: "Kein Netzwerk zugeordnet, nur von Hand wählbar." }),
+      chips.length ? chips : el("span", { class: "hint", text: t("profiles.noNetworks") }),
       hasCurrent ? null : take,
     ),
     profile.networks.length
@@ -218,7 +227,7 @@ export function profileCard(profile) {
           { class: "switch profile-auto" },
           auto,
           el("span", { class: "track" }, el("span", { class: "thumb" })),
-          el("span", { text: "In diesen Netzwerken automatisch aktivieren" }),
+          el("span", { text: t("profiles.autoActivate") }),
         )
       : null,
   );
@@ -241,33 +250,30 @@ export function renderProfiles() {
   }
   const fallback = $("#profileFallback");
   fallback.replaceChildren(
-    el("option", { value: "", text: "Aktuelles Profil behalten" }),
-    ...profiles.list.map((p) => el("option", { value: p.id, text: `„${p.name}“ aktivieren` })),
+    el("option", { value: "", text: t("profiles.keepCurrent") }),
+    ...profiles.list.map((p) => el("option", { value: p.id, text: t("profiles.activateNamed", { name: p.name }) })),
   );
   fallback.value = profiles.fallback;
   $("#netHint").hidden = state.platform !== "macos";
 }
 
-export const PROFILE_NAME_HINT = "Zum Beispiel der Ort, an dem dieses Profil gilt.";
-
 export async function newProfile() {
-  const text = `${PROFILE_NAME_HINT} Es beginnt mit diesem Rechner allein als Server. Um die aktuellen Werte zu übernehmen, ein Profil duplizieren.`;
-  const name = await askName("Neues Profil", "", text);
+  const name = await askName(t("settings.profiles.new"), "", t("profiles.newHint"));
   if (name) await editProfiles({ action: "create", name });
 }
 
 export async function renameProfile(profile) {
-  const name = await askName("Profil umbenennen", profile.name, PROFILE_NAME_HINT);
+  const name = await askName(t("profiles.renameTitle"), profile.name, t("profiles.nameHint"));
   if (name && name !== profile.name) await editProfiles({ action: "rename", id: profile.id, name });
 }
 
 export async function removeProfile(profile) {
   const result = await showDialog({
-    title: `Profil „${profile.name}“ löschen?`,
-    body: el("p", { text: "Anordnung, Adressen und zugeordnete Netzwerke dieses Profils gehen verloren." }),
+    title: t("profiles.deleteTitle", { name: profile.name }),
+    body: el("p", { text: t("profiles.deleteBody") }),
     actions: [
-      { label: "Abbrechen", value: "cancel", kind: "ghost" },
-      { label: "Löschen", value: "remove", kind: "danger" },
+      { label: t("common.cancel"), value: "cancel", kind: "ghost" },
+      { label: t("profiles.delete"), value: "remove", kind: "danger" },
     ],
   });
   if (result === "remove") await editProfiles({ action: "remove", id: profile.id });

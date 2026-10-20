@@ -2,12 +2,13 @@
 
 import { $ } from "./core.js";
 import { el, store } from "./util.js";
+import { locale } from "./i18n.js";
 
 export const LEVELS = { TRACE: 0, DEBUG: 0, INFO: 1, WARN: 2, ERROR: 2 };
 
 export function logLine(line) {
-  const t = new Date(line.ts).toLocaleTimeString("de-DE");
-  const node = el("div", { class: line.level, "data-rank": LEVELS[line.level] ?? 1 }, el("span", { class: "t", text: t }), el("span", { class: "l", text: line.level }), line.message);
+  const time = new Date(line.ts).toLocaleTimeString(locale());
+  const node = el("div", { class: line.level, "data-rank": LEVELS[line.level] ?? 1 }, el("span", { class: "t", text: time }), el("span", { class: "l", text: line.level }), line.message);
   node.hidden = Number(node.dataset.rank) < Number($("#logLevel").value);
   return node;
 }

@@ -42,7 +42,7 @@ unsafe impl Send for MacInjector {}
 impl MacInjector {
     pub fn new() -> Result<Self> {
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-            .map_err(|_| anyhow!("CGEventSource nicht verfügbar (Bedienungshilfen-Recht fehlt?)"))?;
+            .map_err(|_| anyhow!("CGEventSource not available (Accessibility permission missing?)"))?;
         // Tastaturlayout für Kürzel im Zeichenmodus
         layout::refresh(Duration::ZERO);
         Ok(Self {
@@ -63,7 +63,7 @@ impl MacInjector {
     fn post(&self, event: Option<CGEvent>) {
         match event {
             Some(event) => event.post(CGEventTapLocation::HID),
-            None => tracing::warn!("CGEvent konnte nicht erzeugt werden"),
+            None => tracing::warn!("failed to create a CGEvent"),
         }
     }
 
@@ -213,7 +213,7 @@ impl Injector for MacInjector {
                     return;
                 }
                 let Some(code) = mac_from_hid(key) else {
-                    tracing::debug!(?key, "Taste ohne macOS-Zuordnung");
+                    tracing::debug!(?key, "key without a macOS mapping");
                     return;
                 };
                 let flag = Self::flag_for(code);

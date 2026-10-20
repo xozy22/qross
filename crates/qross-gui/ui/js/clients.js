@@ -1,6 +1,7 @@
 // Seitenleiste des Servers: Anfragen, Rechner der Anordnung und Details des ausgewählten Rechners
 
 import { $, invoke, state } from "./core.js";
+import { locale, t } from "./i18n.js";
 import { el, fingerprintNode, icon, toast } from "./util.js";
 import { showDialog } from "./dialog.js";
 import { settingsChanged } from "./store.js";
@@ -12,9 +13,9 @@ import { USAGE_TEXT, syncUsage, usageValue } from "./usage.js";
 
 /** Reiter der Details eines Clients */
 export const INSPECTOR_TABS = [
-  ["connection", "Verbindung"],
-  ["rights", "Rechte"],
-  ["info", "Info"],
+  ["connection", "client.connection"],
+  ["rights", "clients.tabRights"],
+  ["info", "clients.tabInfo"],
 ];
 
 export function renderClients() {
@@ -35,31 +36,39 @@ export function selectComputer(name, tab) {
 // ------------------------------------------------------------ Anfragen
 
 function requestNode(p) {
-  const what =
+  // Unter dem Namen nur, was los ist; im Tooltip derselbe Satz mit Name und Adresse
+  const vars = { name: p.name, addr: p.addr, reason: p.reason };
+  const [what, title] =
     p.trust === "unknown"
-      ? "möchte sich verbinden"
+      ? [t("clients.requestUnknown"), t("clients.requestUnknownTitle", vars)]
       : p.trust === "mismatch"
-        ? "meldet einen anderen Fingerprint"
+        ? [t("clients.requestMismatch"), t("clients.requestMismatchTitle", vars)]
         : p.in_layout
-          ? `abgewiesen: ${p.reason}`
-          : "ist freigegeben, fehlt aber in der Anordnung";
+          ? [t("clients.requestRejected", vars), t("clients.requestRejectedTitle", vars)]
+          : [t("clients.requestMissing"), t("clients.requestMissingTitle", vars)];
   // Schon freigegeben, nur nicht in der Anordnung: gleich aufnehmen; sonst erst den Fingerprint vergleichen
   const direct = p.trust === "known" && !p.in_layout;
   return el(
     "div",
     { class: `request ${p.trust}`, "data-name": p.name },
     icon("ask"),
-    el("span", { class: "what", title: `${p.name} (${p.addr}) ${what}` }, el("strong", { text: p.name }), el("span", { text: what })),
+    el("span", { class: "what", title }, el("strong", { text: p.name }), el("span", { text: what })),
     el("button", {
       type: "button",
       class: "btn small",
-      text: direct ? "Aufnehmen" : "Prüfen",
-      title: direct ? approveLabel(p) : "Fingerprint vergleichen und freigeben",
+      text: direct ? t("clients.add") : t("clients.review"),
+      title: direct ? approveLabel(p) : t("clients.reviewHint"),
       onclick: () => (direct ? approve(p) : approvalDialog(p)),
     }),
     el(
       "button",
-      { type: "button", class: "icon-btn small", title: "Ignorieren", "aria-label": `Anfrage von ${p.name} ignorieren`, onclick: () => invoke("dismiss_client", { name: p.name }) },
+      {
+        type: "button",
+        class: "icon-btn small",
+        title: t("clients.ignore"),
+        "aria-label": t("clients.ignoreRequest", { name: p.name }),
+        onclick: () => invoke("dismiss_client", { name: p.name }),
+      },
       icon("x"),
     ),
   );
@@ -81,30 +90,32 @@ function renderRequests() {
 }
 
 export function pendingText(p) {
-  if (p.trust === "unknown") return "Vergleiche den Fingerprint mit der Anzeige auf diesem Rechner, bevor du ihn freigibst.";
-  if (p.trust === "mismatch") return "Meldet sich mit einem anderen Fingerprint als bisher. Gib ihn nur frei, wenn Qross dort neu eingerichtet wurde.";
-  if (!p.in_layout) return "Ist freigegeben, steht aber noch nicht in der Anordnung.";
-  return `Abgewiesen: ${p.reason}`;
+  if (p.trust === "unknown") return t("clients.pendingUnknown");
+  if (p.trust === "mismatch") return t("clients.pendingMismatch");
+  if (!p.in_layout) return t("clients.pendingMissing");
+  return t("clients.pendingRejected", { reason: p.reason });
 }
 
 export function approveLabel(p) {
-  if (p.trust === "known") return "In Anordnung aufnehmen";
-  if (p.trust === "mismatch") return "Neuen Fingerprint freigeben";
-  return p.in_layout ? "Freigeben" : "Freigeben und aufnehmen";
+  if (p.trust === "known") return t("clients.addToLayout");
+  if (p.trust === "mismatch") return t("clients.approveNew");
+  return p.in_layout ? t("clients.approve") : t("clients.approveAndAdd");
 }
 
 export async function approvalDialog(p) {
-  const body = [el("p", {}, `„${p.name}“ (${p.addr}) möchte Maus und Tastatur dieses Rechners mitbenutzen. ${pendingText(p)}`)];
+  const body = [el("p", {}, `${t("clients.approvalText", { name: p.name, addr: p.addr })} ${pendingText(p)}`)];
   if (p.trust === "mismatch" && p.expected) {
-    body.push(el("div", { class: "warnbox" }, "Bisher freigegeben:", fingerprintNode(p.expected)));
+    body.push(el("div", { class: "warnbox" }, t("clients.previouslyApproved"), fingerprintNode(p.expected)));
   }
-  body.push(el("div", { class: "fp-block" }, el("span", { class: "label", text: "Fingerprint des Rechners" }), fingerprintNode(p.fingerprint, true)));
+  body.push(
+    el("div", { class: "fp-block" }, el("span", { class: "label", text: t("clients.computerFingerprint") }), fingerprintNode(p.fingerprint, true)),
+  );
   const result = await showDialog({
-    title: p.trust === "mismatch" ? `Fingerprint von „${p.name}“ hat sich geändert` : `„${p.name}“ möchte sich verbinden`,
+    title: p.trust === "mismatch" ? t("clients.fingerprintChanged", { name: p.name }) : t("clients.wantsToConnect", { name: p.name }),
     body,
     actions: [
-      { label: "Später", value: "later", kind: "ghost" },
-      { label: "Ignorieren", value: "ignore", kind: "ghost" },
+      { label: t("clients.later"), value: "later", kind: "ghost" },
+      { label: t("clients.ignore"), value: "ignore", kind: "ghost" },
       { label: approveLabel(p), value: "approve", kind: p.trust === "mismatch" ? "danger" : "accept" },
     ],
   });
@@ -117,7 +128,7 @@ export async function approve(p) {
     if (p.trust !== "known") await invoke("approve_client", { name: p.name, fingerprint: p.fingerprint });
     if (!p.in_layout && addScreenNamed(p.name)) await settingsChanged({ immediate: true });
     if (p.trust === "known") invoke("dismiss_client", { name: p.name });
-    toast(`„${p.name}“ freigegeben. Er verbindet sich beim nächsten Versuch.`);
+    toast(t("clients.approved", { name: p.name }));
   } catch (e) {
     toast(String(e), "error");
   }
@@ -131,10 +142,10 @@ function renderComputerList() {
   const running = s.role === "server";
   const online = new Map(running ? s.clients.map((c) => [c.name, c]) : []);
   const names = server.screens.map((x) => x.name).filter((n) => n !== server.name);
-  names.sort((a, b) => Number(online.has(b)) - Number(online.has(a)) || a.localeCompare(b, "de"));
+  names.sort((a, b) => Number(online.has(b)) - Number(online.has(a)) || a.localeCompare(b, locale()));
   const list = $("#computerList");
   if (!names.length) {
-    list.replaceChildren(el("li", { class: "empty", text: "Noch kein anderer Rechner. Nimm einen mit „Bildschirm“ auf oder starte Qross dort als Client." }));
+    list.replaceChildren(el("li", { class: "empty", text: t("clients.noComputers") }));
     return;
   }
   const selected = selectedName();
@@ -156,12 +167,15 @@ function renderComputerList() {
           cursorHere
             ? el(
                 "span",
-                { class: `flag${held ? " held" : ""}`, title: s.locked ? "Cursor hier gesperrt" : held ? "Spielemodus hält den Cursor hier" : "Cursor ist hier" },
+                {
+                  class: `flag${held ? " held" : ""}`,
+                  title: s.locked ? t("clients.cursorLocked") : held ? t("clients.cursorHeld") : t("clients.cursorHere"),
+                },
                 icon(s.locked ? "lock" : held ? "game" : "cursor"),
               )
             : null,
-          limits ? el("span", { class: "flag limited", title: `Rechte eingeschränkt: ${limits}` }, icon("shield")) : null,
-          client ? qualityEntry(`client:${name}`).pill : el("span", { class: "off", text: running ? "nicht verbunden" : "" }),
+          limits ? el("span", { class: "flag limited", title: t("clients.limited", { limits }) }, icon("shield")) : null,
+          client ? qualityEntry(`client:${name}`).pill : el("span", { class: "off", text: running ? t("clients.notConnected") : "" }),
         ),
       );
     }),
@@ -213,7 +227,8 @@ function renderInspector() {
 }
 
 function tabLabel(tab) {
-  return INSPECTOR_TABS.find(([id]) => id === tab)?.[1] ?? "";
+  const key = INSPECTOR_TABS.find(([id]) => id === tab)?.[1];
+  return key ? t(key) : "";
 }
 
 function tabsNode(active) {
@@ -231,14 +246,14 @@ function tabsNode(active) {
   };
   return el(
     "div",
-    { class: "tabs", role: "tablist", "aria-label": "Details" },
-    ...INSPECTOR_TABS.map(([id, label]) =>
+    { class: "tabs", role: "tablist", "aria-label": t("panel.details") },
+    ...INSPECTOR_TABS.map(([id, key]) =>
       el("button", {
         type: "button",
         role: "tab",
         "aria-selected": String(id === active),
         tabindex: id === active ? "0" : "-1",
-        text: label,
+        text: t(key),
         onclick: () => select(id),
         onkeydown: onKey,
       }),
@@ -247,11 +262,12 @@ function tabsNode(active) {
 }
 
 function subtitle(name, client, isServer, running) {
-  if (isServer) return running ? "Dieser Rechner · Server läuft" : "Dieser Rechner · Server gestoppt";
-  if (!running) return "Server gestoppt";
-  if (!client) return "nicht verbunden";
-  const cursor = state.status.cursor_on === name ? " · Cursor ist hier" : "";
-  return `verbunden${monitorNote(client)}${cursor}`;
+  if (isServer) return running ? t("clients.thisServerRunning") : t("clients.thisServerStopped");
+  if (!running) return t("clients.serverStopped");
+  if (!client) return t("clients.notConnected");
+  // {monitors}: „ · 2 Monitore“ oder nichts
+  const monitors = monitorNote(client);
+  return state.status.cursor_on === name ? t("clients.subtitleCursorHere", { monitors }) : t("clients.subtitleConnected", { monitors });
 }
 
 function fillBody(body, name, tab, client, isServer) {
@@ -262,17 +278,15 @@ function fillBody(body, name, tab, client, isServer) {
       el(
         "div",
         { class: "insp-actions" },
-        el("button", { type: "button", class: "btn small ghost", onclick: () => renameScreen(name) }, icon("pencil"), "Umbenennen"),
-        el("button", { type: "button", class: "btn small ghost", onclick: () => openSettings("set-server") }, icon("gear"), "Server-Einstellungen"),
+        el("button", { type: "button", class: "btn small ghost", onclick: () => renameScreen(name) }, icon("pencil"), t("common.rename")),
+        el("button", { type: "button", class: "btn small ghost", onclick: () => openSettings("set-server") }, icon("gear"), t("clients.serverSettings")),
       ),
     );
     return;
   }
   if (tab === "connection") {
     if (!client) {
-      const text = running
-        ? `„${name}“ ist nicht verbunden. Sobald Qross dort als Client mit der Adresse unten läuft, stehen hier Latenz, Verlauf und die Verzögerung der Eingabe.`
-        : "Der Server ist gestoppt. Nach dem Start stehen hier für jeden verbundenen Rechner Latenz, Verlauf und die Verzögerung der Eingabe.";
+      const text = running ? t("clients.notConnectedNote", { name }) : t("clients.stoppedNote");
       body.append(el("p", { class: "insp-note", text }));
       return;
     }
@@ -284,7 +298,7 @@ function fillBody(body, name, tab, client, isServer) {
   if (tab === "rights") {
     body.append(
       shareControls(name),
-      el("p", { class: "hint", text: "Gilt sofort, auch bei bestehender Verbindung. Was ein Rechner sendet, erreicht über den Server auch die anderen." }),
+      el("p", { class: "hint", text: t("clients.rightsHint") }),
     );
     return;
   }
@@ -293,8 +307,8 @@ function fillBody(body, name, tab, client, isServer) {
     el(
       "div",
       { class: "insp-actions" },
-      el("button", { type: "button", class: "btn small ghost", onclick: () => renameScreen(name) }, icon("pencil"), "Umbenennen"),
-      el("button", { type: "button", class: "btn small ghost danger", onclick: () => removeScreen(name) }, icon("trash"), "Entfernen"),
+      el("button", { type: "button", class: "btn small ghost", onclick: () => renameScreen(name) }, icon("pencil"), t("common.rename")),
+      el("button", { type: "button", class: "btn small ghost danger", onclick: () => removeScreen(name) }, icon("trash"), t("common.remove")),
     ),
   );
 }
@@ -313,24 +327,32 @@ function infoList(name, client, isServer) {
   const rows = [];
   if (isServer) {
     const screen = running ? s.local_screen : null;
-    rows.push(["Fläche", screen ? `${screen.width} × ${screen.height}` : "–"]);
+    rows.push([t("clients.area"), screen ? `${screen.width} × ${screen.height}` : "–"]);
     const monitors = multipleMonitors(screen);
-    if (monitors) rows.push(["Monitore", monitorsText(monitors)]);
-    rows.push(["Port", String(state.settings.server.port)]);
+    if (monitors) rows.push([t("clients.monitors"), monitorsText(monitors)]);
+    rows.push([t("clients.port"), String(state.settings.server.port)]);
     // Die Adressen stehen darunter in der Seitenleiste.
-    rows.push(["Fingerprint", fingerprintNode(state.fingerprint)]);
+    rows.push([t("clients.fingerprint"), fingerprintNode(state.fingerprint)]);
     rows.push([USAGE_TEXT.here, usageValue()]);
   } else {
-    rows.push(["Status", client ? (s.cursor_on === name ? "verbunden, Cursor ist hier" : "verbunden") : running ? "nicht verbunden" : "Server gestoppt"]);
+    const status = client
+      ? s.cursor_on === name
+        ? t("clients.connectedCursorHere")
+        : t("clients.connected")
+      : running
+        ? t("clients.notConnected")
+        : t("clients.serverStopped");
+    rows.push([t("clients.status"), status]);
     if (client) {
-      rows.push(["Fläche", `${client.width} × ${client.height}`]);
+      rows.push([t("clients.area"), `${client.width} × ${client.height}`]);
       const monitors = multipleMonitors(client);
-      if (monitors) rows.push(["Monitore", monitorsText(monitors)]);
-      rows.push(["Adresse", client.addr]);
+      if (monitors) rows.push([t("clients.monitors"), monitorsText(monitors)]);
+      rows.push([t("clients.address"), client.addr]);
     }
     const chars = state.settings.server.keys.modes?.[name] === "chars";
     const typesText = client ? client.types_text !== false : true;
-    rows.push(["Tasten", chars ? (typesText ? "als Zeichen" : "als Tastenposition (kann keine Zeichen eingeben)") : "als Tastenposition"]);
+    const keys = chars ? (typesText ? t("clients.keysChars") : t("clients.keysPositionOnly")) : t("clients.keysPosition");
+    rows.push([t("clients.keys"), keys]);
   }
   return el("dl", { class: "insp-list" }, ...rows.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", {}, v)]));
 }

@@ -63,7 +63,7 @@ impl X11Injector {
         // Für die aktive Gruppe (z. B. „us,de“) beim Suchen der Taste eines Zeichens
         let xkb = conn.xkb_use_extension(1, 0).ok().and_then(|c| c.reply().ok()).is_some_and(|r| r.supported);
         let locks = xkb.then(|| LockMasks::fetch(&conn)).and_then(|masks| {
-            masks.map_err(|e| tracing::warn!("Feststelltaste und Num nicht setzbar: {e:#}")).ok()
+            masks.map_err(|e| tracing::warn!("cannot set Caps Lock and Num Lock: {e:#}")).ok()
         });
         Ok(Self {
             conn,
@@ -82,7 +82,7 @@ impl X11Injector {
 
     fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) {
         if let Err(e) = self.conn.xtest_fake_input(kind, detail, CURRENT_TIME, self.root, x, y, 0) {
-            tracing::warn!("XTest fehlgeschlagen: {e}");
+            tracing::warn!("XTest failed: {e}");
         }
     }
 
@@ -101,7 +101,7 @@ impl X11Injector {
                 let keycode = (code + X11_OFFSET).min(255) as u8;
                 self.fake(if down { KEY_PRESS_EVENT } else { KEY_RELEASE_EVENT }, keycode, 0, 0);
             }
-            None => tracing::debug!(?key, "Taste ohne X11-Zuordnung"),
+            None => tracing::debug!(?key, "key without an X11 mapping"),
         }
     }
 
@@ -113,7 +113,7 @@ impl X11Injector {
             }
         }
         if self.keymap.is_none() {
-            self.keymap = Keymap::fetch(&self.conn).map_err(|e| tracing::warn!("Tastaturbelegung nicht lesbar: {e:#}")).ok();
+            self.keymap = Keymap::fetch(&self.conn).map_err(|e| tracing::warn!("cannot read the keyboard mapping: {e:#}")).ok();
         }
         self.keymap.as_mut()
     }
@@ -157,7 +157,7 @@ impl X11Injector {
         let per = keymap.keysyms_per_keycode();
         let syms = vec![keysym; usize::from(per)];
         if let Err(e) = self.conn.change_keyboard_mapping(1, code, per, &syms) {
-            tracing::warn!("Keycode {code} nicht belegbar: {e}");
+            tracing::warn!("cannot remap keycode {code}: {e}");
             return None;
         }
         keymap.set(code, keysym);
@@ -185,7 +185,7 @@ impl X11Injector {
             }
             None => match fallback {
                 Some(key) => self.key(key, true),
-                None => tracing::debug!(?ch, "Zeichen ohne freien Keycode"),
+                None => tracing::debug!(?ch, "character without a free keycode"),
             },
         }
     }
@@ -248,7 +248,7 @@ impl Injector for X11Injector {
                 // detail 1 = relativ, wie XTestFakeRelativeMotionEvent (dort ohne Root-Fenster)
                 let clamp = |v: i32| v.clamp(i16::MIN.into(), i16::MAX.into()) as i16;
                 if let Err(e) = self.conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 1, CURRENT_TIME, NONE, clamp(dx), clamp(dy), 0) {
-                    tracing::warn!("XTest fehlgeschlagen: {e}");
+                    tracing::warn!("XTest failed: {e}");
                 }
             }
             Inject::Button { button, down } => {
@@ -296,7 +296,7 @@ impl Injector for X11Injector {
             Inject::Shortcut { ch, key, down } => self.type_char(ch, down, true, Some(key)),
             Inject::Locks(locks) => {
                 if let Some(Err(e)) = self.locks.map(|masks| masks.set(&self.conn, locks)) {
-                    tracing::warn!("Feststelltaste und Num nicht gesetzt: {e:#}");
+                    tracing::warn!("failed to set Caps Lock and Num Lock: {e:#}");
                 }
             }
         }

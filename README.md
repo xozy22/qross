@@ -83,7 +83,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Server: [„Sichere Tastatureingabe“](#macos-sichere-tastatureingabe) erkennen, Hinweis, Cursor bleibt auf dem Mac | entfällt | entfällt | entfällt | ✔¹ |
 | Cursor-Finder: beim Wechsel Ring um den Cursor und Name des Rechners⁶ | ✔ | ✔ mit Compositor | – (keine Fenster über anderen Programmen möglich) | ✔ in der App¹ |
 | Bildschirmschoner abgleichen: startet und endet mit dem des Servers, auf Wunsch Clients mitsperren⁷ | ✔ | ✔ über den Dienst des Desktops, sonst den X-Server | ✔ über den Dienst des Desktops | ✔¹ |
-| Grafische Oberfläche mit Layout-Editor | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
+| Grafische Oberfläche mit Layout-Editor, auf Deutsch und Englisch (folgt der Systemsprache, umschaltbar) | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |
 | Profile je Ort, automatisch nach Netzwerk (Gateway, ohne Zusatzrechte)⁴ | ✔ mit Netzwerkname | ✔, Name über NetworkManager | ✔ wie X11 | ✔ ohne WLAN-Namen¹ |
 | [Autostart](docs/autostart.md) bei der Anmeldung, unsichtbar im Tray⁵ | ✔ `HKCU\…\Run` | ✔ XDG-Autostart | ✔ XDG-Autostart | ✔ LaunchAgent¹ |
 
@@ -400,7 +400,7 @@ Hinweise:
 | `qross-platform` | Betriebssystem: Windows (Hooks, SendInput, OLE/Shell), Linux (X11/XTest, Wayland über Desktop-Portale und libei), macOS (CGEventTap) |
 | `qross-net` | QUIC/TLS, Fingerprint-Vertrauen, LAN-Suche, Dateiübertragung, Laufzeit von Server und Client |
 | `qross` | Kommandozeilenprogramm |
-| `qross-gui` | Grafische Oberfläche (Tauri); die Seite liegt in `ui/`, ihr Code als ES-Module in `ui/js/` (`main.js` startet, je Bereich ein Modul) |
+| `qross-gui` | Grafische Oberfläche (Tauri); die Seite liegt in `ui/`, ihr Code als ES-Module in `ui/js/` (`main.js` startet, je Bereich ein Modul), die Texte in `ui/js/lang/` (`de.js`, `en.js`); Logs und Fehlermeldungen sind englisch |
 | `bench/netbench` | Benchmark TCP+TLS vs. QUIC (eigener Cargo-Workspace) |
 
 Hintergrund: [Benchmark](docs/benchmark-ergebnisse.md) · [Protokoll](docs/protokoll.md) · [Wayland](docs/wayland.md)

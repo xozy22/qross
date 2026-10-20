@@ -28,7 +28,7 @@ impl Font {
             let bytes = std::fs::read(&path).ok()?;
             let mut font = FontVec::try_from_vec_and_index(bytes, index).ok()?;
             font.set_variation(b"wght", WEIGHT);
-            tracing::debug!("Cursor-Finder: Schrift {}", path.display());
+            tracing::debug!("cursor finder: font {}", path.display());
             Some(Self(font))
         })
     }

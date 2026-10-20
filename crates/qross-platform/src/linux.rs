@@ -38,8 +38,8 @@ fn env_set(name: &str) -> bool {
 pub fn init_process() {
     x11::init_process();
     match session() {
-        LinuxSession::Wayland => tracing::info!("Wayland-Sitzung: Eingaben über die Desktop-Portale (libei)"),
-        LinuxSession::X11 => tracing::debug!("X11-Sitzung"),
+        LinuxSession::Wayland => tracing::info!("Wayland session: input via the desktop portals (libei)"),
+        LinuxSession::X11 => tracing::debug!("X11 session"),
     }
 }
 
@@ -84,8 +84,8 @@ pub fn injector() -> Result<Box<dyn Injector>> {
     let portal = env_set("LIBEI_SOCKET") || wayland::portals().remote_desktop.is_some_and(|v| v >= 2);
     if !portal && env_set("DISPLAY") {
         tracing::warn!(
-            "Kein Desktop-Portal mit RemoteDesktop und libei – Qross speist über XWayland (XTest) ein. \
-             Das erreicht je nach Compositor nur X11-Programme (siehe docs/wayland.md)."
+            "No desktop portal with RemoteDesktop and libei; Qross injects input via XWayland (XTest). \
+             Depending on the compositor, this only reaches X11 applications (see docs/wayland.md)."
         );
         return x11::injector();
     }

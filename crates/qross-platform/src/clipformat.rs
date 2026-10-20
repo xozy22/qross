@@ -21,7 +21,7 @@ pub struct Rgba {
 }
 
 pub fn rgba_to_png(image: &Rgba) -> Result<Vec<u8>> {
-    ensure!(image.pixels.len() == image.width as usize * image.height as usize * 4, "Pixelzahl passt nicht zur Größe");
+    ensure!(image.pixels.len() == image.width as usize * image.height as usize * 4, "pixel count does not match the size");
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, image.width, image.height);
     encoder.set_color(png::ColorType::Rgba);
@@ -37,8 +37,8 @@ pub fn rgba_to_png(image: &Rgba) -> Result<Vec<u8>> {
 pub fn png_to_rgba(data: &[u8]) -> Result<Rgba> {
     let mut decoder = png::Decoder::new(Cursor::new(data));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder.read_info().context("kein gültiges PNG")?;
-    let mut buf = vec![0; reader.output_buffer_size().context("PNG zu groß")?];
+    let mut reader = decoder.read_info().context("not a valid PNG")?;
+    let mut buf = vec![0; reader.output_buffer_size().context("PNG too large")?];
     let info = reader.next_frame(&mut buf)?;
     buf.truncate(info.buffer_size());
     let pixels = match info.color_type {
@@ -46,17 +46,17 @@ pub fn png_to_rgba(data: &[u8]) -> Result<Rgba> {
         png::ColorType::Rgb => buf.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
         png::ColorType::GrayscaleAlpha => buf.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
         png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g, 255]).collect(),
-        png::ColorType::Indexed => bail!("PNG-Palette wurde nicht aufgelöst"),
+        png::ColorType::Indexed => bail!("PNG palette was not expanded"),
     };
     Ok(Rgba { width: info.width, height: info.height, pixels })
 }
 
 fn u16_at(b: &[u8], at: usize) -> Result<u16> {
-    Ok(u16::from_le_bytes(b.get(at..at + 2).context("DIB zu kurz")?.try_into()?))
+    Ok(u16::from_le_bytes(b.get(at..at + 2).context("DIB too short")?.try_into()?))
 }
 
 fn u32_at(b: &[u8], at: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(b.get(at..at + 4).context("DIB zu kurz")?.try_into()?))
+    Ok(u32::from_le_bytes(b.get(at..at + 4).context("DIB too short")?.try_into()?))
 }
 
 const BI_RGB: u32 = 0;
@@ -67,13 +67,13 @@ const BI_ALPHABITFIELDS: u32 = 6;
 /// Unterstützt 24 und 32 Bit, unkomprimiert oder mit Bitmasken – das deckt Screenshots ab.
 pub fn dib_to_rgba(dib: &[u8]) -> Result<Rgba> {
     let header = u32_at(dib, 0)? as usize;
-    ensure!(header >= 40, "unbekannter DIB-Kopf ({header} Bytes)");
+    ensure!(header >= 40, "unknown DIB header ({header} bytes)");
     let width = i32::from_le_bytes(dib[4..8].try_into()?);
     let height = i32::from_le_bytes(dib[8..12].try_into()?);
     let bits = u16_at(dib, 14)?;
     let compression = u32_at(dib, 16)?;
-    ensure!(width > 0 && height != 0, "ungültige DIB-Größe {width}×{height}");
-    ensure!(bits == 24 || bits == 32, "{bits}-Bit-DIBs werden nicht unterstützt");
+    ensure!(width > 0 && height != 0, "invalid DIB size {width}×{height}");
+    ensure!(bits == 24 || bits == 32, "{bits}-bit DIBs are not supported");
     let (w, h) = (width as usize, height.unsigned_abs() as usize);
     let top_down = height < 0;
 
@@ -92,12 +92,12 @@ pub fn dib_to_rgba(dib: &[u8]) -> Result<Rgba> {
             masks[3] = u32_at(dib, 52)?;
         }
     } else {
-        ensure!(compression == BI_RGB, "komprimierte DIBs (Typ {compression}) werden nicht unterstützt");
+        ensure!(compression == BI_RGB, "compressed DIBs (type {compression}) are not supported");
     }
 
     let bytes_per_pixel = bits as usize / 8;
     let stride = (w * bytes_per_pixel).div_ceil(4) * 4;
-    let data = dib.get(pixel_offset..pixel_offset + stride * h).context("DIB-Pixeldaten unvollständig")?;
+    let data = dib.get(pixel_offset..pixel_offset + stride * h).context("DIB pixel data incomplete")?;
     let channel = |px: u32, mask: u32| -> u8 {
         if mask == 0 {
             return 255;

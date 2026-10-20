@@ -71,13 +71,13 @@ fn file_contents_format() -> u16 {
 /// Legt `files` als virtuelle Dateien in die Zwischenablage, dazu `formats` (Format, Inhalt als HGLOBAL).
 pub fn set(files: VirtualFiles, formats: Vec<(u32, Vec<u8>)>) -> anyhow::Result<()> {
     let descriptor = file_group_descriptor(&files.entries)?;
-    let ole = ole_thread().as_ref().map_err(|e| anyhow!("OLE-Zwischenablage nicht verfügbar: {e}"))?;
+    let ole = ole_thread().as_ref().map_err(|e| anyhow!("OLE clipboard not available: {e}"))?;
     let (reply, result) = channel();
     let formats = formats.into_iter().filter_map(|(f, bytes)| Some((u16::try_from(f).ok().filter(|&f| f != 0)?, bytes))).collect();
     let job = Job { descriptor, files, formats, reply };
-    ole.jobs.lock().unwrap_or_else(|e| e.into_inner()).send(job).map_err(|_| anyhow!("OLE-Thread beendet"))?;
-    unsafe { PostMessageW(Some(HWND(ole.hwnd as _)), WM_JOB, WPARAM(0), LPARAM(0)) }.context("OLE-Thread nicht erreichbar")?;
-    result.recv_timeout(SET_TIMEOUT).map_err(|_| anyhow!("Zwischenablage antwortet nicht"))?
+    ole.jobs.lock().unwrap_or_else(|e| e.into_inner()).send(job).map_err(|_| anyhow!("OLE thread has exited"))?;
+    unsafe { PostMessageW(Some(HWND(ole.hwnd as _)), WM_JOB, WPARAM(0), LPARAM(0)) }.context("OLE thread not reachable")?;
+    result.recv_timeout(SET_TIMEOUT).map_err(|_| anyhow!("clipboard not responding"))?
 }
 
 /// Fügt die Zwischenablage in den Ordner `folder` ein wie Strg+V im Explorer: über das Drop-Ziel des
@@ -206,7 +206,7 @@ fn put(descriptor: Vec<u8>, files: VirtualFiles, formats: Vec<(u16, Vec<u8>)>) -
                 tries += 1;
                 thread::sleep(Duration::from_millis(5));
             }
-            Err(e) => return Err(anyhow!("Zwischenablage nicht gesetzt: {e}")),
+            Err(e) => return Err(anyhow!("failed to set the clipboard: {e}")),
         }
     }
 }
@@ -432,7 +432,7 @@ impl ISequentialStream_Impl for VirtualStream_Impl {
                 }
                 // Lieber ganz scheitern als ein gekürztes Stück abliefern
                 Err(e) => {
-                    tracing::debug!("virtuelle Datei nicht gelesen: {e}");
+                    tracing::debug!("failed to read the virtual file: {e}");
                     return read_error(&e);
                 }
             }
@@ -563,7 +563,7 @@ fn in_mta(stream: IStream) -> windows::core::Result<IStream> {
         }
     });
     let Some(jobs) = mta else {
-        tracing::warn!("MTA für virtuelle Dateien nicht verfügbar – Streams laufen im STA");
+        tracing::warn!("MTA for virtual files not available; streams run in the STA");
         return Ok(stream);
     };
     let (reply, packet) = channel();

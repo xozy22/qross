@@ -26,7 +26,7 @@ pub struct DiscoveredServer {
 pub async fn respond(name: String, port: u16, fingerprint: String) {
     match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT)).await {
         Ok(socket) => serve(socket, name, port, fingerprint).await,
-        Err(e) => warn!("Server-Suche im LAN nicht verfügbar (UDP {DISCOVERY_PORT}): {e}"),
+        Err(e) => warn!("LAN server discovery unavailable (UDP {DISCOVERY_PORT}): {e}"),
     }
 }
 
@@ -38,12 +38,12 @@ async fn serve(socket: UdpSocket, name: String, port: u16, fingerprint: String) 
         fingerprint,
         platform: Platform::current(),
     })
-    .expect("serialisierbar");
+    .expect("serializable");
     let mut buf = [0u8; 512];
     loop {
         let Ok((n, from)) = socket.recv_from(&mut buf).await else { continue };
         if let Ok(Discovery::Probe { .. }) = postcard::from_bytes(&buf[..n]) {
-            debug!("Suchanfrage von {from}");
+            debug!("discovery probe from {from}");
             let _ = socket.send_to(&announce, from).await;
         }
     }

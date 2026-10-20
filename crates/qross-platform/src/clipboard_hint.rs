@@ -40,7 +40,7 @@ impl Hint {
             match wayland() {
                 Ok(found) => return found,
                 Err(e) => {
-                    debug!("Zwischenablage über Wayland nicht prüfbar ({e}) – frage über X11");
+                    debug!("cannot check the clipboard via Wayland ({e}); asking via X11");
                     self.no_data_control = matches!(e, paste::Error::MissingProtocol { .. });
                 }
             }
@@ -50,12 +50,12 @@ impl Hint {
 
     fn x11_concealed(&mut self) -> Option<&'static str> {
         if self.x11.is_none() {
-            self.x11 = X11::connect().map_err(|e| debug!("Zwischenablage über X11 nicht prüfbar: {e:#}")).ok();
+            self.x11 = X11::connect().map_err(|e| debug!("cannot check the clipboard via X11: {e:#}")).ok();
         }
         match self.x11.as_ref()?.concealed() {
             Ok(found) => found,
             Err(e) => {
-                debug!("Markierungen der Zwischenablage über X11 nicht lesbar: {e:#}");
+                debug!("cannot read the clipboard markers via X11: {e:#}");
                 // Beim nächsten Mal neu verbinden
                 self.x11 = None;
                 None

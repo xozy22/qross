@@ -11,7 +11,7 @@ pub const BULK_PRIORITY: i32 = -10;
 pub async fn read_kind(stream: &mut RecvStream) -> Result<StreamKind> {
     let mut kind = [0u8; 1];
     stream.read_exact(&mut kind).await?;
-    StreamKind::from_u8(kind[0]).with_context(|| format!("unbekannter Stream-Typ {}", kind[0]))
+    StreamKind::from_u8(kind[0]).with_context(|| format!("unknown stream type {}", kind[0]))
 }
 
 pub async fn open_input(conn: &Connection) -> Result<SendStream> {
@@ -24,14 +24,14 @@ pub async fn open_input(conn: &Connection) -> Result<SendStream> {
 pub async fn send_clipboard(conn: Connection, mut data: ClipboardData) {
     // Ein Bild über der Frame-Grenze nicht mitschicken, Text und HTML aber schon
     if data.png.as_ref().is_some_and(|png| png.len() > MAX_FRAME_LEN - 1024 * 1024) {
-        tracing::warn!("Bild in der Zwischenablage ist zu groß für die Übertragung – nur Text/HTML");
+        tracing::warn!("image in the clipboard is too large to transfer; sending only text/HTML");
         data.png = None;
         if data.is_empty() {
             return;
         }
     }
     if let Err(e) = send_clipboard_message(&conn, &Clipboard::Data(data)).await {
-        tracing::warn!("Clipboard konnte nicht gesendet werden: {e:#}");
+        tracing::warn!("failed to send clipboard: {e:#}");
     }
 }
 

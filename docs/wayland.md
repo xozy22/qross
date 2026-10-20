@@ -245,39 +245,39 @@ Protokoll ausführlich.
    qross -v client <server-adresse>
    ```
    - Erwartet: Dialog „Fernsteuerung/Remote Desktop“. Bei GNOME „Merken“ anhaken, dann erlauben.
-     Im Protokoll stehen „Wayland-Einspeisung über das Portal (Freigabe gemerkt)“ und
-     „Wayland-Monitore: …“ mit den echten Monitoren in logischen Pixeln.
+     Im Protokoll stehen „Wayland injection via the portal (permission remembered)“ und
+     „Wayland monitors: …“ mit den echten Monitoren in logischen Pixeln.
    - Cursor vom Server herüberschieben: Er bewegt sich auf allen Monitoren. Klicks, Rad (beide
      Richtungen), Tippen mit Umlauten, Strg+C/V funktionieren in einem Wayland-Programm (z. B.
      Texteditor) und in einem X11-Programm (z. B. `xterm`).
    - Feststelltaste am Server einschalten, Cursor herüberschieben: Der Client schreibt groß. Auf dem
      Client die Feststelltaste drücken: Server und Client schalten aus. Im Protokoll steht
-     „libei: Stand der Modifier“; fehlt das, meldet der Compositor seinen Stand nicht, und der Client
+     „libei: modifier state“; fehlt das, meldet der Compositor seinen Stand nicht, und der Client
      schaltet nur bei Änderungen mit.
    - Client beenden und neu starten: Diesmal kommt kein Dialog.
    - Freigabe über das System beenden (GNOME: Symbol oben rechts, „Stopp“): Im Protokoll steht
-     „unterbrochen“, danach baut Qross die Verbindung ohne Dialog neu auf.
+     „Wayland injection interrupted“, danach baut Qross die Verbindung ohne Dialog neu auf.
    - Dialog ablehnen (vorher in der GUI „Wayland-Freigaben → Vergessen“): Der Start meldet
-     „Freigabe wurde abgelehnt“, die GUI zeigt den Hinweis mit „Erneut versuchen“.
+     „the permission was denied“, die GUI zeigt den Hinweis mit „Erneut versuchen“.
 3. **Server unter Wayland** (anderer Rechner ist Client):
    ```bash
    qross -v server --config qross.toml
    ```
    - Erwartet: Dialog zum Erfassen der Eingaben (GNOME bis 50 bei jedem Start). Im Protokoll steht
-     „Wayland-Erfassung bereit, Monitore …, Kanten …“.
+     „Wayland capture ready, monitors …, edges …“.
    - Cursor an die Kante zum Client: Er wechselt. Maus, Tasten, Rad, Fang-Taste (nur auf dem Client)
      und Strg+Alt+Shift+Esc funktionieren.
    - In eine Ecke (Totzone) oder an eine Kante ohne Nachbarn: Der Cursor bleibt höchstens kurz
      hängen und bewegt sich dann normal weiter.
    - Mit eingestellter Wechselverzögerung: Erst längeres Drücken gegen die Kante wechselt.
    - Zurück vom Client: Der Cursor erscheint an der richtigen Stelle der Kante.
-   - Monitor an- oder abstecken: Im Protokoll steht „Monitore geändert“, bzw. die Sitzung wird neu
-     aufgebaut. Danach wechselt der Cursor weiter.
+   - Monitor an- oder abstecken: Im Protokoll steht „monitors changed, setting the barriers again“,
+     bzw. die Sitzung wird neu aufgebaut. Danach wechselt der Cursor weiter.
 4. **Zwischenablage:** Text, Bild (Screenshot) und eine Datei aus dem Dateimanager in beide
    Richtungen kopieren. Unter GNOME braucht das XWayland. Ein Passwort aus KeePassXC kommt nicht an,
-   im Protokoll steht „vertraulicher Inhalt … wird nicht geteilt“.
+   im Protokoll steht „clipboard: confidential content … is not shared“.
 5. **Ohne Portal** (z. B. Sway): Der Client speist mit Warnung über XWayland ein. Der Server meldet
-   „Eingaben erfassen (Server) unter Wayland geht nicht …“, die GUI zeigt den Hinweis.
+   „Capturing input (server) does not work under Wayland …“, die GUI zeigt den Hinweis.
 6. **Erzwingen:** Mit `QROSS_BACKEND=x11` läuft unter XWayland der alte Weg. Das ist nur zum
    Vergleichen gedacht, erfassen kann der Server so nicht.
 

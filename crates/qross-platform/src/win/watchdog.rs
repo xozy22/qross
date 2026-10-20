@@ -62,8 +62,8 @@ fn run(calls: impl Fn() -> Calls, running: &AtomicBool, rehook: impl Fn()) {
             Step::Rehook => {
                 lost += 1;
                 tracing::warn!(
-                    "Windows hat die Eingabe-Hooks entfernt (ein Aufruf brauchte zu lange) – setze sie neu \
-                     ({lost}. Mal seit dem Start)"
+                    "Windows removed the input hooks (a call took too long); reinstalling them \
+                     (#{lost} since start)"
                 );
                 rehook();
             }

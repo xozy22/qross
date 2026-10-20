@@ -74,7 +74,7 @@ struct ReaderGone;
 
 impl fmt::Display for ReaderGone {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("liest nicht weiter")
+        f.write_str("stopped reading")
     }
 }
 
@@ -211,7 +211,7 @@ impl Pastes {
     }
 
     fn ticket(&self, state: &mut HashMap<u64, Paste>, id: u64, index: u32, now: Instant) -> Ticket {
-        let paste = state.get_mut(&id).expect("eben angelegt");
+        let paste = state.get_mut(&id).expect("just created");
         paste.opened.insert(index);
         if let Some((at, _)) = &mut paste.ended {
             *at = now;
@@ -417,11 +417,11 @@ pub(crate) async fn accept_fetches(
         tokio::spawn(async move {
             let result = match read_kind(&mut recv).await {
                 Ok(StreamKind::Fetch) => serve(send, recv, &peer, &offers, &pastes, allowed()).await,
-                Ok(other) => Err(anyhow::anyhow!("unerwarteter Stream vom Typ {other:?}")),
+                Ok(other) => Err(anyhow::anyhow!("unexpected stream of type {other:?}")),
                 Err(e) => Err(e),
             };
             if let Err(e) = result {
-                debug!("Abruf von „{peer}“: {e:#}");
+                debug!("fetch from '{peer}': {e:#}");
             }
         });
     }
@@ -429,16 +429,16 @@ pub(crate) async fn accept_fetches(
 
 /// Antwortet auf einen Abruf (das erste Byte ist gelesen).
 async fn serve(mut send: SendStream, mut recv: RecvStream, peer: &str, offers: &Offers, pastes: &Pastes, allowed: bool) -> Result<()> {
-    let request: FileRequest = read_frame(&mut recv).await?.context("Abruf ohne Anfrage")?;
+    let request: FileRequest = read_frame(&mut recv).await?.context("fetch without a request")?;
     send.set_priority(BULK_PRIORITY)?;
     if !allowed {
-        return refuse(send, "Teilen kopierter Dateien ist nicht erlaubt").await;
+        return refuse(send, "sharing copied files is not allowed").await;
     }
     let Some((entries, info, files)) = offers.get(peer, request.transfer) else {
-        return refuse(send, "nicht mehr in der Zwischenablage").await;
+        return refuse(send, "no longer in the clipboard").await;
     };
     let Some(local) = entries.get(request.index as usize).filter(|e| !e.entry.is_dir) else {
-        return refuse(send, "unbekannte Datei").await;
+        return refuse(send, "unknown file").await;
     };
     let Some(ticket) = pastes.enter(request.paste, request.transfer, request.index, &info, files) else {
         // Hier abgebrochen: auch die folgenden Dateien nicht mehr
@@ -448,12 +448,12 @@ async fn serve(mut send: SendStream, mut recv: RecvStream, peer: &str, offers: &
     let result = send_file(&mut send, local, request.offset, &ticket).await;
     match &result {
         Ok(()) => {
-            debug!("„{}“ an „{peer}“ geliefert (ab Byte {})", local.entry.path, request.offset);
+            debug!("'{}' delivered to '{peer}' (from byte {})", local.entry.path, request.offset);
             ticket.complete();
         }
         Err(e) => {
             if progress::cancelled(e).is_none() {
-                warn!("„{}“ an „{peer}“ nicht geliefert: {e:#}", local.entry.path);
+                warn!("failed to deliver '{}' to '{peer}': {e:#}", local.entry.path);
             }
             ticket.fail(phase_of(e));
         }
@@ -464,7 +464,7 @@ async fn serve(mut send: SendStream, mut recv: RecvStream, peer: &str, offers: &
 async fn refuse(mut send: SendStream, reason: &str) -> Result<()> {
     write_frame(&mut send, &FileReply::Unavailable { reason: reason.to_owned() }).await?;
     send.finish()?;
-    bail!("abgelehnt: {reason}")
+    bail!("refused: {reason}")
 }
 
 /// Liefert `local` ab `offset`: Antwort, Rohbytes, Prüfsumme.
@@ -472,14 +472,14 @@ async fn send_file(send: &mut SendStream, local: &LocalEntry, offset: u64, ticke
     let name = &local.entry.path;
     let mut file = match tokio::fs::File::open(&local.source).await {
         Ok(file) => file,
-        Err(e) => return unavailable(send, format!("„{name}“ ist nicht lesbar: {e}")).await,
+        Err(e) => return unavailable(send, format!("'{name}' is not readable: {e}")).await,
     };
     let size = file.metadata().await?.len();
     if size != local.entry.size {
-        return unavailable(send, format!("„{name}“ hat sich seit dem Kopieren geändert")).await;
+        return unavailable(send, format!("'{name}' has changed since it was copied")).await;
     }
     if offset > size {
-        return unavailable(send, format!("„{name}“ hat nur {size} Bytes")).await;
+        return unavailable(send, format!("'{name}' has only {size} bytes")).await;
     }
     file.seek(SeekFrom::Start(offset)).await?;
     write_frame(send, &FileReply::Data { size: size - offset }).await.map_err(frame_write_error)?;
@@ -490,7 +490,7 @@ async fn send_file(send: &mut SendStream, local: &LocalEntry, offset: u64, ticke
         let want = remaining.min(CHUNK as u64) as usize;
         let n = file.read(&mut buf[..want]).await?;
         if n == 0 {
-            bail!("„{name}“ wurde während der Übertragung kürzer");
+            bail!("'{name}' got shorter during the transfer");
         }
         hasher.update(&buf[..n]);
         // Schreiben wartet auf die Gegenstelle; „Abbrechen“ soll trotzdem sofort wirken.
@@ -589,12 +589,12 @@ pub(crate) async fn deliver(offered: Offered, data: ClipboardData, hub: &Clipboa
     let Offered { peer, names, bytes, .. } = offered;
     match placed {
         Ok(seq) => {
-            info!("kopierte Dateien von „{peer}“ liegen auf Abruf in der Zwischenablage ({})", human_size(bytes));
+            info!("copied files from '{peer}' are in the clipboard for paste on demand ({})", human_size(bytes));
             notify(FilesNotice::Ready { peer, names, bytes });
             Some(seq)
         }
         Err(e) => {
-            warn!("kopierte Dateien von „{peer}“ nicht in die Zwischenablage gelegt: {e:#}");
+            warn!("failed to put copied files from '{peer}' into the clipboard: {e:#}");
             notify(FilesNotice::Failed { peer, reason: format!("{e:#}") });
             None
         }
@@ -612,11 +612,11 @@ async fn request(source: &SourceShared, index: usize, offset: u64, paste: u64) -
     match read_frame::<_, FileReply>(&mut recv).await.map_err(frame_read_error)? {
         Some(FileReply::Data { size }) => {
             let expected = source.entries[index].size.saturating_sub(offset);
-            ensure!(size == expected, "„{}“ hat jetzt {size} statt {expected} Bytes", source.entries[index].path);
+            ensure!(size == expected, "'{}' now has {size} instead of {expected} bytes", source.entries[index].path);
             Ok((recv, size))
         }
         Some(FileReply::Unavailable { reason }) => Err(Unavailable(reason).into()),
-        None => bail!("keine Antwort von „{}“", source.peer),
+        None => bail!("no response from '{}'", source.peer),
     }
 }
 
@@ -656,8 +656,8 @@ async fn pump(recv: &mut RecvStream, size: u64, ticket: &Ticket, tx: &mpsc::Send
         }
     }
     // Alle Bytes sind da: die Prüfsumme auch dann noch lesen, wenn das Programm schon aufgehört hat.
-    let trailer: FileTrailer = read_frame(recv).await.map_err(frame_read_error)?.context("Prüfsumme fehlt")?;
-    ensure!(trailer.sha256 == <[u8; 32]>::from(hasher.finalize()), "Prüfsumme stimmt nicht");
+    let trailer: FileTrailer = read_frame(recv).await.map_err(frame_read_error)?.context("checksum missing")?;
+    ensure!(trailer.sha256 == <[u8; 32]>::from(hasher.finalize()), "checksum mismatch");
     Ok(())
 }
 
@@ -744,7 +744,7 @@ impl VirtualFile for Fetching {
             let task = source.runtime.spawn(download(source.clone(), index, offset, ticket, tx)).abort_handle();
             self.download = Some(Download { position: offset, pieces, chunk: Vec::new(), at: 0, task, finished: false });
         }
-        let download = self.download.as_mut().expect("eben gestartet");
+        let download = self.download.as_mut().expect("just started");
         loop {
             if download.at < download.chunk.len() {
                 let n = (download.chunk.len() - download.at).min(buf.len());
@@ -760,7 +760,7 @@ impl VirtualFile for Fetching {
                 Some(Piece::Data(bytes)) => (download.chunk, download.at) = (bytes, 0),
                 Some(Piece::End) => download.finished = true,
                 Some(Piece::Failed(e)) => return Err(e),
-                None => return Err(io::Error::other("Abruf beendet")),
+                None => return Err(io::Error::other("fetch ended")),
             }
         }
     }
@@ -788,7 +788,7 @@ async fn download(source: Arc<SourceShared>, index: usize, offset: u64, ticket: 
     let name = &source.entries[index].path;
     match result {
         Ok(()) => {
-            debug!("„{name}“ von „{}“ eingefügt (ab Byte {offset})", source.peer);
+            debug!("'{name}' from '{}' pasted (from byte {offset})", source.peer);
             ticket.complete();
             let _ = tx.send(Piece::End).await;
         }
@@ -796,8 +796,8 @@ async fn download(source: Arc<SourceShared>, index: usize, offset: u64, ticket: 
         Err(e) if e.is::<ReaderGone>() => {}
         Err(e) => {
             match progress::cancelled(&e) {
-                Some(c) => info!("Einfügen von „{name}“ {}", if c.by_peer { "vom Sender abgebrochen" } else { "abgebrochen" }),
-                None => warn!("„{name}“ von „{}“ nicht eingefügt: {e:#}", source.peer),
+                Some(c) => info!("pasting '{name}' {}", if c.by_peer { "cancelled by the sender" } else { "cancelled" }),
+                None => warn!("failed to paste '{name}' from '{}': {e:#}", source.peer),
             }
             ticket.fail(phase_of(&e));
             let io = io_error(&e);

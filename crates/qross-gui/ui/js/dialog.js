@@ -1,6 +1,7 @@
 // Dialog
 
 import { $, state } from "./core.js";
+import { formatList, t, tn } from "./i18n.js";
 import { el, running } from "./util.js";
 
 /** Zeigt einen Dialog; liefert den Wert des gedrückten Knopfes (oder null). */
@@ -29,8 +30,8 @@ export function showDialog({ title, body, actions }) {
   });
 }
 
-export async function askName(title, initial = "", text = "Verwende genau den Namen, mit dem sich der Rechner meldet. Das ist meist sein Rechnername.") {
-  const input = el("input", { type: "text", value: initial, spellcheck: "false", autocomplete: "off", "aria-label": "Name" });
+export async function askName(title, initial = "", text = t("dialog.nameHint")) {
+  const input = el("input", { type: "text", value: initial, spellcheck: "false", autocomplete: "off", "aria-label": t("dialog.name") });
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -40,7 +41,7 @@ export async function askName(title, initial = "", text = "Verwende genau den Na
   const result = await showDialog({
     title,
     body: [el("p", { text }), input],
-    actions: [{ label: "Abbrechen", value: "cancel", kind: "ghost" }, { label: "Übernehmen", value: "ok", kind: "primary" }],
+    actions: [{ label: t("common.cancel"), value: "cancel", kind: "ghost" }, { label: t("dialog.apply"), value: "ok", kind: "primary" }],
   });
   const name = input.value.trim();
   return result === "ok" && name ? name : null;
@@ -48,8 +49,7 @@ export async function askName(title, initial = "", text = "Verwende genau den Na
 
 /** „a“, „a“ und „b“, „a“, „b“ und „c“ */
 export function joinNames(names) {
-  const quoted = names.map((n) => `„${n}“`);
-  return quoted.length > 1 ? `${quoted.slice(0, -1).join(", ")} und ${quoted.at(-1)}` : (quoted[0] ?? "");
+  return formatList(names.map((name) => t("dialog.quotedName", { name })));
 }
 
 /**
@@ -62,24 +62,21 @@ export async function confirmRoleChange(role) {
   if (s.role === "client" && s.phase !== "connected") return true;
   const toClient = s.role === "server";
   const names = toClient ? s.clients.map((c) => c.name) : [];
-  const lose = names.length
-    ? ` ${joinNames(names)} ${names.length === 1 ? "verliert" : "verlieren"} dann Maus und Tastatur dieses Rechners.`
-    : "";
-  const server = s.server_name ? `„${s.server_name}“` : "dem Server";
+  const lose = names.length ? ` ${tn("dialog.clientsLose", names.length, { names: joinNames(names) })}` : "";
   const result = await showDialog({
-    title: toClient ? "Server ausschalten?" : "Verbindung trennen?",
+    title: toClient ? t("dialog.stopServerTitle") : t("dialog.disconnectTitle"),
     body: toClient
       ? [
-          el("p", { text: `Achtung: Der Server schaltet sich aus, wenn dieser Rechner zum Client wird.${lose}` }),
-          el("p", { text: "Willst du wirklich zum Client wechseln?" }),
+          el("p", { text: `${t("dialog.toClient")}${lose}` }),
+          el("p", { text: t("dialog.toClientQuestion") }),
         ]
       : [
-          el("p", { text: `Achtung: Die Verbindung zu ${server} wird getrennt, wenn dieser Rechner zum Server wird.` }),
-          el("p", { text: "Willst du wirklich zum Server wechseln?" }),
+          el("p", { text: s.server_name ? t("dialog.toServerNamed", { server: s.server_name }) : t("dialog.toServer") }),
+          el("p", { text: t("dialog.toServerQuestion") }),
         ],
     actions: [
-      { label: "Abbrechen", value: "cancel", kind: "ghost" },
-      { label: toClient ? "Server ausschalten" : "Verbindung trennen", value: "ok", kind: "danger" },
+      { label: t("common.cancel"), value: "cancel", kind: "ghost" },
+      { label: toClient ? t("dialog.stopServer") : t("dialog.disconnect"), value: "ok", kind: "danger" },
     ],
   });
   return result === "ok";

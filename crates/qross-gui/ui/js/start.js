@@ -1,6 +1,7 @@
 // Start/Stopp
 
 import { $, invoke, state } from "./core.js";
+import { t } from "./i18n.js";
 import { running, toast } from "./util.js";
 import { saveSoon } from "./store.js";
 import { serverConfirmDialog } from "./discovery.js";
@@ -21,7 +22,7 @@ export async function startFlow() {
   if (state.settings.role === "client" && !state.settings.client.address.trim()) {
     $("#finderBox").open = true;
     $("#clientAddress").focus();
-    toast("Gib zuerst die Adresse des Servers ein.", "error");
+    toast(t("start.noAddress"), "error");
     return;
   }
   try {

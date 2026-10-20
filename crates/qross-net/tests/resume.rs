@@ -452,7 +452,7 @@ async fn a_second_live_client_with_the_same_identity_wins() {
     rig.ready(&second).await;
     let ended = tokio::time::timeout(Duration::from_secs(5), &mut first.task).await;
     let error = ended.expect("der ältere hört auf").unwrap().unwrap_err();
-    assert!(format!("{error:#}").contains("anderes Qross"), "{error:#}");
+    assert!(format!("{error:#}").contains("another Qross"), "{error:#}");
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(second.connected(), 1, "der neuere bleibt verbunden");
     assert!(!second.task.is_finished());
@@ -474,7 +474,7 @@ async fn a_sleeping_client_signs_off_and_returns_on_waking() {
     assert!(took < Duration::from_millis(500), "{took:?}");
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(laptop.connected(), 1, "im Ruhezustand keine neue Verbindung");
-    assert!(laptop.disconnected().iter().any(|r| r.contains("Ruhezustand")), "{:?}", laptop.disconnected());
+    assert!(laptop.disconnected().iter().any(|r| r.contains("sleep")), "{:?}", laptop.disconnected());
 
     let woke = Instant::now();
     laptop.send(SystemEvent::Woke);
@@ -544,7 +544,7 @@ async fn a_sleeping_server_signs_off_its_clients() {
     let at = laptop.notices.lock().unwrap().iter().find(|(_, n)| matches!(n, ClientNotice::Disconnected { .. })).map(|(t, _)| *t);
     let took = report("Ruhezustand des Servers: Client weiß Bescheid", sleeping, at);
     assert!(took < Duration::from_millis(500), "{took:?}");
-    assert!(laptop.disconnected()[0].contains("Ruhezustand"), "{:?}", laptop.disconnected());
+    assert!(laptop.disconnected()[0].contains("sleep"), "{:?}", laptop.disconnected());
 
     tokio::time::sleep(Duration::from_secs(10)).await;
     rig.proxy.set(PASS);

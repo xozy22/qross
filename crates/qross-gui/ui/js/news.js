@@ -2,6 +2,7 @@
 
 import { $, invoke, state } from "./core.js";
 import { el, store, toast } from "./util.js";
+import { locale, t } from "./i18n.js";
 import { openSheet, setupSheet } from "./dialog.js";
 
 export const NEWS_SEEN = "qross.newsSeen"; // zuletzt angesehene Version
@@ -10,13 +11,16 @@ export const NEWS_HINTED = "qross.newsHinted"; // Version, zu der der Update-Hin
 /** Rubrik aus dem Changelog → Farbe des Tags (unbekannte Rubriken bleiben neutral). */
 export const SECTION_TONES = {
   neu: "neu",
+  new: "neu",
   added: "neu",
   verbessert: "verbessert",
   geändert: "verbessert",
   changed: "verbessert",
+  improved: "verbessert",
   behoben: "behoben",
   fixed: "behoben",
   wichtig: "wichtig",
+  important: "wichtig",
   sicherheit: "wichtig",
   security: "wichtig",
   entfernt: "wichtig",
@@ -33,11 +37,11 @@ export function compareVersions(a, b) {
   return 0;
 }
 
-/** „2026-10-18“ → „18. Oktober 2026“; anderes bleibt wie es ist. */
+/** „2026-10-18“ → „18. Oktober 2026“ bzw. „October 18, 2026“; anderes bleibt wie es ist. */
 export function formatDate(iso) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
   if (!m) return iso || "";
-  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString("de-DE", {
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString(locale(), {
     day: "numeric",
     month: "long",
     year: "numeric",
@@ -70,7 +74,7 @@ export function releaseNode(release) {
       "div",
       { class: "release-head" },
       el("h3", { text: release.version }),
-      current ? el("span", { class: "installed", text: "installiert" }) : null,
+      current ? el("span", { class: "installed", text: t("news.installed") }) : null,
       release.date ? el("time", { datetime: release.date, text: formatDate(release.date) }) : null,
     ),
     (release.intro || "").split(/\n{2,}/).filter(Boolean).map((p) => el("p", { class: "intro" }, inlineNodes(p))),
@@ -101,7 +105,7 @@ export async function openNews() {
   list.replaceChildren(
     ...(state.releases.length
       ? state.releases.map(releaseNode)
-      : [el("li", { class: "news-empty", text: "Für diese Version sind keine Neuigkeiten hinterlegt." })]),
+      : [el("li", { class: "news-empty", text: t("news.empty") })]),
   );
   openSheet(dialog, $("#newsClose"));
   list.scrollTop = 0;
@@ -118,8 +122,9 @@ export function renderNewsChip(unseen) {
   const chip = $("#newsChip");
   $("#versionText").textContent = `v${state.version}`;
   chip.classList.toggle("has-news", unseen);
-  chip.title = unseen ? `Neu in Version ${state.version}: Neuigkeiten ansehen` : "Neuigkeiten anzeigen";
-  chip.setAttribute("aria-label", unseen ? `Version ${state.version}, neu – Neuigkeiten ansehen` : `Version ${state.version} – Neuigkeiten anzeigen`);
+  const version = state.version;
+  chip.title = unseen ? t("news.chipNew", { version }) : t("news.show");
+  chip.setAttribute("aria-label", t(unseen ? "news.chipLabelNew" : "news.chipLabel", { version }));
 }
 
 /** Nach einem Update: Punkt am Chip und einmal ein Hinweis. Beim allerersten Start nur die Version merken. */
@@ -135,7 +140,7 @@ export function checkForNews() {
   renderNewsChip(unseen);
   if (unseen && store(NEWS_HINTED) !== state.version) {
     store(NEWS_HINTED, state.version);
-    toast(`Qross wurde auf ${state.version} aktualisiert.`, "", { label: "Neuigkeiten ansehen", run: openNews });
+    toast(t("news.updated", { version: state.version }), "", { label: t("news.see"), run: openNews });
   }
 }
 

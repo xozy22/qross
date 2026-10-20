@@ -60,13 +60,13 @@ async fn main() -> Result<()> {
         [mode, client, file] if mode == "drag" || mode == "copy" => {
             let file = std::path::absolute(file)?;
             if !file.exists() {
-                bail!("{} nicht gefunden", file.display());
+                bail!("{} not found", file.display());
             }
             (mode.as_str(), client.clone(), Some(file))
         }
         _ => bail!(
-            "Aufruf: scripted_server drag|copy <Client-Name> <Datei>, scripted_server receive <Client-Name>, \
-             scripted_server finder <Client-Name> [Wechsel] oder scripted_server usage <Client-Name> [Sekunden]"
+            "usage: scripted_server drag|copy <client-name> <file>, scripted_server receive <client-name>, \
+             scripted_server finder <client-name> [switches] or scripted_server usage <client-name> [seconds]"
         ),
     };
 
@@ -100,15 +100,15 @@ async fn main() -> Result<()> {
         game: Box::new(qross_proto::GameState::default),
         finder: None,
     }));
-    println!("Server „{SERVER}“ auf 127.0.0.1:24990, Fingerprint {}", identity.fingerprint());
-    println!("Warte auf den Client „{client}“ …");
+    println!("Server '{SERVER}' on 127.0.0.1:24990, fingerprint {}", identity.fingerprint());
+    println!("Waiting for client '{client}' …");
 
     loop {
-        match notices.recv().await.context("Server beendet")? {
+        match notices.recv().await.context("server stopped")? {
             ServerNotice::ClientRejected { name, fingerprint, trust: TrustOutcome::Unknown, .. } if name == client => {
                 // Freigeben; der Client versucht es in Kürze erneut.
                 TrustStore::load(&trust_file)?.trust(&name, &fingerprint)?;
-                println!("„{name}“ freigegeben");
+                println!("'{name}' approved");
             }
             ServerNotice::ClientConnected { name, .. } if name == client => break,
             _ => {}
@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
             // Am Ende loslassen; nach einem Abbruch legt der Client nichts ab.
             events.send(CaptureEvent::MouseDelta { dx: 40, dy: 0 })?;
             events.send(CaptureEvent::Button { button: MouseButton::Left, down: false })?;
-            println!("losgelassen nach {:?}", end.phase);
+            println!("Released after {:?}", end.phase);
         }
         ("copy", _) => {
             hit_edge(&events, &capture, false).await?;
@@ -151,10 +151,10 @@ async fn main() -> Result<()> {
             for i in 1..=count {
                 capture.0.lock().unwrap().clear();
                 hit_edge(&events, &capture, false).await?;
-                println!("Wechsel {i}: Cursor auf „{client}“");
+                println!("Switch {i}: cursor on '{client}'");
                 tokio::time::sleep(Duration::from_millis(1500)).await;
                 events.send(CaptureEvent::MouseDelta { dx: -5000, dy: 0 })?;
-                println!("Wechsel {i}: Cursor zurück");
+                println!("Switch {i}: cursor back");
                 tokio::time::sleep(Duration::from_millis(1500)).await;
             }
         }
@@ -165,7 +165,7 @@ async fn main() -> Result<()> {
             events.send(CaptureEvent::MouseDelta { dx: -5000, dy: 0 })?;
             watch(&mut notices, Direction::Receiving).await?;
             tokio::time::sleep(Duration::from_secs(1)).await;
-            println!("Zwischenablage des Servers: {:?}", clipboard.files());
+            println!("Server clipboard: {:?}", clipboard.files());
         }
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -183,25 +183,25 @@ async fn hit_edge(events: &UnboundedSender<CaptureEvent>, capture: &RecordingCap
             return Ok(());
         }
     }
-    bail!("kein Wechsel zum Client")
+    bail!("no switch to the client")
 }
 
 /// Gibt den Fortschritt etwa jede Sekunde aus, bis eine Übertragung in `direction` endet.
 async fn watch(notices: &mut UnboundedReceiver<ServerNotice>, direction: Direction) -> Result<Progress> {
     let mut printed = Instant::now();
     loop {
-        let ServerNotice::Transfer(p) = notices.recv().await.context("Server beendet")? else { continue };
+        let ServerNotice::Transfer(p) = notices.recv().await.context("server stopped")? else { continue };
         if p.direction != direction {
             continue;
         }
         if !p.phase.is_running() {
-            println!("Ende: {:?} nach {:.1} s ({})", p.phase, p.elapsed.as_secs_f64(), human_size(p.bytes));
+            println!("End: {:?} after {:.1} s ({})", p.phase, p.elapsed.as_secs_f64(), human_size(p.bytes));
             return Ok(p);
         }
         if printed.elapsed() >= Duration::from_secs(1) {
             printed = Instant::now();
             let percent = if p.total == 0 { 100.0 } else { p.bytes as f64 * 100.0 / p.total as f64 };
-            println!("{percent:5.1} %  {}/s  noch {:?}", human_size(p.bytes_per_s), p.remaining.map(|r| r.as_secs()));
+            println!("{percent:5.1}%  {}/s  remaining {:?}", human_size(p.bytes_per_s), p.remaining.map(|r| r.as_secs()));
         }
     }
 }

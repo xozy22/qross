@@ -94,9 +94,9 @@ fn subscribers() -> MutexGuard<'static, Vec<(u64, Subscriber)>> {
 /// Vom Beobachter: an alle Abonnenten weitergeben
 fn dispatch(event: SystemEvent) {
     match event {
-        SystemEvent::Sleeping => tracing::info!("System geht in den Ruhezustand"),
-        SystemEvent::Woke => tracing::info!("System ist aufgewacht"),
-        SystemEvent::NetworkChanged => tracing::trace!("Netzwerk geändert"),
+        SystemEvent::Sleeping => tracing::info!("system is going to sleep"),
+        SystemEvent::Woke => tracing::info!("system woke up"),
+        SystemEvent::NetworkChanged => tracing::trace!("network changed"),
     }
     let current: Vec<Subscriber> = subscribers().iter().map(|(_, s)| s.clone()).collect();
     for subscriber in current {

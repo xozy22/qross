@@ -2,6 +2,7 @@
 
 import { state } from "./core.js";
 import { el, infoIcon } from "./util.js";
+import { formatList, formatNumber, t, tn } from "./i18n.js";
 import { chainBlock, updateLatency } from "./latency.js";
 import { showUsage, usageBlock } from "./usage.js";
 
@@ -9,10 +10,11 @@ import { showUsage, usageBlock } from "./usage.js";
 export const QUALITY_SECONDS = 60;
 /** Stufe → gefüllte Balken; die Farbe kommt per CSS über `data-level`. */
 export const QUALITY_BARS = { very_good: 4, good: 3, fair: 2, poor: 1 };
+/** Stufe → angezeigter Name; `label` aus dem Backend ist nur fürs Protokoll (englisch). */
+export const QUALITY_LEVELS = { very_good: "quality.veryGood", good: "quality.good", fair: "quality.fair", poor: "quality.poor" };
 /** Einzelwerte, die die Stufe bestimmen (Felder von `rating`) */
-export const QUALITY_METRICS = { rtt: "Latenz", jitter: "Jitter", loss: "Verlust" };
-export const QUALITY_LIMITS =
-  "Sehr gut: unter 10 ms Latenz, 3 ms Jitter und 0,5 % Verlust. Gut: unter 30 ms, 10 ms und 2 %. Mäßig: unter 80 ms, 25 ms und 5 %. Es zählt der schlechteste Wert.";
+export const QUALITY_METRICS = { rtt: "quality.metricRtt", jitter: "quality.metricJitter", loss: "quality.metricLoss" };
+export const QUALITY_LIMITS = "quality.limits";
 /** Je Verbindung ("server" bzw. "client:Name"): Messpunkte der letzten Minute und die Anzeige dazu */
 export const qualities = new Map();
 export const SVG_NS = "http://www.w3.org/2000/svg";
@@ -26,19 +28,25 @@ export function svgEl(tag, attrs = {}) {
   return node;
 }
 
-export function decimal(value, digits) {
-  return value.toLocaleString("de-DE", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+/** Name der Stufe eines Messpunkts in der Sprache der Oberfläche */
+export function levelName(q) {
+  return QUALITY_LEVELS[q.level] ? t(QUALITY_LEVELS[q.level]) : q.label;
 }
 
 export function formatMs(ms) {
-  if (ms < 0.1) return `<${NBSP}0,1${NBSP}ms`;
-  return `${decimal(ms, ms < 10 ? 1 : 0)}${NBSP}ms`;
+  if (ms < 0.1) return `<${NBSP}${formatNumber(0.1, 1)}${NBSP}ms`;
+  return `${formatNumber(ms, ms < 10 ? 1 : 0)}${NBSP}ms`;
+}
+
+/** Prozent zu einer schon formatierten Zahl: „45 %“ bzw. „45%“ */
+export function percentText(number) {
+  return t("quality.percent", { value: number });
 }
 
 export function formatPct(pct) {
-  if (pct === 0) return `0${NBSP}%`;
-  if (pct < 0.1) return `<${NBSP}0,1${NBSP}%`;
-  return `${decimal(pct, pct < 10 ? 1 : 0)}${NBSP}%`;
+  if (pct === 0) return percentText(0);
+  if (pct < 0.1) return `<${NBSP}${percentText(formatNumber(0.1, 1))}`;
+  return percentText(formatNumber(pct, pct < 10 ? 1 : 0));
 }
 
 /** Bytes pro Sekunde, in denselben Einheiten wie das Protokoll (1 KB = 1000 B) */
@@ -51,7 +59,7 @@ export function formatRate(bytes) {
     value /= 1000;
     unit++;
   }
-  return `${decimal(value, value < 10 ? 1 : 0)}${NBSP}${units[unit]}`;
+  return `${formatNumber(value, value < 10 ? 1 : 0)}${NBSP}${units[unit]}`;
 }
 
 /** Obergrenze der Skala (6, 8, 10, 15, 20, 30 … ms), mit etwas Luft über dem höchsten Wert */
@@ -89,7 +97,7 @@ export function qualityEntry(key) {
     pillBars: qualityBars(),
     pillText: el("span", { class: "qms" }),
     headBars: qualityBars(),
-    level: el("strong", { class: "qlevel", title: QUALITY_LIMITS }),
+    level: el("strong", { class: "qlevel", title: t(QUALITY_LIMITS) }),
     reason: el("span", { class: "qreason" }),
     scale: el("span", { class: "qscale" }),
     line: svgEl("path", { class: "qline" }),
@@ -133,9 +141,9 @@ export function qualityEntry(key) {
   const rate = el(
     "div",
     { class: "qstat rate" },
-    el("span", { class: "k", text: "Durchsatz" }),
-    el("span", { class: "v", title: "gesendet" }, rateArrow(true), entry.values.rate),
-    el("span", { class: "v", title: "empfangen" }, rateArrow(false), entry.values.rateSub),
+    el("span", { class: "k", text: t("quality.throughput") }),
+    el("span", { class: "v", title: t("quality.sent") }, rateArrow(true), entry.values.rate),
+    el("span", { class: "v", title: t("quality.received") }, rateArrow(false), entry.values.rateSub),
   );
   entry.panel = el(
     "div",
@@ -146,10 +154,10 @@ export function qualityEntry(key) {
       entry.headBars,
       entry.level,
       entry.reason,
-      infoIcon("Aus den Bestätigungen der QUIC-Verbindung, ohne zusätzlichen Netzverkehr. Der Verlust gilt für die Senderichtung dieses Rechners."),
+      infoIcon(t("quality.info")),
     ),
-    el("div", {}, entry.chart, el("div", { class: "qaxis" }, el("span", { text: "Latenz der letzten 60 s" }), el("span", { text: "jetzt" }))),
-    el("div", { class: "qstats" }, stat("rtt", "Latenz"), stat("jitter", "Jitter"), stat("loss", "Verlust"), rate),
+    el("div", {}, entry.chart, el("div", { class: "qaxis" }, el("span", { text: t("quality.axis") }), el("span", { text: t("quality.now") }))),
+    el("div", { class: "qstats" }, stat("rtt", t("quality.rtt")), stat("jitter", t("quality.jitter")), stat("loss", t("quality.loss")), rate),
     chainBlock(entry, peer),
     entry.usage.node,
   );
@@ -166,25 +174,27 @@ export function updateQuality(entry) {
   for (const svg of [entry.pillBars, entry.headBars]) {
     [...svg.children].forEach((rect, i) => rect.classList.toggle("on", i < bars));
   }
-  entry.pillText.textContent = last ? formatMs(last.rtt_ms) : "misst …";
-  entry.pill.title = last ? `Verbindung ${last.label}, Latenz ${formatMs(last.rtt_ms)}` : "Die Verbindungsqualität wird gemessen";
+  entry.pillText.textContent = last ? formatMs(last.rtt_ms) : t("quality.measuringShort");
+  entry.pill.title = last
+    ? t("quality.pillTitle", { level: levelName(last), latency: formatMs(last.rtt_ms) })
+    : t("quality.measuringTitle");
   // Details nur, solange das Panel zu sehen ist; beim Einhängen ruft der Detailbereich hier wieder auf.
   if (!entry.panel.isConnected) return;
 
   const v = entry.values;
-  entry.level.textContent = last ? last.label : "Wird gemessen …";
+  entry.level.textContent = last ? levelName(last) : t("quality.measuring");
   // Welche Werte die Stufe bestimmen, z. B. „wegen Latenz und Verlust“
   const reasons =
     last && last.level !== "very_good"
-      ? Object.keys(QUALITY_METRICS).filter((k) => last.rating?.[k] === last.level).map((k) => QUALITY_METRICS[k])
+      ? Object.keys(QUALITY_METRICS).filter((k) => last.rating?.[k] === last.level).map((k) => t(QUALITY_METRICS[k]))
       : [];
-  entry.reason.textContent = reasons.length ? `wegen ${reasons.join(", ").replace(/, ([^,]*)$/, " und $1")}` : "";
+  entry.reason.textContent = reasons.length ? t("quality.because", { reasons: formatList(reasons) }) : "";
   v.rtt.textContent = last ? formatMs(last.rtt_ms) : "–";
-  v.rttSub.textContent = "hin und zurück";
+  v.rttSub.textContent = t("quality.roundTrip");
   v.jitter.textContent = last ? formatMs(last.jitter_ms) : "–";
-  v.jitterSub.textContent = "Schwankung, 10 s";
+  v.jitterSub.textContent = t("quality.jitterWindow");
   v.loss.textContent = last ? formatPct(last.loss_pct) : "–";
-  v.lossSub.textContent = last && last.loss_window_s ? `über ${last.loss_window_s} s` : "";
+  v.lossSub.textContent = last && last.loss_window_s ? t("quality.lossWindow", { seconds: last.loss_window_s }) : "";
   v.rate.textContent = last ? formatRate(last.tx_bytes_per_s) : "–";
   v.rateSub.textContent = last ? formatRate(last.rx_bytes_per_s) : "–";
   drawQualityChart(entry);
@@ -200,11 +210,11 @@ export function drawQualityChart(entry) {
   const values = entry.samples.map((q) => q.rtt_ms);
   const n = values.length;
   entry.max = chartMax(values);
-  entry.scale.textContent = `${decimal(entry.max, 0)}${NBSP}ms`;
+  entry.scale.textContent = `${formatNumber(entry.max, 0)}${NBSP}ms`;
   if (!n) {
     entry.line.setAttribute("d", "");
     entry.area.setAttribute("d", "");
-    entry.chart.setAttribute("aria-label", "Noch kein Verlauf");
+    entry.chart.setAttribute("aria-label", t("quality.noHistory"));
     return;
   }
   const step = CHART.w / (QUALITY_SECONDS - 1);
@@ -215,7 +225,7 @@ export function drawQualityChart(entry) {
   entry.area.setAttribute("d", `${d}L${points.at(-1)[0].toFixed(1)} ${CHART.h}L${points[0][0].toFixed(1)} ${CHART.h}Z`);
   entry.chart.setAttribute(
     "aria-label",
-    `Latenz der letzten ${n} Sekunden: zwischen ${formatMs(Math.min(...values))} und ${formatMs(Math.max(...values))}`,
+    tn("quality.chartLabel", n, { min: formatMs(Math.min(...values)), max: formatMs(Math.max(...values)) }),
   );
   showQualityHover(entry);
 }
@@ -233,8 +243,12 @@ export function showQualityHover(entry) {
   entry.dot.style.left = `${left}%`;
   entry.dot.style.top = `${(qualityY(entry, q.rtt_ms) / CHART.h) * 100}%`;
   const ago = n - 1 - i;
-  const parts = [ago ? `vor ${ago}${NBSP}s` : "jetzt", formatMs(q.rtt_ms), `Jitter ${formatMs(q.jitter_ms)}`];
-  if (q.loss_pct > 0) parts.push(`Verlust ${formatPct(q.loss_pct)}`);
+  const parts = [
+    ago ? t("quality.ago", { seconds: ago }) : t("quality.now"),
+    formatMs(q.rtt_ms),
+    t("quality.tipJitter", { jitter: formatMs(q.jitter_ms) }),
+  ];
+  if (q.loss_pct > 0) parts.push(t("quality.tipLoss", { loss: formatPct(q.loss_pct) }));
   entry.tip.textContent = parts.join(" · ");
   // Innerhalb des Diagramms halten
   const width = entry.chart.clientWidth;

@@ -38,7 +38,7 @@ pub(crate) struct X11Surface {
 }
 
 pub(crate) fn surface() -> Result<Box<dyn Surface>> {
-    let (conn, screen_num) = x11rb::connect(None).context("keine Verbindung zum X-Server")?;
+    let (conn, screen_num) = x11rb::connect(None).context("no connection to the X server")?;
     let screen = &conn.setup().roots[screen_num];
     let root = screen.root;
     let visual = screen
@@ -48,7 +48,7 @@ pub(crate) fn surface() -> Result<Box<dyn Surface>> {
         .flat_map(|d| d.visuals.iter())
         .find(|v| v.class == VisualClass::TRUE_COLOR)
         .map(|v| v.visual_id);
-    let Some(visual) = visual else { bail!("der X-Server bietet kein Visual mit Alphakanal") };
+    let Some(visual) = visual else { bail!("the X server offers no visual with an alpha channel") };
     let compositor = conn.intern_atom(false, format!("_NET_WM_CM_S{screen_num}").as_bytes())?.reply()?.atom;
     let scale = xft_dpi(&conn, root).map_or(1.0, |dpi| dpi / 96.0).clamp(1.0, 4.0);
     let msb_first = conn.setup().image_byte_order == ImageOrder::MSB_FIRST;
@@ -97,7 +97,7 @@ impl X11Surface {
         let owner = self.conn.get_selection_owner(self.compositor).ok().and_then(|c| c.reply().ok()).map(|r| r.owner);
         let running = owner.is_some_and(|o| o != NONE);
         if !running && !self.told_no_compositor {
-            tracing::info!("Cursor-Finder: kein Compositor aktiv, ohne ihn ließe sich nichts durchsichtig zeigen");
+            tracing::info!("cursor finder: no compositor active; without one, nothing can be shown transparently");
         }
         self.told_no_compositor = !running;
         running
@@ -142,7 +142,7 @@ impl Surface for X11Surface {
         if self.window.is_none() {
             match self.create() {
                 Ok(window) => self.window = Some(window),
-                Err(e) => tracing::warn!("Cursor-Finder: Fenster nicht angelegt: {e:#}"),
+                Err(e) => tracing::warn!("cursor finder: failed to create the window: {e:#}"),
             }
         }
         self.window.is_some()
@@ -173,7 +173,7 @@ impl Surface for X11Surface {
 
     fn present(&mut self, frame: &Frame) {
         if let Err(e) = self.draw(frame) {
-            tracing::debug!("Cursor-Finder: Bild nicht gezeigt: {e}");
+            tracing::debug!("cursor finder: failed to show the image: {e}");
         }
     }
 

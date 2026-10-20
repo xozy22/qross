@@ -22,12 +22,12 @@ pub fn folder_at(conn: &RustConnection, root: Window, x: i32, y: i32) -> Option<
     let desktop = match on_desktop(conn, root, x, y) {
         Ok(desktop) => desktop,
         Err(e) => {
-            tracing::debug!("Fenster unter dem Cursor nicht lesbar: {e:#}");
+            tracing::debug!("cannot read the window under the cursor: {e:#}");
             false
         }
     };
     let folder = desktop.then(desktop_dir).flatten();
-    tracing::debug!(?folder, "Ablageordner bei {x},{y}");
+    tracing::debug!(?folder, "drop folder at {x},{y}");
     folder
 }
 

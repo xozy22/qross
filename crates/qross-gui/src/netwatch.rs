@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use qross_gui::i18n::{self, Lang};
 use qross_gui::profiles::{self, Choice, NetworkMark};
 use qross_gui::Role;
 use tauri::Emitter;
@@ -80,42 +81,64 @@ pub fn spawn(rt: Arc<Runtime>) {
 async fn choose(rt: &Arc<Runtime>, current: Vec<NetworkMark>, signature: String) {
     rt.update_app_state(|s| s.network = Some(signature));
     let profiles = rt.profiles();
-    let (id, reason) = match profiles.choose(&current) {
+    // Erkanntes Netzwerk; `None`: Kein Profil passt, es gilt das für unbekannte Netzwerke.
+    let (id, network) = match profiles.choose(&current) {
         Choice::Keep => return,
         Choice::Network(id) => {
             let label = profiles.matched(&id, &current).map(|n| n.label.clone()).unwrap_or_default();
-            (id, format!("Netzwerk „{label}“ erkannt."))
+            (id, Some(label))
         }
-        Choice::Fallback(id) => (id, "Kein Profil passt zu diesem Netzwerk.".to_owned()),
+        Choice::Fallback(id) => (id, None),
     };
     let name = profiles.get(&id).map(|p| p.name.clone()).unwrap_or_default();
-    info!("{reason} Wechsle zum Profil „{name}“");
+    match &network {
+        Some(label) => info!("network '{label}' detected, switching to profile '{name}'"),
+        None => info!("no profile matches this network, switching to profile '{name}'"),
+    }
     let was_running = rt.status().running();
     let result = rt.activate_profile(&id).await;
     if rt.profiles().active != id {
         if let Err(e) = result {
-            warn!("Profil „{name}“ nicht aktiviert: {e:#}");
+            warn!("failed to activate profile '{name}': {e:#}");
         }
         return;
     }
     let app = rt.app_handle();
     let settings = rt.settings.lock().unwrap().clone();
-    let what = match (&result, settings.role) {
-        (Ok(Some(_)), _) => {
+    let lang = i18n::lang();
+    let reason = match (&network, lang) {
+        (Some(label), Lang::De) => format!("Netzwerk „{label}“ erkannt."),
+        (Some(label), Lang::En) => format!("Network “{label}” detected."),
+        (None, Lang::De) => "Kein Profil passt zu diesem Netzwerk.".to_owned(),
+        (None, Lang::En) => "No profile matches this network.".to_owned(),
+    };
+    let address = settings.client.address.trim();
+    let what = match (&result, settings.role, lang) {
+        (Ok(Some(_)), _, _) => {
             // Das Fenster fragt nach dem Fingerprint, sobald es offen ist.
             let _ = app.emit("start-from-tray", ());
-            " Den Server bitte im Fenster bestätigen.".to_owned()
+            match lang {
+                Lang::De => " Den Server bitte im Fenster bestätigen.".to_owned(),
+                Lang::En => " Please confirm the server in the window.".to_owned(),
+            }
         }
-        (Err(e), _) => format!(" Start fehlgeschlagen: {e:#}"),
-        (Ok(None), _) if !was_running => String::new(),
-        (Ok(None), Role::Server) => " Der Server läuft jetzt mit der Anordnung dieses Profils.".to_owned(),
-        (Ok(None), Role::Client) => format!(" Der Client verbindet sich mit {}.", settings.client.address.trim()),
+        (Err(e), _, Lang::De) => format!(" Start fehlgeschlagen: {e:#}"),
+        (Err(e), _, Lang::En) => format!(" Couldn't start: {e:#}"),
+        (Ok(None), ..) if !was_running => String::new(),
+        (Ok(None), Role::Server, Lang::De) => " Der Server läuft jetzt mit der Anordnung dieses Profils.".to_owned(),
+        (Ok(None), Role::Server, Lang::En) => " The server is now running with this profile's layout.".to_owned(),
+        (Ok(None), Role::Client, Lang::De) => format!(" Der Client verbindet sich mit {address}."),
+        (Ok(None), Role::Client, Lang::En) => format!(" The client is connecting to {address}."),
     };
     let text = format!("{reason}{what}");
+    let title = match lang {
+        Lang::De => format!("Profil „{name}“"),
+        Lang::En => format!("Profile “{name}”"),
+    };
     if crate::window_in_front(app) {
         let tone = if result.is_err() { "warn" } else { "info" };
-        let _ = app.emit("app-notice", AppNotice { tone, text: format!("Profil „{name}“: {text}"), action: None });
+        let _ = app.emit("app-notice", AppNotice { tone, text: format!("{title}: {text}"), action: None });
     } else {
-        crate::notify(app, &format!("Profil „{name}“"), &text);
+        crate::notify(app, &title, &text);
     }
 }

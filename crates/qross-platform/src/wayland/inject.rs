@@ -98,8 +98,8 @@ async fn run(mut rx: mpsc::UnboundedReceiver<Inject>, mut ready: Ready, mut fd: 
                 match ended {
                     Ended::Closed => return,
                     Ended::Lost(reason) => {
-                        tracing::warn!("Wayland-Einspeisung unterbrochen: {reason}");
-                        let problem = PortalProblem::Failed(format!("Verbindung verloren: {reason}"));
+                        tracing::warn!("Wayland injection interrupted: {reason}");
+                        let problem = PortalProblem::Failed(format!("connection lost: {reason}"));
                         set_problem(Role::Injector, Some(problem));
                         delay = Duration::from_secs(1);
                     }
@@ -110,11 +110,11 @@ async fn run(mut rx: mpsc::UnboundedReceiver<Inject>, mut ready: Ready, mut fd: 
                 set_problem(Role::Injector, Some(fail.problem()));
                 if matches!(fail, Fail::Denied) {
                     // Nicht wieder und wieder fragen; ein Neustart des Clients fragt erneut.
-                    tracing::error!("Freigabe zum Einspeisen abgelehnt – Eingaben kommen nicht mehr an");
+                    tracing::error!("permission to inject input denied; input no longer arrives");
                     while rx.recv().await.is_some() {}
                     return;
                 }
-                tracing::warn!("Wayland-Einspeisung: {}", start_error(Role::Injector, &fail));
+                tracing::warn!("Wayland injection: {}", start_error(Role::Injector, &fail));
             }
         }
         // Bis zum nächsten Versuch eintreffende Eingaben verwerfen
@@ -138,14 +138,14 @@ struct Link {
 
 async fn connect() -> Result<Link, Fail> {
     if let Some(context) = ei::Context::connect_to_env()? {
-        tracing::info!("libei direkt über LIBEI_SOCKET (ohne Portal)");
+        tracing::info!("libei directly via LIBEI_SOCKET (without a portal)");
         return Ok(Link { context, session: None });
     }
     register_app().await;
     let portal = RemoteDesktop::new().await?;
     if portal.version() < 2 {
         return Err(Fail::Missing(format!(
-            "Das Portal RemoteDesktop hat Version {} und kann noch kein libei (ConnectToEIS)",
+            "The RemoteDesktop portal has version {} and does not support libei yet (ConnectToEIS)",
             portal.version()
         )));
     }
@@ -157,19 +157,19 @@ async fn connect() -> Result<Link, Fail> {
         .set_restore_token(token.as_deref());
     portal.select_devices(&session, options).await?.response()?;
     if token.is_none() {
-        tracing::info!("Das System fragt jetzt, ob Qross Maus und Tastatur steuern darf …");
+        tracing::info!("The system is now asking whether Qross may control the mouse and keyboard …");
     }
     let started = portal.start(&session, None, StartOptions::default()).await?.response()?;
     tokens::save(Kind::RemoteDesktop, started.restore_token());
     let devices = started.devices();
     if !devices.contains(DeviceType::Keyboard) || !devices.contains(DeviceType::Pointer) {
-        tracing::warn!("Freigegeben wurden nur {devices:?} – Tastatur oder Maus fehlen");
+        tracing::warn!("only {devices:?} were granted; keyboard or mouse missing");
     }
     let fd = portal.connect_to_eis(&session, Default::default()).await?;
     let context = ei::Context::new(UnixStream::from(fd))?;
     tracing::info!(
-        "Wayland-Einspeisung über das Portal{}",
-        if started.restore_token().is_some() { " (Freigabe gemerkt)" } else { "" }
+        "Wayland injection via the portal{}",
+        if started.restore_token().is_some() { " (permission remembered)" } else { "" }
     );
     Ok(Link { context, session: Some(session) })
 }
@@ -178,7 +178,7 @@ async fn session(context: &ei::Context, rx: &mut mpsc::UnboundedReceiver<Inject>
     let (connection, mut events) = match context.handshake_tokio("Qross", ei::handshake::ContextType::Sender).await {
         Ok(handshake) => handshake,
         Err(e) => {
-            let reason = format!("libei-Handshake: {e}");
+            let reason = format!("libei handshake: {e}");
             if ready.waiting() {
                 ready.fail(Fail::Other(anyhow::anyhow!(reason.clone())));
             }
@@ -204,10 +204,10 @@ async fn session(context: &ei::Context, rx: &mut mpsc::UnboundedReceiver<Inject>
                     }
                 }
                 Some(Err(e)) => return Ended::Lost(format!("libei: {e}")),
-                None => return Ended::Lost("libei-Verbindung geschlossen".into()),
+                None => return Ended::Lost("libei connection closed".into()),
             },
             _ = &mut device_wait, if ready.waiting() => {
-                tracing::warn!("libei bietet kein Gerät für absolute Bewegung – bewege relativ");
+                tracing::warn!("libei offers no device for absolute motion; moving relatively");
                 ready.ok();
             }
             event = rx.recv() => match event {
@@ -256,7 +256,7 @@ impl Sender {
                 self.update_geometry();
             }
             EiEvent::DeviceAdded(e) => {
-                tracing::debug!("libei-Gerät {:?}: {}", e.device.name(), describe_regions(e.device.regions()));
+                tracing::debug!("libei device {:?}: {}", e.device.name(), describe_regions(e.device.regions()));
                 self.devices.push(Device { device: e.device, emulating: false });
                 self.update_geometry();
             }
@@ -278,12 +278,12 @@ impl Sender {
                 }
             }
             EiEvent::KeyboardModifiers(e) => {
-                tracing::debug!(locked = e.locked, "libei: Stand der Modifier");
+                tracing::debug!(locked = e.locked, "libei: modifier state");
                 self.locks.on_modifiers(e.locked);
             }
             EiEvent::Disconnected(e) => {
                 let why = e.explanation.unwrap_or_else(|| format!("{:?}", e.reason));
-                return Some(Ended::Lost(format!("vom Compositor getrennt: {why}")));
+                return Some(Ended::Lost(format!("disconnected by the compositor: {why}")));
             }
             _ => {}
         }
@@ -292,7 +292,7 @@ impl Sender {
 
     fn flush(&self) {
         if let Err(e) = self.connection.flush() {
-            tracing::debug!("libei senden: {e}");
+            tracing::debug!("failed to send via libei: {e}");
         }
     }
 
@@ -340,7 +340,7 @@ impl Sender {
             Inject::MoveBy { dx, dy } => {
                 // Relative Bewegung (Spielemodus): über ein Gerät für relative Zeigerbewegung
                 let Some(device) = self.device(DeviceCapability::Pointer) else {
-                    return tracing::debug!("libei: kein Gerät für relative Bewegung");
+                    return tracing::debug!("libei: no device for relative motion");
                 };
                 let Some(pointer) = device.interface::<ei::Pointer>() else { return };
                 pointer.motion_relative(dx as f32, dy as f32);
@@ -348,7 +348,7 @@ impl Sender {
             }
             Inject::Button { button, down } => {
                 let Some(device) = self.device(DeviceCapability::Button) else {
-                    return tracing::debug!("libei: kein Gerät für Maustasten");
+                    return tracing::debug!("libei: no device for mouse buttons");
                 };
                 let Some(buttons) = device.interface::<ei::Button>() else { return };
                 let state = if down { ei::button::ButtonState::Press } else { ei::button::ButtonState::Released };
@@ -357,7 +357,7 @@ impl Sender {
             }
             Inject::Wheel { dx, dy } => {
                 let Some(device) = self.device(DeviceCapability::Scroll) else {
-                    return tracing::debug!("libei: kein Gerät für das Mausrad");
+                    return tracing::debug!("libei: no device for the mouse wheel");
                 };
                 let Some(scroll) = device.interface::<ei::Scroll>() else { return };
                 let (x, y) = ei_discrete(dx, dy);
@@ -366,10 +366,10 @@ impl Sender {
             }
             Inject::Key { key, down } => {
                 let Some(code) = evdev_from_hid(key) else {
-                    return tracing::debug!(?key, "Taste ohne evdev-Zuordnung");
+                    return tracing::debug!(?key, "key without an evdev mapping");
                 };
                 let Some(device) = self.device(DeviceCapability::Keyboard) else {
-                    return tracing::debug!("libei: keine Tastatur");
+                    return tracing::debug!("libei: no keyboard");
                 };
                 let Some(keyboard) = device.interface::<ei::Keyboard>() else { return };
                 let state = if down { ei::keyboard::KeyState::Press } else { ei::keyboard::KeyState::Released };
@@ -378,7 +378,7 @@ impl Sender {
             }
             // libei kennt nur Tasten. Der Client meldet dem Server deshalb keinen Zeichenmodus
             // (`types_text`), und das kommt nicht vor; ein Kürzel ginge notfalls als Taste.
-            Inject::Char { ch, .. } => tracing::debug!(?ch, "libei kann keine Zeichen eingeben"),
+            Inject::Char { ch, .. } => tracing::debug!(?ch, "libei cannot type characters"),
             Inject::Shortcut { key, down, .. } => self.inject(&Inject::Key { key, down }),
             // Setzen geht nur per Tastendruck (Rollen ist unter Wayland kein Modifier)
             Inject::Locks(locks) => {
@@ -404,7 +404,7 @@ impl Sender {
             return;
         }
         let Some(device) = self.device(DeviceCapability::Pointer) else {
-            return tracing::debug!("libei: kein Zeigergerät");
+            return tracing::debug!("libei: no pointer device");
         };
         let Some(pointer) = device.interface::<ei::Pointer>() else { return };
         // Ohne bekannte Position erst in die linke obere Ecke schieben, dann von dort aus zählen
@@ -428,9 +428,9 @@ fn region_rect(r: &reis::event::Region) -> Rect {
 
 fn describe_regions(regions: &[reis::event::Region]) -> String {
     if regions.is_empty() {
-        return "ohne Regionen".into();
+        return "no regions".into();
     }
     let list: Vec<String> =
-        regions.iter().map(|r| format!("{}×{} bei ({}, {}), Skalierung {}", r.width, r.height, r.x, r.y, r.scale)).collect();
+        regions.iter().map(|r| format!("{}×{} at ({}, {}), scale {}", r.width, r.height, r.x, r.y, r.scale)).collect();
     list.join("; ")
 }

@@ -69,7 +69,7 @@ fn tap(lock: Lock) {
     let inputs = [event(false), event(true)];
     let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32) };
     if sent as usize != inputs.len() {
-        tracing::warn!("{} nicht umgeschaltet: SendInput hat {sent} von 2 Ereignissen angenommen", lock.label());
+        tracing::warn!("{} not toggled: SendInput accepted {sent} of 2 events", lock.label());
     }
 }
 

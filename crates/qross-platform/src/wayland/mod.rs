@@ -46,7 +46,7 @@ fn runtime() -> &'static Runtime {
             .thread_name("qross-wayland")
             .enable_all()
             .build()
-            .expect("Laufzeit für Wayland-Portale")
+            .expect("failed to build the runtime for the Wayland portals")
     })
 }
 
@@ -126,7 +126,7 @@ where
     let fail = match wait_blocking(|| ready_rx.recv_timeout(PROMPT_TIMEOUT)) {
         Ok(Ok(())) => return Ok(()),
         Ok(Err(fail)) => fail,
-        Err(_) => Fail::Other(anyhow::anyhow!("keine Antwort auf die Freigabe-Abfrage")),
+        Err(_) => Fail::Other(anyhow::anyhow!("no answer to the permission prompt")),
     };
     // Sonst wartete der Thread weiter auf den Dialog und verbände sich später ohne Abnehmer
     let _ = cancel_tx.send(());
@@ -142,11 +142,11 @@ async fn register_app() {
     DONE.get_or_init(|| async {
         let id = match APP_ID.parse() {
             Ok(id) => id,
-            Err(e) => return tracing::debug!("App-Kennung {APP_ID} ungültig: {e}"),
+            Err(e) => return tracing::debug!("invalid app ID {APP_ID}: {e}"),
         };
         match ashpd::register_host_app(id).await {
-            Ok(()) => tracing::debug!("beim Portal als {APP_ID} angemeldet"),
-            Err(e) => tracing::debug!("Anmeldung beim Portal nicht möglich: {e}"),
+            Ok(()) => tracing::debug!("registered with the portal as {APP_ID}"),
+            Err(e) => tracing::debug!("cannot register with the portal: {e}"),
         }
     })
     .await;
@@ -176,14 +176,14 @@ pub(crate) fn portals() -> Portals {
         let remote_desktop = match RemoteDesktop::new().await {
             Ok(p) => Some(p.version()),
             Err(e) => {
-                tracing::debug!("Portal RemoteDesktop: {e}");
+                tracing::debug!("RemoteDesktop portal: {e}");
                 None
             }
         };
         let input_capture = match InputCapture::new().await {
             Ok(p) => Some(p.version()),
             Err(e) => {
-                tracing::debug!("Portal InputCapture: {e}");
+                tracing::debug!("InputCapture portal: {e}");
                 None
             }
         };
@@ -206,15 +206,15 @@ pub(crate) fn geometry() -> Option<Vec<Rect>> {
 fn set_geometry(monitors: Vec<Rect>) {
     let mut slot = GEOMETRY.lock().unwrap_or_else(|e| e.into_inner());
     if slot.as_ref() != Some(&monitors) {
-        tracing::info!("Wayland-Monitore: {}", describe(&monitors));
+        tracing::info!("Wayland monitors: {}", describe(&monitors));
         *slot = Some(monitors);
     }
 }
 
 fn describe(monitors: &[Rect]) -> String {
-    let list: Vec<String> = monitors.iter().map(|m| format!("{}×{} bei ({}, {})", m.width, m.height, m.x, m.y)).collect();
+    let list: Vec<String> = monitors.iter().map(|m| format!("{}×{} at ({}, {})", m.width, m.height, m.x, m.y)).collect();
     if list.is_empty() {
-        "keine".into()
+        "none".into()
     } else {
         list.join(", ")
     }
@@ -273,13 +273,13 @@ impl From<ashpd::Error> for Fail {
     fn from(e: ashpd::Error) -> Self {
         match e {
             ashpd::Error::Response(ResponseError::Cancelled) => Fail::Denied,
-            ashpd::Error::PortalNotFound(name) => Fail::Missing(format!("Das Desktop-Portal bietet {name} nicht an")),
+            ashpd::Error::PortalNotFound(name) => Fail::Missing(format!("The desktop portal does not offer {name}")),
             ashpd::Error::RequiresVersion(need, have) => {
-                Fail::Missing(format!("Das Desktop-Portal ist zu alt (Version {have}, nötig {need})"))
+                Fail::Missing(format!("The desktop portal is too old (version {have}, needs {need})"))
             }
-            ashpd::Error::Zbus(e) if no_portal_service(&e) => Fail::Missing("xdg-desktop-portal läuft nicht".into()),
+            ashpd::Error::Zbus(e) if no_portal_service(&e) => Fail::Missing("xdg-desktop-portal is not running".into()),
             ashpd::Error::Zbus(ashpd::zbus::Error::Address(_)) => {
-                Fail::Missing("Es gibt keinen D-Bus der Sitzung (DBUS_SESSION_BUS_ADDRESS)".into())
+                Fail::Missing("There is no D-Bus session bus (DBUS_SESSION_BUS_ADDRESS)".into())
             }
             other => Fail::Other(other.into()),
         }
@@ -311,26 +311,26 @@ impl From<reis::Error> for Fail {
 /// Fehlermeldung für den Start, mit Hinweis, was zu tun ist
 fn start_error(role: Role, fail: &Fail) -> anyhow::Error {
     let what = match role {
-        Role::Injector => "Eingaben einspeisen (Client)",
-        Role::Capture => "Eingaben erfassen (Server)",
+        Role::Injector => "Injecting input (client)",
+        Role::Capture => "Capturing input (server)",
     };
     match fail {
         Fail::Missing(detail) => anyhow::anyhow!(
-            "{what} unter Wayland geht nicht: {detail}. Nötig ist xdg-desktop-portal mit {} \
-             ({}) oder eine X11-Sitzung; Details in docs/wayland.md im Qross-Repository.",
+            "{what} does not work under Wayland: {detail}. It requires xdg-desktop-portal with {} \
+             ({}) or an X11 session; details in docs/wayland.md in the Qross repository.",
             match role {
-                Role::Injector => "RemoteDesktop ab Version 2",
+                Role::Injector => "RemoteDesktop version 2 or later",
                 Role::Capture => "InputCapture",
             },
             match role {
-                Role::Injector => "GNOME ab 45, KDE Plasma ab 6.1",
-                Role::Capture => "GNOME ab 45, KDE Plasma ab 6.1, Hyprland ab 0.56",
+                Role::Injector => "GNOME 45 or later, KDE Plasma 6.1 or later",
+                Role::Capture => "GNOME 45 or later, KDE Plasma 6.1 or later, Hyprland 0.56 or later",
             }
         ),
         Fail::Denied => anyhow::anyhow!(
-            "{what}: Die Freigabe wurde abgelehnt. Beim nächsten Start fragt das System erneut."
+            "{what}: the permission was denied. The system will ask again on the next start."
         ),
-        Fail::Other(e) => anyhow::anyhow!("{what} über das Desktop-Portal: {e:#}"),
+        Fail::Other(e) => anyhow::anyhow!("{what} via the desktop portal: {e:#}"),
     }
 }
 

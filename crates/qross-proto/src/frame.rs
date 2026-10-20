@@ -13,11 +13,11 @@ pub const MAX_FRAME_LEN: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
-    #[error("Ein-/Ausgabefehler: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] io::Error),
-    #[error("ungültige Nachricht: {0}")]
+    #[error("invalid message: {0}")]
     Codec(#[from] postcard::Error),
-    #[error("Frame zu groß: {0} Bytes")]
+    #[error("frame too large: {0} bytes")]
     TooLarge(usize),
 }
 
@@ -70,7 +70,7 @@ where
 }
 
 pub fn encode_datagram(d: &Datagram) -> Vec<u8> {
-    postcard::to_stdvec(d).expect("Datagramme sind immer serialisierbar")
+    postcard::to_stdvec(d).expect("datagrams always serialize")
 }
 
 pub fn decode_datagram(bytes: &[u8]) -> Result<Datagram, FrameError> {

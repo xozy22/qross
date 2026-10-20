@@ -155,7 +155,7 @@ pub(crate) fn tap_menu_mask() {
 
 fn key_event(key: KeyCode, down: bool) {
     let Some(win) = windows_from_hid(key) else {
-        tracing::debug!(?key, "Taste ohne Windows-Zuordnung");
+        tracing::debug!(?key, "key without a Windows mapping");
         return;
     };
     let mut flags = if down { 0 } else { KEYEVENTF_KEYUP };
@@ -226,7 +226,7 @@ fn send(inputs: &[INPUT]) {
     let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32) };
     if sent as usize != inputs.len() {
         // Passiert z. B. wenn ein Fenster mit höherer Integritätsstufe (UAC) im Vordergrund ist.
-        tracing::warn!("SendInput hat {sent} von {} Ereignissen angenommen", inputs.len());
+        tracing::warn!("SendInput accepted {sent} of {} events", inputs.len());
     }
 }
 

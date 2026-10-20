@@ -24,18 +24,18 @@ pub fn watch(detect: Detector) -> watch::Receiver<bool> {
         }
     });
     if let Err(e) = spawned {
-        warn!("Bildschirmschoner: Abfrage nicht gestartet: {e}");
+        warn!("screen saver: failed to start polling: {e}");
     }
     rx
 }
 
 /// Client: ins Protokoll, was der Bildschirmschoner des Servers hier bewirkt hat
 pub fn report(active: bool, outcome: &Outcome) {
-    let what = if active { "gestartet" } else { "beendet" };
+    let what = if active { "started" } else { "stopped" };
     match outcome {
-        Outcome::Unchanged => debug!("Bildschirmschoner des Servers {what}; hier: {outcome}"),
-        Outcome::Failed(_) => warn!("Bildschirmschoner des Servers {what}; hier: {outcome}"),
-        _ => info!("Bildschirmschoner des Servers {what}; hier: {outcome}"),
+        Outcome::Unchanged => debug!("server's screen saver {what}; here: {outcome}"),
+        Outcome::Failed(_) => warn!("server's screen saver {what}; here: {outcome}"),
+        _ => info!("server's screen saver {what}; here: {outcome}"),
     }
 }
 

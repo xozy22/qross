@@ -2,17 +2,18 @@
 
 import { $, $$, invoke, state } from "./core.js";
 import { el, icon, openMenu, toast } from "./util.js";
+import { locale, t } from "./i18n.js";
 import { settingsChanged } from "./store.js";
 
 export const KEY_GROUPS = [
-  ["Buchstaben", /^Key[A-Z]$/],
-  ["Ziffern", /^Digit\d$/],
-  ["Zusatztasten", /^(Control|Shift|Alt|Meta)(Left|Right)$|^CapsLock$/],
-  ["Funktionstasten", /^F\d+$/],
-  ["Medien", /^(Audio|Media)/],
-  ["Navigation", /^(Arrow|Home|End|Page|Insert|Delete)/],
-  ["Ziffernblock", /^Num/],
-  ["Weitere", /./],
+  ["keys.groupLetters", /^Key[A-Z]$/],
+  ["keys.groupDigits", /^Digit\d$/],
+  ["keys.groupModifiers", /^(Control|Shift|Alt|Meta)(Left|Right)$|^CapsLock$/],
+  ["keys.groupFunction", /^F\d+$/],
+  ["keys.groupMedia", /^(Audio|Media)/],
+  ["keys.groupNavigation", /^(Arrow|Home|End|Page|Insert|Delete)/],
+  ["keys.groupNumpad", /^Num/],
+  ["keys.groupOther", /./],
 ];
 export const DEFAULT_LOCK = "ScrollLock";
 export const MODIFIER_CODES = new Set(["ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight"]);
@@ -29,7 +30,7 @@ export async function loadKeyNames() {
     state.keyNames = [];
   }
   state.keyLabels = new Map(state.keyNames.map((k) => [k.name, k.label]));
-  const groups = KEY_GROUPS.map(([label, re]) => ({ label, re, keys: [] }));
+  const groups = KEY_GROUPS.map(([label, re]) => ({ label: t(label), re, keys: [] }));
   for (const key of state.keyNames) groups.find((g) => g.re.test(key.name)).keys.push(key);
   for (const select of [$("#addFrom"), $("#addTo")]) {
     select.replaceChildren(
@@ -46,9 +47,10 @@ export const keyLabel = (name) => state.keyLabels.get(name) || name;
 
 /** „Ctrl+Alt+KeyL“ → „Strg+Alt+L“ (Mac: Ctrl, Option, Cmd) */
 export function hotkeyLabel(text) {
-  if (!text) return "Aus";
+  if (!text) return t("common.off");
   const mac = state.platform === "macos";
-  const names = mac ? { Ctrl: "Ctrl", Shift: "Umschalt", Alt: "Option", Meta: "Cmd" } : { Ctrl: "Strg", Shift: "Umschalt", Alt: "Alt", Meta: "Windows" };
+  const shift = t("keys.shift");
+  const names = mac ? { Ctrl: "Ctrl", Shift: shift, Alt: "Option", Meta: "Cmd" } : { Ctrl: t("keys.ctrl"), Shift: shift, Alt: "Alt", Meta: "Windows" };
   const parts = text.split("+");
   const key = parts.pop();
   return [...parts.map((m) => names[m] || m), keyLabel(key)].join("+");
@@ -56,7 +58,7 @@ export function hotkeyLabel(text) {
 
 export function machinesForRemap() {
   const server = state.settings.server;
-  return server.screens.map((s) => s.name).filter((n) => n !== server.name).sort((a, b) => a.localeCompare(b, "de"));
+  return server.screens.map((s) => s.name).filter((n) => n !== server.name).sort((a, b) => a.localeCompare(b, locale()));
 }
 
 export function renderKeys() {
@@ -78,9 +80,9 @@ export function renderKeys() {
   const platform = state.platform;
   media.disabled = platform !== "windows";
   $("#mediaHint").textContent =
-    platform === "macos" ? "Unter macOS bleiben Medientasten immer auf diesem Mac."
-    : platform === "linux" ? "Unter Linux (X11) gehen Medientasten immer an den Rechner mit dem Cursor."
-    : "Lautstärke, Wiedergabe/Pause, Weiter, Zurück, Stopp. „Immer auf diesem Rechner“ gibt es nur mit einem Windows-Server.";
+    platform === "macos" ? t("keys.mediaMac")
+    : platform === "linux" ? t("keys.mediaLinux")
+    : t("keys.mediaHint", { option: t("settings.keys.mediaLocal") });
 
   const machines = machinesForRemap();
   if (!machines.includes(state.remapPc)) state.remapPc = machines[0] ?? null;
@@ -88,7 +90,7 @@ export function renderKeys() {
   pc.replaceChildren(
     ...(machines.length
       ? machines.map((m) => el("option", { value: m, text: m }))
-      : [el("option", { value: "", text: "Kein anderer Rechner im Layout" })]),
+      : [el("option", { value: "", text: t("keys.noOtherComputer") })]),
   );
   pc.value = state.remapPc ?? "";
   const hasPc = !!state.remapPc;
@@ -110,15 +112,15 @@ export function renderKeys() {
               {
                 type: "button",
                 class: "icon-btn small remove-rule",
-                title: "Regel entfernen",
-                "aria-label": `Regel ${keyLabel(rule.from)} → ${keyLabel(rule.to)} entfernen`,
+                title: t("keys.removeRule"),
+                "aria-label": t("keys.removeRuleNamed", { from: keyLabel(rule.from), to: keyLabel(rule.to) }),
                 onclick: () => removeRule(i),
               },
               icon("x"),
             ),
           ),
         )
-      : [el("li", { class: "empty", text: hasPc ? `Keine Umbelegung für „${state.remapPc}“.` : "Füge im Layout einen Rechner hinzu, um Tasten umzubelegen." })]),
+      : [el("li", { class: "empty", text: hasPc ? t("keys.noRules", { name: state.remapPc }) : t("keys.remapNoComputer") })]),
   );
 }
 
@@ -126,10 +128,10 @@ export function renderKeys() {
 // hier werden doppelte Belegungen nur angezeigt.
 
 export const DIRECTIONS = [
-  ["left", "Nach links", 180],
-  ["right", "Nach rechts", 0],
-  ["up", "Nach oben", -90],
-  ["down", "Nach unten", 90],
+  ["left", "keys.left", 180],
+  ["right", "keys.right", 0],
+  ["up", "keys.up", -90],
+  ["down", "keys.down", 90],
 ];
 /** Tasten, die ohne Zusatztaste zum Tippen gebraucht werden */
 export const TYPING_KEYS = /^(Key|Digit|Numpad|Arrow|Space$|Enter$|Tab$|Backspace$|Minus$|Equal$|Bracket|Semicolon$|Quote$|Backquote$|Comma$|Period$|Slash$|Backslash$|Intl|Home$|End$|Page|Delete$)/;
@@ -154,12 +156,15 @@ export function switchTargets() {
   const server = state.settings.server;
   const names = server.screens
     .map((s) => s.name)
-    .sort((a, b) => (a === server.name ? -1 : b === server.name ? 1 : a.localeCompare(b, "de")));
+    .sort((a, b) => (a === server.name ? -1 : b === server.name ? 1 : a.localeCompare(b, locale())));
   return [
-    ...DIRECTIONS.map(([id, label, turn]) => ({ kind: "directions", id, label, turn })),
-    ...names.map((name) => ({ kind: "screens", id: name, label: `Zu „${name}“`, name, isServer: name === server.name })),
+    ...DIRECTIONS.map(([id, label, turn]) => ({ kind: "directions", id, label: t(label), turn })),
+    ...names.map((name) => ({ kind: "screens", id: name, label: t("keys.toScreen", { name }), name, isServer: name === server.name })),
   ];
 }
+
+/** Ziel in „Auch belegt für“: Richtung wie beschriftet, Rechner nur mit Namen */
+const listName = (target) => (target.kind === "screens" ? t("keys.quotedName", { name: target.name }) : target.label);
 
 /** Hinweis je Ziel: gleich wie die Fang-Taste, doppelt belegt oder ohne Zusatztaste */
 export function switchProblems(targets) {
@@ -167,19 +172,19 @@ export function switchProblems(targets) {
   const all = switchKeys();
   const lock = hotkeyId(keys.lock);
   const byKey = new Map();
-  for (const t of targets) {
-    const id = hotkeyId(all[t.kind][t.id]);
-    if (id) byKey.set(id, [...(byKey.get(id) || []), t]);
+  for (const target of targets) {
+    const id = hotkeyId(all[target.kind][target.id]);
+    if (id) byKey.set(id, [...(byKey.get(id) || []), target]);
   }
   const problems = new Map();
-  for (const t of targets) {
-    const hotkey = all[t.kind][t.id];
+  for (const target of targets) {
+    const hotkey = all[target.kind][target.id];
     const id = hotkeyId(hotkey);
     if (!id) continue;
-    const others = byKey.get(id).filter((o) => o !== t);
-    if (id === lock) problems.set(t, { text: "Ist schon die Fang-Taste. Die Fang-Taste geht vor.", error: true });
-    else if (others.length) problems.set(t, { text: `Auch belegt für: ${others.map((o) => o.label.replace(/^Zu /, "")).join(", ")}`, error: true });
-    else if (!hotkey.includes("+") && TYPING_KEYS.test(hotkey)) problems.set(t, { text: "Ohne Zusatztaste kommt diese Taste in keinem Programm mehr an.", error: false });
+    const others = byKey.get(id).filter((o) => o !== target);
+    if (id === lock) problems.set(target, { text: t("keys.isLock"), error: true });
+    else if (others.length) problems.set(target, { text: t("keys.alsoUsed", { targets: others.map(listName).join(", ") }), error: true });
+    else if (!hotkey.includes("+") && TYPING_KEYS.test(hotkey)) problems.set(target, { text: t("keys.noModifier"), error: false });
   }
   return problems;
 }
@@ -190,27 +195,25 @@ export function renderSwitchKeys() {
   const problems = switchProblems(targets);
   const recordingId = state.recording?.kind === "switch" ? state.recording.target : null;
   const focused = document.activeElement?.closest?.(".switch-list li")?.dataset.target;
-  $("#switchHint").textContent = "Springt zum Nachbarn oder in die Mitte eines Rechners. Wirkt auf jedem Rechner.";
-  const info =
-    "Beim Nachbarn kommt der Cursor an der gegenüberliegenden Kante an. Die Kürzel erreichen keine Programme. Eine Zusatztaste allein, etwa Strg rechts, wirkt erst beim Loslassen und nur allein getippt: Strg+C bleibt Strg+C. Hält die Fang-Taste den Cursor fest, wechselt er nicht." +
-    (state.platform === "linux" ? " Belegt die Arbeitsfläche ein Kürzel schon (z. B. Strg+Alt+Pfeil), wirkt es unter X11 nur, solange der Cursor auf einem anderen Rechner ist." : "");
+  $("#switchHint").textContent = t("keys.switchHint");
+  const info = state.platform === "linux" ? t("keys.switchInfoLinux") : t("keys.switchInfo");
   $("#switchInfo").title = info;
   $("#switchInfo").setAttribute("aria-label", info);
 
   // Je Ziel: Taste (oder „Belegen“), dahinter ein Menü mit Ändern und Entfernen
-  const row = (t) => {
-    const id = `${t.kind}:${t.id}`;
-    const hotkey = all[t.kind][t.id] || "";
+  const row = (target) => {
+    const id = `${target.kind}:${target.id}`;
+    const hotkey = all[target.kind][target.id] || "";
     const recording = recordingId === id;
-    const problem = problems.get(t);
+    const problem = problems.get(target);
     const capClass = ["keycap", recording && "recording", problem?.error && "conflict"].filter(Boolean).join(" ");
-    const arrow = t.kind === "directions" ? icon("arrow") : icon("screen");
-    if (t.kind === "directions" && t.turn) arrow.style.transform = `rotate(${t.turn}deg)`;
+    const arrow = target.kind === "directions" ? icon("arrow") : icon("screen");
+    if (target.kind === "directions" && target.turn) arrow.style.transform = `rotate(${target.turn}deg)`;
     let controls;
     if (recording) {
       controls = [
-        el("kbd", { class: capClass, text: "Taste drücken …" }),
-        el("button", { type: "button", class: "btn small ghost record-switch", text: "Abbrechen", "aria-label": `Aufnahme abbrechen: ${t.label}`, onclick: stopRecording }),
+        el("kbd", { class: capClass, text: t("keys.pressKey") }),
+        el("button", { type: "button", class: "btn small ghost record-switch", text: t("common.cancel"), "aria-label": t("keys.cancelRecording", { target: target.label }), onclick: stopRecording }),
       ];
     } else if (hotkey) {
       const menu = el(
@@ -218,17 +221,17 @@ export function renderSwitchKeys() {
         {
           type: "button",
           class: "icon-btn small record-switch",
-          title: "Ändern oder entfernen",
-          "aria-label": `Kürzel ${t.label}: ändern oder entfernen`,
+          title: t("keys.changeOrRemove"),
+          "aria-label": t("keys.changeOrRemoveNamed", { target: target.label }),
           "aria-haspopup": "menu",
           onclick: () =>
             openMenu(menu, [
-              { label: "Ändern …", run: () => recordSwitch(t) },
+              { label: t("keys.changeMenu"), run: () => recordSwitch(target) },
               {
-                label: "Entfernen",
+                label: t("common.remove"),
                 danger: true,
                 run: () => {
-                  delete all[t.kind][t.id];
+                  delete all[target.kind][target.id];
                   keysChanged();
                 },
               },
@@ -241,9 +244,9 @@ export function renderSwitchKeys() {
       controls = [
         el(
           "button",
-          { type: "button", class: "btn small ghost record-switch", "aria-label": `Kürzel belegen: ${t.label}`, onclick: () => recordSwitch(t) },
+          { type: "button", class: "btn small ghost record-switch", "aria-label": t("keys.assignNamed", { target: target.label }), onclick: () => recordSwitch(target) },
           icon("plus"),
-          "Belegen",
+          t("keys.assign"),
         ),
       ];
     }
@@ -254,17 +257,17 @@ export function renderSwitchKeys() {
         "span",
         { class: "switch-target" },
         arrow,
-        el("span", { class: "name", text: t.label, title: t.label }),
-        t.isServer ? el("span", { class: "server-tag", text: "Server" }) : null,
+        el("span", { class: "name", text: target.label, title: target.label }),
+        target.isServer ? el("span", { class: "server-tag", text: "Server" }) : null,
       ),
       el("span", { class: "switch-key" }, ...controls),
       problem ? el("p", { class: `switch-problem${problem.error ? "" : " warn"}`, text: problem.text }) : null,
     );
   };
-  $("#switchDirections").replaceChildren(...targets.filter((t) => t.kind === "directions").map(row));
-  const screens = targets.filter((t) => t.kind === "screens");
+  $("#switchDirections").replaceChildren(...targets.filter((target) => target.kind === "directions").map(row));
+  const screens = targets.filter((target) => target.kind === "screens");
   $("#switchScreens").replaceChildren(
-    ...(screens.length ? screens.map(row) : [el("li", { class: "empty", text: "Noch kein Rechner im Layout." })]),
+    ...(screens.length ? screens.map(row) : [el("li", { class: "empty", text: t("keys.noComputer") })]),
   );
   const keep = recordingId || focused;
   if (keep) $(`.switch-list li[data-target="${CSS.escape(keep)}"] .record-switch`)?.focus();
@@ -298,11 +301,8 @@ export function renderKeyModes() {
   const s = state.status;
   const clients = s?.role === "server" ? s.clients : [];
   const focused = document.activeElement?.closest?.("#modeList li")?.dataset.machine;
-  $("#modeHint").textContent = "Je Rechner: Tastenposition wie eine angeschlossene Tastatur, oder Zeichen, damit drüben ankommt, was du hier tippst.";
-  const info =
-    "„Tastenposition“: die Taste an derselben Stelle, dort bestimmt das eigene Tastaturlayout das Zeichen – wie eine angeschlossene Tastatur, nötig für Spiele. " +
-    "„Zeichen“: Dort kommt an, was du hier tippst, auch bei anderem Layout (z. B. hier Deutsch, dort US). Kürzel wie Strg+Z gehen nach dem Zeichen, Pfeile, F-Tasten und Co. bleiben Tasten." +
-    (state.desktop === "wayland" ? " Unter Wayland kann dieser Rechner sein Tastaturlayout nicht lesen und schickt als Server immer Tastenpositionen." : "");
+  $("#modeHint").textContent = t("keys.modeHint");
+  const info = state.desktop === "wayland" ? t("keys.modeInfoWayland") : t("keys.modeInfo");
   $("#modeInfo").title = info;
   $("#modeInfo").setAttribute("aria-label", info);
   const machines = machinesForRemap();
@@ -313,13 +313,13 @@ export function renderKeyModes() {
           const client = clients.find((c) => c.name === machine);
           const note =
             mode === "chars" && client && !client.types_text
-              ? `„${machine}“ kann keine Zeichen eingeben (Qross vor 0.7 oder Wayland) und bekommt Tastenpositionen.`
+              ? t("keys.noChars", { name: machine })
               : null;
           const select = el(
             "select",
-            { "aria-label": `Tasten senden an ${machine}`, onchange: (e) => setKeyMode(machine, e.target.value) },
-            el("option", { value: "position", text: "Tastenposition" }),
-            el("option", { value: "chars", text: "Zeichen" }),
+            { "aria-label": t("keys.modeFor", { name: machine }), onchange: (e) => setKeyMode(machine, e.target.value) },
+            el("option", { value: "position", text: t("keys.position") }),
+            el("option", { value: "chars", text: t("keys.chars") }),
           );
           select.value = mode;
           return el(
@@ -330,7 +330,7 @@ export function renderKeyModes() {
             note ? el("span", { class: "hint mode-note", text: note }) : null,
           );
         })
-      : [el("li", { class: "empty", text: "Füge im Layout einen Rechner hinzu, um das einzustellen." })]),
+      : [el("li", { class: "empty", text: t("keys.modesNoComputer") })]),
   );
   if (focused) [...$$("#modeList li")].find((li) => li.dataset.machine === focused)?.querySelector("select")?.focus();
 }
@@ -446,13 +446,13 @@ export function recordLock() {
   startRecording({
     kind: "lock",
     start() {
-      label.textContent = "Taste drücken …";
+      label.textContent = t("keys.pressKey");
       label.className = "keycap recording";
-      button.textContent = "Abbrechen";
+      button.textContent = t("common.cancel");
       $("#lockRecordHint").hidden = false;
     },
     end() {
-      button.textContent = "Ändern";
+      button.textContent = t("common.change");
       $("#lockRecordHint").hidden = true;
       renderKeys();
     },
@@ -468,11 +468,11 @@ export function recordInto(selectId, button) {
   startRecording({
     kind: "select",
     start() {
-      button.textContent = "Taste drücken …";
+      button.textContent = t("keys.pressKey");
       button.classList.add("recording");
     },
     end() {
-      button.textContent = "Aufnehmen";
+      button.textContent = t("settings.keys.record");
       button.classList.remove("recording");
     },
     done(code) {
@@ -487,7 +487,7 @@ export function setupKeys() {
     const keys = state.settings.server.keys;
     openMenu($("#lockMenu"), [
       {
-        label: `Auf Standard (${hotkeyLabel(DEFAULT_LOCK)})`,
+        label: t("keys.lockDefault", { key: hotkeyLabel(DEFAULT_LOCK) }),
         disabled: keys.lock === DEFAULT_LOCK,
         run: () => {
           keys.lock = DEFAULT_LOCK;
@@ -495,7 +495,7 @@ export function setupKeys() {
         },
       },
       {
-        label: "Ausschalten",
+        label: t("keys.lockOff"),
         disabled: !keys.lock,
         run: () => {
           keys.lock = "";
@@ -519,7 +519,7 @@ export function setupKeys() {
   $("#addRule").addEventListener("click", () => {
     const from = $("#addFrom").value;
     const to = $("#addTo").value;
-    if (from === to) return toast("Gedrückte und gesendete Taste sind gleich.", "error");
+    if (from === to) return toast(t("keys.sameKey"), "error");
     addRules([[from, to]]);
   });
   $("#settings").addEventListener("close", stopRecording);

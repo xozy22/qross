@@ -129,7 +129,7 @@ impl CursorFinderHandle {
         self.0.send_if_modified(|current| {
             let changed = *current != finder;
             if changed {
-                info!("Cursor-Finder: {}", cursor_finder::describe(finder));
+                info!("cursor finder: {}", cursor_finder::describe(finder));
             }
             *current = finder;
             changed
@@ -306,10 +306,10 @@ impl Peers {
         let (peers, name) = (self.clone(), name.to_owned());
         Arc::new(move || {
             let peers = peers.0.lock().unwrap();
-            let (conn, sharing) = peers.get(&name).ok_or_else(|| format!("„{name}“ ist nicht verbunden"))?;
+            let (conn, sharing) = peers.get(&name).ok_or_else(|| format!("'{name}' is not connected"))?;
             let allowed = sharing.borrow().files.from_client();
             if !allowed {
-                return Err(format!("„{name}“ darf keine kopierten Dateien mehr abgeben"));
+                return Err(format!("'{name}' is no longer allowed to share copied files"));
             }
             Ok(conn.clone())
         })
@@ -362,7 +362,7 @@ type InputTx = mpsc::UnboundedSender<(Input, Option<Instant>)>;
 impl Server {
     pub fn bind(config: ServerConfig, identity: &Identity, trust: TrustStore) -> Result<Self> {
         let endpoint = Endpoint::server(server_config(identity)?, config.listen)
-            .with_context(|| format!("UDP {} öffnen", config.listen))?;
+            .with_context(|| format!("failed to open UDP {}", config.listen))?;
         let discovery = config.listen.ip().is_unspecified();
         Ok(Self {
             endpoint,
@@ -534,7 +534,7 @@ impl Server {
                 };
                 // Höchstens einmal je Sekunde: der langsamste mit seinen Teilen
                 if let Some(slow) = slow {
-                    warn!("Eingabe an „{name}“ verzögert: {}", slow.describe());
+                    warn!("input to '{name}' delayed: {}", slow.describe());
                 }
                 let Some((summary, client_reports)) = summary else { continue };
                 if let Some(tx) = &notices {
@@ -608,9 +608,9 @@ impl Server {
         let clients_in_layout = self.config.layout.screens().filter(|s| *s != self.config.name).count();
         let paste_here = clipboard.pastes_on_demand() && clients_in_layout == 1;
         if paste_here {
-            info!("Kopierte Dateien vom Client kommen erst beim Einfügen");
+            info!("copied files from the client are transferred only when pasted");
         } else if clipboard.pastes_on_demand() {
-            info!("Kopierte Dateien von Clients kommen vorab: Mit mehreren Clients gibt der Server sie weiter");
+            info!("copied files from clients are transferred in advance: with several clients, the server passes them on");
         }
         let files_notify: Notify = {
             let notices = self.notices.clone();
@@ -634,15 +634,15 @@ impl Server {
         // Welche Sperrtasten der Server lesen kann; Clients übernehmen dann seinen Stand
         let locks = capture.locks();
         if locks.is_known() {
-            debug!("Sperrtasten hier: {}", locks.describe());
+            debug!("lock keys here: {}", locks.describe());
         } else {
-            info!("Feststelltaste und Num sind hier nicht lesbar – Clients gleichen sie nicht ab");
+            info!("Caps Lock and Num Lock can't be read here; clients don't sync them");
         }
         state.handle(ServerEvent::LocalLocks(locks));
         for (hotkey, target) in &self.keys.options.switch {
             if let qross_core::keys::SwitchTarget::Screen(name) = target {
                 if *name != self.config.name && !self.config.layout.contains(name) {
-                    warn!("Kürzel „{hotkey}“ führt zu „{name}“, der nicht im Layout steht");
+                    warn!("shortcut '{hotkey}' leads to '{name}', which is not in the layout");
                 }
             }
         }
@@ -665,13 +665,13 @@ impl Server {
         let mut system_events = self.system_events.take().unwrap_or_else(wake::system_events);
         let finder_style = self.cursor_finder.0.subscribe();
         if finder_style.borrow().is_on() {
-            info!("Cursor-Finder: {}", cursor_finder::describe(*finder_style.borrow()));
+            info!("cursor finder: {}", cursor_finder::describe(*finder_style.borrow()));
         }
         // Was ein Client hierher zieht, steht am Cursor, bis es abgelegt oder verworfen ist.
         let mut drag_view = DragView::new(finder.clone());
-        info!("Server „{}“ lauscht auf {}", self.config.name, self.local_addr()?);
+        info!("server '{}' listening on {}", self.config.name, self.local_addr()?);
         if !local_monitors.is_empty() {
-            info!("eigene Monitore: {}", describe_monitors(&local_monitors));
+            info!("local monitors: {}", describe_monitors(&local_monitors));
         }
         self.notify(ServerNotice::Listening { addr: self.local_addr()? });
         self.notify(ServerNotice::LocalScreenChanged { screen: local_screen, monitors: local_monitors.clone() });
@@ -682,7 +682,7 @@ impl Server {
 
         loop {
             if switching.as_ref().is_some_and(|trace| trace.is_due(Instant::now())) {
-                switching.take().expect("geprüft").log();
+                switching.take().expect("checked above").log();
             }
             // Wann das auslösende Ereignis aus der Erfassung abgeholt wurde (Eingabekette)
             let mut captured = None;
@@ -727,7 +727,7 @@ impl Server {
                         }
                         self.on_capture(&mut state, event)
                     }
-                    None => bail!("Eingabe-Erfassung wurde beendet"),
+                    None => bail!("input capture ended"),
                 },
                 Some(event) = net_rx.recv() => match event {
                     NetEvent::Hello { name, screen, fingerprint, conn, reply } => {
@@ -739,9 +739,9 @@ impl Server {
                                 // abweisen, bis sie ausläuft, sondern gleich ersetzen.
                                 let mut actions = Vec::new();
                                 if let Some(old) = clients.remove(&name) {
-                                    info!("„{name}“ meldet sich neu an – alte Verbindung ersetzt");
+                                    info!("'{name}' reconnected; replacing the old connection");
                                     old.conn.close(wake::CLOSE_REPLACED, b"replaced");
-                                    transfers.abort_receiving(Some(&name), "Verbindung ersetzt");
+                                    transfers.abort_receiving(Some(&name), "connection replaced");
                                     self.notify(ServerNotice::ClientDisconnected { name: name.clone() });
                                     actions = state.handle(ServerEvent::ClientDisconnected { name: name.clone() });
                                 }
@@ -783,15 +783,15 @@ impl Server {
                                     offers: offers.clone(),
                                     serving: serving.clone(),
                                 }));
-                                info!("Client „{name}“ verbunden ({}×{})", screen.width, screen.height);
+                                info!("client '{name}' connected ({}×{})", screen.width, screen.height);
                                 if sharing != Sharing::ALL {
-                                    info!("Rechte für „{name}“: {}", describe_sharing(sharing));
+                                    info!("permissions for '{name}': {}", describe_sharing(sharing));
                                 }
                                 actions.extend(state.handle(ServerEvent::ClientConnected { name, screen }));
                                 actions
                             }
                             Err(reason) => {
-                                warn!("Client „{name}“ abgelehnt: {reason}");
+                                warn!("client '{name}' rejected: {reason}");
                                 let trust = self.trust.check(&name, &fingerprint);
                                 self.notify(ServerNotice::ClientRejected {
                                     name: name.clone(),
@@ -806,7 +806,7 @@ impl Server {
                         }
                     }
                     NetEvent::ScreenChanged { name, id, screen } if is_current(&clients, &name, id) => {
-                        info!("Bildschirm von „{name}“ geändert: {}×{}", screen.width, screen.height);
+                        info!("screen of '{name}' changed: {}×{}", screen.width, screen.height);
                         if let Some(client) = clients.get_mut(&name) {
                             client.screen = screen;
                             let monitors = client.monitors.clone();
@@ -815,7 +815,7 @@ impl Server {
                         state.handle(ServerEvent::ClientScreenChanged { name, screen })
                     }
                     NetEvent::Monitors { name, id, monitors } if is_current(&clients, &name, id) => {
-                        info!("„{name}“ meldet {}", describe_monitors(&monitors));
+                        info!("'{name}' reports {}", describe_monitors(&monitors));
                         if let Some(client) = clients.get_mut(&name) {
                             client.monitors = monitors.clone();
                             let (screen, monitors) = (client.screen, monitors.clone());
@@ -824,7 +824,7 @@ impl Server {
                         state.handle(ServerEvent::ClientMonitors { name, monitors })
                     }
                     NetEvent::Game { name, id, game } if is_current(&clients, &name, id) => {
-                        debug!("Spielemodus: „{name}“ meldet {}", game::describe(game));
+                        debug!("game mode: '{name}' reports {}", game::describe(game));
                         state.handle(ServerEvent::ClientGame { name, game })
                     }
                     NetEvent::TypesText { name, id } if is_current(&clients, &name, id) => {
@@ -832,26 +832,26 @@ impl Server {
                             client.types_text = true;
                         }
                         if self.keys.modes.get(&name) == Some(&KeyMode::Chars) {
-                            info!("„{name}“ bekommt Zeichen statt Tastenpositionen");
+                            info!("'{name}' gets characters instead of key positions");
                         } else {
-                            debug!("„{name}“ kann Zeichen eingeben");
+                            debug!("'{name}' can type characters");
                         }
                         self.notify(ServerNotice::ClientTypesText { name: name.clone() });
                         state.handle(ServerEvent::ClientTypesText { name })
                     }
                     NetEvent::SyncsLocks { name, id } if is_current(&clients, &name, id) => {
-                        debug!("„{name}“ übernimmt Feststelltaste, Num und Rollen vom Server");
+                        debug!("'{name}' takes over Caps Lock, Num Lock and Scroll Lock from the server");
                         state.handle(ServerEvent::ClientSyncsLocks { name })
                     }
                     NetEvent::FollowsScreenSaver { name, id } if is_current(&clients, &name, id) => {
                         if let Some(client) = clients.get_mut(&name) {
                             client.follows_saver = true;
                         }
-                        debug!("„{name}“ folgt dem Bildschirmschoner");
+                        debug!("'{name}' follows the screen saver");
                         Vec::new()
                     }
                     NetEvent::Clipboard { name, id, data } if is_current(&clients, &name, id) => {
-                        info!("Zwischenablage von „{name}“: {}", data.summary());
+                        info!("clipboard from '{name}': {}", data.summary());
                         incoming.supersede();
                         let (clipboard, synced) = (clipboard.clone(), clip_synced.clone());
                         tokio::spawn(async move {
@@ -860,7 +860,7 @@ impl Server {
                                 Ok(seq) => {
                                     synced.lock().unwrap().insert(name, seq);
                                 }
-                                Err(e) => warn!("Zwischenablage von „{name}“ nicht übernommen: {e:#}"),
+                                Err(e) => warn!("failed to apply clipboard from '{name}': {e:#}"),
                             }
                         });
                         Vec::new()
@@ -872,7 +872,7 @@ impl Server {
                             Ok(Some(ready)) => deliver_files(ready, &clipboard, &clip_synced, &files_notify),
                             Ok(None) => {}
                             Err(e) => {
-                                warn!("kopierte Dateien von „{name}“ abgelehnt: {e:#}");
+                                warn!("copied files from '{name}' rejected: {e:#}");
                                 files_notify(FilesNotice::Failed { peer: name, reason: format!("{e:#}") });
                             }
                         }
@@ -890,7 +890,7 @@ impl Server {
                         if let Some(client) = clients.get_mut(&name) {
                             client.pastes_on_demand = true;
                         }
-                        debug!("„{name}“ fügt kopierte Dateien auf Abruf ein");
+                        debug!("'{name}' pastes copied files on demand");
                         Vec::new()
                     }
                     NetEvent::ReportsUsage { name, id } if is_current(&clients, &name, id) => {
@@ -926,7 +926,7 @@ impl Server {
                                 });
                             }
                             Err(e) => {
-                                warn!("kopierte Dateien von „{name}“ abgelehnt: {e:#}");
+                                warn!("copied files from '{name}' rejected: {e:#}");
                                 files_notify(FilesNotice::Failed { peer: name, reason: format!("{e:#}") });
                             }
                         }
@@ -947,12 +947,12 @@ impl Server {
                         if let Some(client) = clients.remove(&name) {
                             let summary = client.latency.lock().unwrap().summary(Instant::now());
                             if summary.mouse.is_some() || summary.keys.is_some() {
-                                info!("Verzögerung der Eingabekette zu „{name}“: {}", latency::describe(&summary));
+                                info!("input chain latency to '{name}': {}", latency::describe(&summary));
                             }
                         }
-                        info!("Client „{name}“ getrennt");
+                        info!("client '{name}' disconnected");
                         peers.remove(&name, id);
-                        transfers.abort_receiving(Some(&name), "Verbindung getrennt");
+                        transfers.abort_receiving(Some(&name), "disconnected");
                         self.notify(ServerNotice::ClientDisconnected { name: name.clone() });
                         state.handle(ServerEvent::ClientDisconnected { name })
                     }
@@ -963,7 +963,7 @@ impl Server {
                     for (name, client) in &clients {
                         let sharing = rules.for_client(name);
                         if client.sharing.send_replace(sharing) != sharing {
-                            info!("Rechte für „{name}“ geändert: {}", describe_sharing(sharing));
+                            info!("permissions for '{name}' changed: {}", describe_sharing(sharing));
                             cancel_forbidden(&transfers, name, sharing);
                         }
                     }
@@ -985,15 +985,15 @@ impl Server {
                     let active = *local_saver.borrow_and_update();
                     let following = clients.values().filter(|c| c.follows_saver).count();
                     match (active, self.lock_clients) {
-                        (true, false) => info!("Bildschirmschoner gestartet – {following} Client(s) starten ihren"),
-                        (true, true) => info!("Bildschirmschoner gestartet – {following} Client(s) sperren sich"),
-                        (false, _) => info!("Bildschirmschoner beendet – {following} Client(s) beenden ihren"),
+                        (true, false) => info!("screen saver started; {following} client(s) start theirs"),
+                        (true, true) => info!("screen saver started; {following} client(s) lock themselves"),
+                        (false, _) => info!("screen saver stopped; {following} client(s) stop theirs"),
                     }
                     state.handle(ServerEvent::LocalScreenSaver(active))
                 }
                 Ok(()) = local_game.changed() => {
                     let game = *local_game.borrow_and_update();
-                    debug!("Spielemodus: auf diesem Rechner {}", game::describe(game));
+                    debug!("game mode on this computer: {}", game::describe(game));
                     state.handle(ServerEvent::LocalGame(game))
                 }
                 Some(event) = system_events.recv() => {
@@ -1004,11 +1004,11 @@ impl Server {
                     let holder = secure.borrow_and_update().clone();
                     match &holder {
                         Some(h) => info!(
-                            "Sichere Tastatureingabe ist an ({}) – Tasten erreichen Qross nicht, der Cursor bleibt auf \
-                             diesem Rechner",
+                            "Secure Keyboard Entry is on ({}); keys don't reach Qross, the cursor stays on this \
+                             computer",
                             h.describe()
                         ),
-                        None => info!("Sichere Tastatureingabe ist wieder aus"),
+                        None => info!("Secure Keyboard Entry is off again"),
                     }
                     let on = holder.is_some();
                     self.notify(ServerNotice::SecureInput { holder });
@@ -1018,11 +1018,11 @@ impl Server {
                     let (now, now_monitors) = (screen(), monitors());
                     let mut actions = Vec::new();
                     if now != local_screen {
-                        info!("lokaler Bildschirm geändert: {}×{}", now.width, now.height);
+                        info!("local screen changed: {}×{}", now.width, now.height);
                         actions.extend(state.handle(ServerEvent::LocalScreenChanged(now)));
                     }
                     if now_monitors != local_monitors {
-                        info!("eigene Monitore: {}", describe_monitors(&now_monitors));
+                        info!("local monitors: {}", describe_monitors(&now_monitors));
                         actions.extend(state.handle(ServerEvent::LocalMonitors(now_monitors.clone())));
                     }
                     if now != local_screen || now_monitors != local_monitors {
@@ -1070,7 +1070,7 @@ impl Server {
                 apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops, captured);
                 let took = started.elapsed();
                 if let Some(step) = step.filter(|_| took >= SLOW_STEP) {
-                    warn!("„{step}“ hielt die Weitergabe {} ms auf – so lange stand der Cursor auf dem Client", took.as_millis());
+                    warn!("'{step}' held up forwarding for {} ms; the cursor on the client froze that long", took.as_millis());
                 }
             }
             self.report_hold(&state, &mut hold);
@@ -1089,8 +1089,8 @@ impl Server {
             && !client.told_positions.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
             info!(
-                "„{to}“ steht auf „Zeichen“, kann sie aber nicht eingeben (Qross vor 0.7 oder Wayland) – \
-                 er bekommt Tastenpositionen"
+                "'{to}' is set to 'characters' but can't type them (Qross before 0.7 or Wayland); \
+                 it gets key positions"
             );
         }
     }
@@ -1106,9 +1106,9 @@ impl Server {
         let locked = hold == Hold::Locked;
         if locked != (old == Hold::Locked) {
             if locked {
-                info!("Cursor auf „{screen}“ festgehalten (Fang-Taste löst)");
+                info!("cursor locked on '{screen}' (the lock key releases it)");
             } else {
-                info!("Cursor wieder frei");
+                info!("cursor unlocked");
             }
             self.notify(ServerNotice::CursorLocked { locked, screen: screen.clone() });
         }
@@ -1120,9 +1120,9 @@ impl Server {
         // Neu, beendet, anders (Vollbild ↔ eingefangen) oder auf einem anderen Bildschirm
         if game != before || (game.is_some() && screen != old_screen) {
             match game {
-                Some(g) => info!("Spielemodus: Cursor bleibt auf „{screen}“ ({}; Fang-Taste löst)", game::describe(g)),
+                Some(g) => info!("game mode: cursor stays on '{screen}' ({}; the lock key releases it)", game::describe(g)),
                 // Mit der Fang-Taste festgehalten: Das hat `CursorLocked` schon gemeldet.
-                None if !locked => info!("Spielemodus: Cursor wieder frei"),
+                None if !locked => info!("game mode: cursor free again"),
                 None => {}
             }
             self.notify(ServerNotice::GameHold { screen, game });
@@ -1139,9 +1139,9 @@ impl Server {
         let actions = state.handle(ServerEvent::Capture(event));
         if let Some(target) = switch {
             if actions.is_empty() {
-                info!("Kürzel {target}: kein Wechsel (Ziel nicht verbunden, Cursor festgehalten oder schon dort)");
+                info!("shortcut {target}: no switch (target not connected, cursor locked or already there)");
             } else {
-                info!("Kürzel {target}: Cursor jetzt auf „{}“", state.active_screen());
+                info!("shortcut {target}: cursor now on '{}'", state.active_screen());
             }
         }
         actions
@@ -1151,15 +1151,15 @@ impl Server {
     /// alte – denselben Namen mit einem anderen Schlüssel weist die Vertrauensliste ab.
     fn admit(&mut self, name: &str, fingerprint: &Fingerprint) -> Result<(), String> {
         if name == self.config.name {
-            return Err(format!("„{name}“ ist der Name des Servers"));
+            return Err(format!("'{name}' is the server's name"));
         }
         if !self.config.layout.contains(name) {
-            return Err(format!("„{name}“ steht nicht im Layout des Servers"));
+            return Err(format!("'{name}' is not in the server's layout"));
         }
         let mut outcome = self.trust.check(name, fingerprint);
         if outcome == TrustOutcome::Unknown {
             if let Err(e) = self.trust.reload() {
-                warn!("Vertrauensliste konnte nicht neu geladen werden: {e:#}");
+                warn!("failed to reload the trust list: {e:#}");
             }
             outcome = self.trust.check(name, fingerprint);
         }
@@ -1167,17 +1167,17 @@ impl Server {
             TrustOutcome::Known => Ok(()),
             TrustOutcome::Unknown => {
                 warn!(
-                    "Unbekannter Client „{name}“ mit Fingerprint {fingerprint}. \
-                     Zum Freigeben auf diesem Rechner ausführen: qross trust {name} {fingerprint}"
+                    "unknown client '{name}' with fingerprint {fingerprint}. \
+                     To approve it, run on this computer: qross trust {name} {fingerprint}"
                 );
-                Err("dieser Rechner ist auf dem Server noch nicht freigegeben (qross trust)".into())
+                Err("this computer has not been approved on the server yet (qross trust)".into())
             }
             TrustOutcome::Mismatch => {
                 warn!(
-                    "Client „{name}“ meldet sich mit Fingerprint {fingerprint}, erwartet war {}",
+                    "client '{name}' presented fingerprint {fingerprint}, expected {}",
                     self.trust.expected(name).unwrap_or("?")
                 );
-                Err("Fingerprint passt nicht zum freigegebenen Rechner dieses Namens".into())
+                Err("fingerprint does not match the approved computer with this name".into())
             }
         }
     }
@@ -1195,7 +1195,7 @@ fn on_system_event(event: SystemEvent, clients: &HashMap<String, ClientHandle>) 
     match event {
         SystemEvent::Sleeping => {
             for (name, client) in clients {
-                debug!("Ruhezustand: trenne „{name}“");
+                debug!("going to sleep: disconnecting '{name}'");
                 client.conn.close(wake::CLOSE_SLEEPING, b"server sleeping");
             }
         }
@@ -1204,7 +1204,7 @@ fn on_system_event(event: SystemEvent, clients: &HashMap<String, ClientHandle>) 
                 let (conn, name) = (client.conn.clone(), name.clone());
                 tokio::spawn(async move {
                     if !wake::answers(conn.clone(), wake::SERVER_PROBE).await && conn.close_reason().is_none() {
-                        info!("„{name}“ antwortet nicht mehr – getrennt");
+                        info!("'{name}' stopped responding; disconnected");
                         conn.close(0u32.into(), b"no answer");
                     }
                 });
@@ -1213,13 +1213,13 @@ fn on_system_event(event: SystemEvent, clients: &HashMap<String, ClientHandle>) 
     }
 }
 
-/// Fürs Log, z. B. „2 Monitore (1512×982, 3744×1800)“
+/// Fürs Log, z. B. „2 monitors (1512×982, 3744×1800)“
 fn describe_monitors(monitors: &[Rect]) -> String {
     let sizes: Vec<String> = monitors.iter().map(|m| format!("{}×{}", m.width, m.height)).collect();
     match sizes.len() {
-        0 => "keine Monitore".to_owned(),
-        1 => format!("1 Monitor ({})", sizes[0]),
-        n => format!("{n} Monitore ({})", sizes.join(", ")),
+        0 => "no monitors".to_owned(),
+        1 => format!("1 monitor ({})", sizes[0]),
+        n => format!("{n} monitors ({})", sizes.join(", ")),
     }
 }
 
@@ -1243,13 +1243,13 @@ fn deliver_files(ready: Ready, clipboard: &ClipboardHub, clip_synced: &ClipSynce
         let Ready { peer, paths, data, names, bytes } = ready;
         match clipboard.write_files(paths, data).await {
             Ok(seq) => {
-                info!("kopierte Dateien von „{peer}“ liegen in der Zwischenablage");
+                info!("copied files from '{peer}' are in the clipboard");
                 // Nicht an denselben Client zurückschicken
                 synced.lock().unwrap().insert(peer.clone(), seq);
                 notify(FilesNotice::Ready { peer, names, bytes });
             }
             Err(e) => {
-                warn!("kopierte Dateien von „{peer}“ nicht in die Zwischenablage gelegt: {e:#}");
+                warn!("failed to put copied files from '{peer}' into the clipboard: {e:#}");
                 notify(FilesNotice::Failed { peer, reason: format!("{e:#}") });
             }
         }
@@ -1262,14 +1262,14 @@ const SLOW_STEP: Duration = Duration::from_millis(20);
 /// Schritte, die das System direkt aufrufen und dabei die Ereignisschleife aufhalten können, fürs Log
 fn platform_step(action: &Action) -> Option<&'static str> {
     Some(match action {
-        Action::CaptureRemote => "Cursor einfangen",
-        Action::ReleaseCapture { .. } => "Cursor freigeben",
-        Action::SyncLocks { .. } => "Sperrtasten lesen",
-        Action::ProbeDrag { .. } => "Ziehen prüfen",
-        Action::CancelLocalDrag => "Ziehen abbrechen",
-        Action::AwaitLocalDrop { .. } => "Ablegen vorbereiten",
-        Action::DropIncoming { .. } => "Ablageordner suchen",
-        Action::StopLocalScreenSaver => "Bildschirmschoner beenden",
+        Action::CaptureRemote => "capture cursor",
+        Action::ReleaseCapture { .. } => "release cursor",
+        Action::SyncLocks { .. } => "read lock keys",
+        Action::ProbeDrag { .. } => "probe drag",
+        Action::CancelLocalDrag => "cancel drag",
+        Action::AwaitLocalDrop { .. } => "prepare drop",
+        Action::DropIncoming { .. } => "find drop folder",
+        Action::StopLocalScreenSaver => "stop screen saver",
         _ => return None,
     })
 }
@@ -1290,12 +1290,12 @@ fn apply(
         Action::CaptureRemote => capture.capture_remote(),
         Action::ReleaseCapture { x, y } => {
             capture.release(x, y);
-            info!("Cursor zurück auf diesem Rechner");
+            info!("cursor back on this computer");
         }
         Action::Send { to, input } => {
             match input {
-                Input::Enter { .. } => info!("Cursor → „{to}“"),
-                _ => debug!(?input, "→ „{to}“"),
+                Input::Enter { .. } => info!("cursor → '{to}'"),
+                _ => debug!(?input, "→ '{to}'"),
             }
             if let Some(client) = clients.get(&to) {
                 let _ = client.input.send((input, captured));
@@ -1305,7 +1305,7 @@ fn apply(
             // Erst jetzt lesen: Lokal kann sich der Stand geändert haben, ohne dass es jemand sah.
             let locks = capture.locks();
             if let (true, Some(client)) = (locks.is_known(), clients.get(&to)) {
-                debug!("Sperrtasten → „{to}“: {}", locks.describe());
+                debug!("lock keys → '{to}': {}", locks.describe());
                 let _ = client.input.send((Input::Locks(locks), None));
             }
         }
@@ -1317,7 +1317,7 @@ fn apply(
             let allowed = Allowed { clipboard: rights.clipboard.to_client(), files: rights.files.to_client() };
             if !allowed.any() {
                 // Gar nicht erst lesen; wird es wieder erlaubt, geht der dann aktuelle Inhalt mit.
-                return debug!("Zwischenablage nicht an „{to}“: nicht erlaubt");
+                return debug!("clipboard not sent to '{to}': not allowed");
             }
             let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), client.conn.clone());
             let (limit, notify, transfers) = (files.limit, files.notify.clone(), files.transfers.clone());
@@ -1330,16 +1330,16 @@ fn apply(
                 synced.lock().unwrap().insert(to.clone(), seq);
                 let Some(content) = content else { return };
                 let Some(content) = rights::content(content, allowed) else {
-                    return debug!("Zwischenablage nicht an „{to}“: nicht erlaubt");
+                    return debug!("clipboard not sent to '{to}': not allowed");
                 };
                 // Bilder und Dateien erst, wenn die Maus drüben zur Ruhe kommt (siehe `settle`)
                 if settle::is_bulky(&content, limit) {
                     settle::settled(&mouse, since).await;
                     // Inzwischen kam Neueres an ihn oder von ihm: das Ältere nicht hinterherschicken
                     if synced.lock().unwrap().get(&to) != Some(&seq) || conn.close_reason().is_some() {
-                        return debug!("Zwischenablage an „{to}“ entfällt: überholt oder getrennt, bevor die Maus ruhte");
+                        return debug!("clipboard for '{to}' dropped: superseded or disconnected before the mouse came to rest");
                     }
-                    debug!("Zwischenablage an „{to}“ geht {} ms nach dem Wechsel hinaus", since.elapsed().as_millis());
+                    debug!("clipboard goes out to '{to}' {} ms after the switch", since.elapsed().as_millis());
                 }
                 clipfiles::send(conn, content, limit, to, notify, transfers, on_demand).await
             });
@@ -1350,7 +1350,7 @@ fn apply(
             if let Some(client) = clients.get(&to) {
                 // Der Kern wechselt ohne Rechte gar nicht erst; nur zur Sicherheit
                 if !client.sharing.borrow().drag.to_client() {
-                    return warn!("Drag & Drop an „{to}“ ist nicht erlaubt");
+                    return warn!("drag and drop to '{to}' is not allowed");
                 }
                 let (conn, input, transfers) = (client.conn.clone(), client.input.clone(), files.transfers.clone());
                 tokio::spawn(start_file_drag(conn, input, to, transfer, roots, transfers));
@@ -1361,13 +1361,13 @@ fn apply(
                 let conn = client.conn.clone();
                 tokio::spawn(async move {
                     if let Err(e) = send_drag_message(&conn, &DragMessage::Query { probe }).await {
-                        debug!("Drag-Nachfrage an „{to}“ nicht gesendet: {e:#}");
+                        debug!("failed to send drag query to '{to}': {e:#}");
                     }
                 });
             }
         }
         Action::AwaitLocalDrop { from, transfer } => {
-            info!("Dateien von „{from}“ werden hierher gezogen – Loslassen legt sie ab (Übertragung {transfer})");
+            info!("files from '{from}' are being dragged here; releasing drops them (transfer {transfer})");
             capture.await_local_drop();
         }
         Action::DropIncoming { transfer, x, y } => {
@@ -1375,20 +1375,20 @@ fn apply(
             drops.on_drop(transfer, folder);
         }
         Action::CancelIncoming { transfer } => {
-            debug!("Übertragung {transfer} nicht abgelegt");
+            debug!("transfer {transfer} not dropped");
             drops.cancel_undropped();
         }
         Action::HeldBySecureInput { from: Some(from) } => {
-            warn!("Sichere Tastatureingabe: Cursor von „{from}“ zurückgeholt – Tasten wären dort nicht angekommen")
+            warn!("Secure Keyboard Entry: cursor brought back from '{from}'; keys would not have arrived there")
         }
-        Action::HeldBySecureInput { from: None } => info!("Sichere Tastatureingabe: kein Wechsel, der Cursor bleibt hier"),
+        Action::HeldBySecureInput { from: None } => info!("Secure Keyboard Entry: no switch, the cursor stays here"),
         Action::ScreenSaver { active, lock } => {
             for client in clients.values().filter(|c| c.follows_saver) {
                 let _ = client.control.send(Control::ScreenSaver { active, lock });
             }
         }
         Action::StopLocalScreenSaver => {
-            info!("Eingabe für einen Client – Bildschirmschoner hier wird beendet");
+            info!("input for a client; stopping the screen saver here");
             capture.stop_screen_saver();
         }
     }
@@ -1397,7 +1397,7 @@ fn apply(
 fn send_datagram(clients: &HashMap<String, ClientHandle>, to: &str, datagram: Datagram, captured: Option<Instant>) {
     let Some(client) = clients.get(to) else { return };
     if let Err(e) = client.conn.send_datagram(encode_datagram(&datagram).into()) {
-        return debug!("Datagramm an „{to}“ nicht gesendet: {e}");
+        return debug!("failed to send datagram to '{to}': {e}");
     }
     let (epoch, seq) = match datagram {
         Datagram::MouseMove(mv) => (mv.epoch, mv.seq),
@@ -1419,22 +1419,22 @@ async fn start_file_drag(
 ) {
     let entries = match tokio::task::spawn_blocking(move || files::collect(&roots)).await {
         Ok(Ok(entries)) => entries,
-        Ok(Err(e)) => return warn!("Dateien für „{to}“ nicht lesbar: {e:#}"),
-        Err(e) => return warn!("Dateien für „{to}“ nicht lesbar: {e}"),
+        Ok(Err(e)) => return warn!("failed to read files for '{to}': {e:#}"),
+        Err(e) => return warn!("failed to read files for '{to}': {e}"),
     };
     let total: u64 = entries.iter().map(|e| e.entry.size).sum();
-    info!("übertrage {} Einträge ({}) an „{to}“", entries.len(), files::human_size(total));
+    info!("transferring {} entries ({}) to '{to}'", entries.len(), files::human_size(total));
     let _ = input.send((Input::DragStart { transfer, entries: entries.iter().map(|e| e.entry.clone()).collect() }, None));
     let started = std::time::Instant::now();
     match files::send_tracked(conn, StreamKind::File, transfer, entries, &to, &transfers).await {
         Ok(()) => {
             let secs = started.elapsed().as_secs_f64().max(0.001);
             info!(
-                "Übertragung an „{to}“ fertig in {secs:.1} s ({}/s)",
+                "transfer to '{to}' finished in {secs:.1} s ({}/s)",
                 files::human_size((total as f64 / secs) as u64)
             );
         }
-        Err(e) => warn!("Übertragung an „{to}“ abgebrochen: {e:#}"),
+        Err(e) => warn!("transfer to '{to}' aborted: {e:#}"),
     }
 }
 
@@ -1457,7 +1457,7 @@ fn spawn_input_writer(conn: Connection, name: String, latency: latency::Shared) 
         }
         .await;
         if let Err(e) = result {
-            debug!("Input-Stream zu „{name}“ beendet: {e:#}");
+            debug!("input stream to '{name}' ended: {e:#}");
         }
     });
     tx
@@ -1469,7 +1469,7 @@ async fn accept_loop(endpoint: Endpoint, tx: mpsc::UnboundedSender<NetEvent>, st
         tokio::spawn(async move {
             let remote = incoming.remote_address();
             if let Err(e) = handle_connection(incoming, tx, stagings).await {
-                debug!("Verbindung von {remote} beendet: {e:#}");
+                debug!("connection from {remote} ended: {e:#}");
             }
         });
     }
@@ -1481,31 +1481,31 @@ async fn handle_connection(
     stagings: Stagings,
 ) -> Result<()> {
     let remote = incoming.remote_address();
-    let conn = incoming.await.context("QUIC-Handshake")?;
+    let conn = incoming.await.context("QUIC handshake failed")?;
     let fingerprint = peer_fingerprint(&conn)?;
     let (mut send, mut recv, hello) = match receive_hello(&conn).await {
         Ok(received) => received,
         Err(e) => {
             conn.close(0u32.into(), b"no hello");
-            return Err(e.context("kein gültiges Hello"));
+            return Err(e.context("no valid hello"));
         }
     };
     let Control::Hello { version, name, screen, platform } = hello else {
         conn.close(0u32.into(), b"no hello");
-        bail!("{remote} hat kein Hello gesendet");
+        bail!("{remote} did not send a hello");
     };
 
     let verdict = if version != PROTOCOL_VERSION {
-        Err(format!("Protokollversion {version} wird nicht unterstützt (Server: {PROTOCOL_VERSION})"))
+        Err(format!("protocol version {version} is not supported (server: {PROTOCOL_VERSION})"))
     } else {
         let (reply_tx, reply_rx) = oneshot::channel();
         let hello = NetEvent::Hello { name: name.clone(), screen: screen.bounds, fingerprint, conn: conn.clone(), reply: reply_tx };
-        tx.send(hello).map_err(|_| anyhow!("Server wurde beendet"))?;
-        reply_rx.await.map_err(|_| anyhow!("Server wurde beendet"))?
+        tx.send(hello).map_err(|_| anyhow!("server stopped"))?;
+        reply_rx.await.map_err(|_| anyhow!("server stopped"))?
     };
     let (sharing, latency) = match verdict {
         Ok(Admitted { server_name, sharing, cursor_finder, control, latency, pastes_on_demand, offers, serving }) => {
-            debug!("„{name}“ läuft unter {platform:?}");
+            debug!("'{name}' runs on {platform:?}");
             // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore,
             // ob sie Zeichen eingeben, die Sperrtasten setzen und dem Bildschirmschoner folgen können
             // und, sobald dort etwas im Vollbild läuft, den Spielemodus.
@@ -1562,7 +1562,7 @@ async fn handle_connection(
             Ok(Some(Control::Usage(report))) => {
                 let _ = tx.send(NetEvent::Usage { name: name.clone(), id, report });
             }
-            Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht"),
+            Ok(Some(other)) => debug!(?other, "unexpected control message"),
             Ok(None) | Err(_) => break,
         }
     }
@@ -1582,12 +1582,12 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(3);
 async fn receive_hello(conn: &Connection) -> Result<(SendStream, RecvStream, Control)> {
     let receive = async {
         let (send, mut recv) = conn.accept_bi().await?;
-        let hello = read_frame_up_to(&mut recv, HELLO_MAX).await?.context("Control-Stream ohne Nachricht beendet")?;
+        let hello = read_frame_up_to(&mut recv, HELLO_MAX).await?.context("control stream ended without a message")?;
         anyhow::Ok((send, recv, hello))
     };
     tokio::time::timeout(HELLO_TIMEOUT, receive)
         .await
-        .map_err(|_| anyhow!("nichts binnen {} s nach dem Handshake", HELLO_TIMEOUT.as_secs()))?
+        .map_err(|_| anyhow!("nothing received within {} s after the handshake", HELLO_TIMEOUT.as_secs()))?
 }
 
 /// Schickt dem Client nach dem `Welcome` seine Rechte, den Cursor-Finder (diesen nur, wenn er
@@ -1614,7 +1614,7 @@ async fn send_control(
     loop {
         for message in messages.drain(..) {
             if let Err(e) = write_frame(&mut control, &message).await {
-                return debug!("Control-Nachricht an „{name}“ nicht gesendet: {e}");
+                return debug!("failed to send control message to '{name}': {e}");
             }
         }
         // Endet, sobald der Client getrennt ist (bzw. der Server beendet)
@@ -1647,7 +1647,7 @@ fn cancel_forbidden(transfers: &Transfers, name: &str, sharing: Sharing) {
     for (_, direction, kind) in forbidden.into_iter().filter(|(allowed, ..)| !allowed) {
         let cancelled = transfers.cancel_with(name, direction, kind);
         if cancelled > 0 {
-            info!("{cancelled} laufende Übertragung(en) mit „{name}“ abgebrochen: nicht mehr erlaubt");
+            info!("cancelled {cancelled} running transfer(s) with '{name}': no longer allowed");
         }
     }
 }
@@ -1656,7 +1656,7 @@ fn cancel_forbidden(transfers: &Transfers, name: &str, sharing: Sharing) {
 /// hört beim nächsten Schreiben auf).
 fn refuse(stream: &mut RecvStream, what: &str) -> anyhow::Error {
     let _ = stream.stop(0u32.into());
-    anyhow!("{what} nicht erlaubt")
+    anyhow!("{what} not allowed")
 }
 
 /// Streams vom Client: Zwischenablage (Inhalte und kopierte Dateien) und Drag & Drop zum Server.
@@ -1680,7 +1680,7 @@ async fn receive_client_streams(
                         let rights = *sharing.borrow();
                         let allowed = Allowed { clipboard: rights.clipboard.from_client(), files: rights.files.from_client() };
                         if matches!(message, ClipboardMsg::Files { .. } | ClipboardMsg::FilesOnDemand { .. }) && !allowed.files {
-                            info!("kopierte Dateien von „{name}“ abgewiesen: nicht erlaubt");
+                            info!("copied files from '{name}' refused: not allowed");
                         }
                         match rights::message(message, allowed) {
                             Some(ClipboardMsg::Data(data)) => {
@@ -1692,13 +1692,13 @@ async fn receive_client_streams(
                             Some(ClipboardMsg::FilesOnDemand { transfer, entries, data }) => {
                                 let _ = tx.send(NetEvent::ClipboardFilesOnDemand { name, id, transfer, entries, data });
                             }
-                            None if !allowed.clipboard => info!("Zwischenablage von „{name}“ abgewiesen: nicht erlaubt"),
+                            None if !allowed.clipboard => info!("clipboard from '{name}' refused: not allowed"),
                             None => {}
                         }
                     }
                     StreamKind::ClipboardFile => {
                         if !sharing.borrow().files.from_client() {
-                            return Err(refuse(&mut stream, "kopierte Datei"));
+                            return Err(refuse(&mut stream, "copied file"));
                         }
                         let outcome = files::receive_file(&mut stream, &stagings.clipboard, &stagings.transfers).await?;
                         let _ = tx.send(NetEvent::ClipboardFile { name, id, outcome });
@@ -1707,7 +1707,7 @@ async fn receive_client_streams(
                         if let Some(DragMessage::Offer { probe, transfer, mut entries }) = read_frame(&mut stream).await? {
                             if !entries.is_empty() && !sharing.borrow().drag.from_client() {
                                 // Wie „keine Dateien“: Der Server wechselt nicht und nimmt nichts an.
-                                info!("gezogene Dateien von „{name}“ abgewiesen: nicht erlaubt");
+                                info!("dragged files from '{name}' refused: not allowed");
                                 entries.clear();
                             }
                             let _ = tx.send(NetEvent::DragOffer { name, id, probe, transfer, entries });
@@ -1715,18 +1715,18 @@ async fn receive_client_streams(
                     }
                     StreamKind::File => {
                         if !sharing.borrow().drag.from_client() {
-                            return Err(refuse(&mut stream, "gezogene Datei"));
+                            return Err(refuse(&mut stream, "dragged file"));
                         }
                         let outcome = files::receive_file(&mut stream, &stagings.drag, &stagings.transfers).await?;
                         let _ = tx.send(NetEvent::DragFile { name, id, outcome });
                     }
-                    other => bail!("Client darf keine Streams vom Typ {other:?} öffnen"),
+                    other => bail!("client may not open streams of type {other:?}"),
                 }
                 Ok(())
             }
             .await;
             if let Err(e) = result {
-                debug!("Stream vom Client verworfen: {e:#}");
+                debug!("stream from client discarded: {e:#}");
             }
         });
     }

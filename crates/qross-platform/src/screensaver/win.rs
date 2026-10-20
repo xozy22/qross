@@ -92,7 +92,7 @@ pub fn start() -> Outcome {
         return Outcome::Unchanged;
     }
     if unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0 {
-        return Outcome::Unsupported("in einer Remotedesktop-Sitzung");
+        return Outcome::Unsupported("in a Remote Desktop session");
     }
     if !configured() {
         return Outcome::NotConfigured;
@@ -107,7 +107,7 @@ pub fn start() -> Outcome {
     if wait_for(START_TIMEOUT, running) {
         Outcome::Started
     } else {
-        Outcome::Failed("Windows hat ihn nicht gestartet".into())
+        Outcome::Failed("Windows did not start it".into())
     }
 }
 
@@ -126,14 +126,14 @@ pub fn stop() -> Outcome {
             },
         };
         if unsafe { SendInput(1, &input, size_of::<INPUT>() as i32) } == 0 {
-            return Outcome::Failed("Eingabe kommt nicht an (Rechner gesperrt?)".into());
+            return Outcome::Failed("input does not get through (computer locked?)".into());
         }
         std::thread::sleep(WIGGLE_GAP);
     }
     if wait_for(STOP_TIMEOUT, || !running()) {
         Outcome::Stopped
     } else {
-        Outcome::Failed("läuft weiter (mit Anmeldung gesichert?)".into())
+        Outcome::Failed("still running (password-protected?)".into())
     }
 }
 

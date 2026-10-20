@@ -26,7 +26,7 @@ use crate::{Capture, Clipboard, FinderOverlay, Injector};
 
 pub(crate) fn connect() -> Result<(RustConnection, Window)> {
     let (conn, screen) = x11rb::connect(None)
-        .context("keine Verbindung zum X-Server – ist DISPLAY gesetzt?")?;
+        .context("no connection to the X server (is DISPLAY set?)")?;
     let root = conn.setup().roots[screen].root;
     Ok((conn, root))
 }

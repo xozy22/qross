@@ -1,6 +1,7 @@
 // Hilfen
 
 import { $, state } from "./core.js";
+import { t } from "./i18n.js";
 
 export const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -174,8 +175,8 @@ export function store(key, value) {
 export async function copy(text) {
   try {
     await navigator.clipboard.writeText(text);
-    toast(`„${text}“ kopiert`);
+    toast(t("util.copied", { text }));
   } catch {
-    toast("Kopieren ist hier nicht möglich. Bitte den Text markieren.", "error");
+    toast(t("util.copyFailed"), "error");
   }
 }

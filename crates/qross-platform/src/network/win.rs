@@ -198,7 +198,7 @@ fn network_names() -> HashMap<String, String> {
             Ok(())
         })();
         if let Err(e) = result {
-            tracing::debug!("Netzwerkliste nicht lesbar: {e}");
+            tracing::debug!("cannot read the network list: {e}");
         }
         if initialized {
             CoUninitialize();

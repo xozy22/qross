@@ -20,16 +20,17 @@ use crate::config::ServerFile;
 /// So lange wird im LAN auf Antworten von Servern gewartet
 const DISCOVERY_WAIT: Duration = Duration::from_millis(1200);
 
+// Die Doc-Kommentare von `Cli` und `Command` sind die Hilfetexte der Kommandozeile und deshalb englisch.
 #[derive(Parser)]
-#[command(name = "qross", version, about = "Maus und Tastatur über mehrere Rechner teilen")]
+#[command(name = "qross", version, about = "Share mouse and keyboard across several computers")]
 struct Cli {
-    /// Verzeichnis für Identität und Vertrauenslisten (Standard: %APPDATA%\Qross)
+    /// Directory for the identity and trust lists (default: %APPDATA%\Qross)
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
-    /// Log in diese Datei schreiben statt auf die Konsole (z. B. beim Start als geplante Aufgabe)
+    /// Write the log to this file instead of the console (e.g. when started as a scheduled task)
     #[arg(long, global = true)]
     log_file: Option<PathBuf>,
-    /// Ausführliches Log (überschreibbar per RUST_LOG)
+    /// Verbose log (can be overridden with RUST_LOG)
     #[arg(long, short, global = true)]
     verbose: bool,
     #[command(subcommand)]
@@ -38,39 +39,39 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Server starten – auf dem Rechner, an dem Maus und Tastatur hängen
+    /// Start the server – on the computer that mouse and keyboard are connected to
     Server {
         #[arg(long, short, default_value = "qross.toml")]
         config: PathBuf,
     },
-    /// Diesen Rechner als Client mit einem Server verbinden
+    /// Connect this computer to a server as a client
     Client {
-        /// Server-Adresse: Rechnername, host:port oder IP. Ohne Angabe wird im LAN gesucht.
+        /// Server address: host name, host:port or IP. Without it, the LAN is searched.
         server: Option<String>,
-        /// Name dieses Rechners im Layout des Servers (Standard: Rechnername)
+        /// Name of this computer in the server's layout (default: host name)
         #[arg(long)]
         name: Option<String>,
-        /// Fingerprint des Servers fest vorgeben, statt ihn beim ersten Kontakt zu speichern
+        /// Pin the server's fingerprint instead of saving it on first contact
         #[arg(long)]
         server_fingerprint: Option<Fingerprint>,
-        /// Kopierte Dateien bis zu dieser Gesamtgröße in MB zum Server mitgeben (0 = nie)
+        /// Send copied files to the server up to this total size in MB (0 = never)
         #[arg(long, value_name = "MB", default_value_t = config::default_max_file_mb())]
         clipboard_max_mb: u64,
-        /// Inhalte, die ein Passwortmanager als vertraulich markiert, trotzdem zum Server mitgeben
+        /// Send content that a password manager marks as confidential to the server anyway
         #[arg(long)]
         share_concealed: bool,
-        /// Eingaben nur protokollieren statt ausführen (Test auf einem einzigen Rechner)
+        /// Only log input instead of performing it (for testing on a single computer)
         #[arg(long)]
         dry_run: bool,
-        /// Spielemodus aus: dem Server nie melden, dass hier ein Vollbildprogramm läuft
+        /// Game mode off: never tell the server that a full-screen program is running here
         #[arg(long)]
         no_game_mode: bool,
     },
-    /// Qross-Server im LAN suchen
+    /// Search the LAN for Qross servers
     Discover,
-    /// Fingerprint dieses Rechners anzeigen
+    /// Show the fingerprint of this computer
     Fingerprint,
-    /// Einen Client auf diesem Server freigeben
+    /// Trust a client on this server
     Trust { name: String, fingerprint: Fingerprint },
 }
 
@@ -87,7 +88,7 @@ async fn main() -> Result<()> {
                 .create(true)
                 .append(true)
                 .open(path)
-                .with_context(|| format!("Log-Datei {} öffnen", path.display()))?;
+                .with_context(|| format!("failed to open log file {}", path.display()))?;
             logging.with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
         }
         None => logging.init(),
@@ -95,7 +96,7 @@ async fn main() -> Result<()> {
 
     let data_dir = match cli.data_dir {
         Some(dir) => dir,
-        None => dirs::config_dir().context("kein Konfigurationsverzeichnis gefunden")?.join("Qross"),
+        None => dirs::config_dir().context("no configuration directory found")?.join("Qross"),
     };
     // Dort merkt sich Qross unter Wayland die Freigaben der Desktop-Portale
     qross_platform::set_data_dir(&data_dir);
@@ -119,7 +120,7 @@ async fn main() -> Result<()> {
         Command::Discover => {
             let servers = discovery::discover(DISCOVERY_WAIT).await?;
             if servers.is_empty() {
-                println!("Kein Qross-Server gefunden.");
+                println!("No Qross server found.");
             }
             for s in servers {
                 println!("{:<20} {:<22} {:?}  {}", s.name, s.addr, s.platform, s.fingerprint);
@@ -133,7 +134,7 @@ async fn main() -> Result<()> {
         Command::Trust { name, fingerprint } => {
             let path = data_dir.join(TRUSTED_CLIENTS_FILE);
             TrustStore::load(&path)?.trust(&name, &fingerprint)?;
-            println!("„{name}“ ist freigegeben ({}).", path.display());
+            println!("'{name}' is now trusted ({}).", path.display());
             Ok(())
         }
     }
@@ -144,10 +145,10 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     let name = file.name.unwrap_or_else(hostname);
     let layout = Layout::from_links(&file.links)?;
     if !layout.contains(&name) {
-        warn!("„{name}“ kommt in den links der Konfiguration nicht vor – der Cursor kann nirgendwohin wechseln");
+        warn!("'{name}' does not appear in the links of the configuration – the cursor cannot switch anywhere");
     }
     let identity = Identity::load_or_create(data_dir)?;
-    info!("Fingerprint dieses Servers: {}", identity.fingerprint());
+    info!("fingerprint of this server: {}", identity.fingerprint());
     let trust = TrustStore::load(&data_dir.join(TRUSTED_CLIENTS_FILE))?;
 
     qross_platform::init_process();
@@ -155,28 +156,28 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     let _responsive = qross_platform::keep_responsive();
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
     let capture = qross_platform::start_capture(events)?;
-    info!("Notausgang: Strg+Alt+Shift+Esc holt Maus und Tastatur sofort zurück");
+    info!("emergency exit: Ctrl+Alt+Shift+Esc brings mouse and keyboard back immediately");
     for (hotkey, target) in file.keys.config()?.options.switch {
-        info!("Kürzel: {} wechselt {}", hotkey.label(cfg!(target_os = "macos")), target.label());
+        info!("shortcut: {} switches {}", hotkey.label(cfg!(target_os = "macos")), target.label());
     }
     if let Some(lock) = file.keys.config()?.options.lock {
-        info!("Fang-Taste: {} hält den Cursor auf dem aktuellen Bildschirm fest", lock.label(cfg!(target_os = "macos")));
+        info!("lock key: {} keeps the cursor on the current screen", lock.label(cfg!(target_os = "macos")));
     }
     if file.game.enabled {
-        info!("Spielemodus: Bei Vollbildprogrammen bleibt der Cursor auf dem Rechner, auf dem sie laufen");
+        info!("game mode: with full-screen programs, the cursor stays on the computer they run on");
     }
     let finder = qross_platform::finder_overlay();
     if file.finder.style().is_on() && finder.is_none() {
-        info!("Cursor-Finder: hier nicht möglich (Wayland), Clients zeigen ihn trotzdem");
+        info!("cursor finder: not available here (Wayland), clients show it anyway");
     }
     match (file.screensaver.sync, file.screensaver.lock_clients) {
-        (true, false) => info!("Bildschirmschoner: Clients starten und beenden ihren mit diesem"),
-        (true, true) => info!("Bildschirmschoner: Clients sperren sich, wenn er hier beginnt"),
+        (true, false) => info!("screen saver: clients start and stop theirs along with this one"),
+        (true, true) => info!("screen saver: clients lock themselves when it starts here"),
         (false, _) => {}
     }
     let sharing = file.sharing.rules();
     if sharing.default != qross_core::sharing::Sharing::ALL {
-        info!("Rechte für Rechner ohne eigenen Eintrag: {}", qross_core::sharing::describe(sharing.default));
+        info!("permissions for computers without their own entry: {}", qross_core::sharing::describe(sharing.default));
     }
 
     let server = Server::bind(ServerConfig { name, listen: file.listen, layout }, &identity, trust)?
@@ -204,7 +205,7 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     tokio::select! {
         result = server.run(platform) => result,
         _ = tokio::signal::ctrl_c() => {
-            info!("beendet");
+            info!("stopped");
             Ok(())
         }
     }
@@ -213,15 +214,15 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
 async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool, game_mode: bool) -> Result<()> {
     let identity = Identity::load_or_create(data_dir)?;
     let fingerprint = identity.fingerprint();
-    info!("Dieser Rechner: „{}“, Fingerprint {fingerprint}", config.name);
-    info!("Freigabe auf dem Server (einmalig): qross trust {} {fingerprint}", config.name);
+    info!("this computer: '{}', fingerprint {fingerprint}", config.name);
+    info!("to approve this computer on the server (once): qross trust {} {fingerprint}", config.name);
     let trust = TrustStore::load(&data_dir.join(KNOWN_SERVERS_FILE))?;
 
     qross_platform::init_process();
     // Bis zum Ende des Laufs: Das System bremst den Client nicht aus (macOS: App Nap aus)
     let _responsive = qross_platform::keep_responsive();
     let platform = if dry_run {
-        info!("Dry-Run: Eingaben werden nur protokolliert");
+        info!("dry run: input is only logged");
         ClientPlatform {
             injector: Box::new(LogInjector),
             clipboard: Box::new(MemoryClipboard::default()),
@@ -243,7 +244,7 @@ async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool, game_m
     tokio::select! {
         result = client::run(config, identity, trust, platform) => result,
         _ = tokio::signal::ctrl_c() => {
-            info!("beendet");
+            info!("stopped");
             Ok(())
         }
     }
@@ -251,19 +252,20 @@ async fn run_client(data_dir: &Path, config: ClientConfig, dry_run: bool, game_m
 
 /// Genau einen Server im LAN finden, sonst mit Hinweis abbrechen.
 async fn find_server() -> Result<String> {
-    info!("suche Qross-Server im LAN …");
+    info!("searching the LAN for Qross servers …");
     let servers = discovery::discover(DISCOVERY_WAIT).await?;
     match servers.as_slice() {
         [server] => {
-            info!("gefunden: „{}“ unter {}", server.name, server.addr);
+            info!("found '{}' at {}", server.name, server.addr);
             Ok(server.addr.to_string())
         }
         [] => bail!(
-            "kein Qross-Server im LAN gefunden – Adresse angeben (qross client <server>) oder              prüfen, ob die Firewall des Servers UDP 24900–24901 erlaubt"
+            "no Qross server found in the LAN – specify its address (qross client <server>) or check that the \
+             server's firewall allows UDP 24900–24901"
         ),
         many => {
-            let list: Vec<String> = many.iter().map(|s| format!("„{}“ ({})", s.name, s.addr)).collect();
-            bail!("mehrere Server gefunden: {} – bitte einen angeben", list.join(", "))
+            let list: Vec<String> = many.iter().map(|s| format!("'{}' ({})", s.name, s.addr)).collect();
+            bail!("several servers found: {} – please specify one", list.join(", "))
         }
     }
 }

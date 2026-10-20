@@ -92,7 +92,7 @@ pub struct Cancelled {
 
 impl fmt::Display for Cancelled {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(if self.by_peer { "von der Gegenstelle abgebrochen" } else { "abgebrochen" })
+        f.write_str(if self.by_peer { "cancelled by the peer" } else { "cancelled" })
     }
 }
 
@@ -337,7 +337,7 @@ impl Transfers {
             entry.finish(Phase::Cancelled { by_peer: false });
             entry.cancel.clone()
         };
-        info!("Übertragung {transfer} abgebrochen");
+        info!("transfer {transfer} cancelled");
         self.0.wake.notify_one();
         if let Some(cancel) = cancel {
             cancel();

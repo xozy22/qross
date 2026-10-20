@@ -1,6 +1,7 @@
 // Client-Ansicht: Status, Verbindungsqualität, eingestellter Server, Serverwahl
 
 import { $, PLATFORMS, state } from "./core.js";
+import { t } from "./i18n.js";
 import { el } from "./util.js";
 import { renderClientSharing } from "./sharing.js";
 import { renderFinder } from "./discovery.js";
@@ -33,21 +34,23 @@ export function renderClient() {
   visual.dataset.state = phase;
   visual.dataset.cursor = connected && s.cursor_here ? "here" : "away";
   const found = state.found?.find((f) => f.address === c.address.trim());
-  $("#visualServer").textContent = (connected && s.server_name) || found?.name || c.address || "Server";
-  $("#visualClient").textContent = c.name || state.hostname || "Dieser Rechner";
+  $("#visualServer").textContent = (connected && s.server_name) || found?.name || c.address || t("clientView.server");
+  $("#visualClient").textContent = c.name || state.hostname || t("common.thisComputer");
 
   // Status: was gerade gilt; „Verbunden mit …“ steht schon in der Kopfzeile
   $("#clientStatus").dataset.phase = phase;
-  const server = `„${s.server_name}“`;
+  const server = s.server_name;
   // Scheitern die Versuche, bleibt der Grund stehen, statt mit „Verbinde …“ abzuwechseln.
-  const retry = s.retry_reason ? `${s.retry_reason.charAt(0).toUpperCase()}${s.retry_reason.slice(1)}. Qross versucht es weiter.` : null;
+  const retry = s.retry_reason
+    ? t("clientView.retry", { reason: `${s.retry_reason.charAt(0).toUpperCase()}${s.retry_reason.slice(1)}` })
+    : null;
   const [headline, message] = {
-    stopped: ["Nicht verbunden", "Wähl unten einen gefundenen Server oder gib seine Adresse ein."],
-    connecting: retry ? ["Server nicht erreichbar", retry] : ["Suche den Server …", s.message],
+    stopped: [t("clientView.notConnected"), t("clientView.stoppedHint")],
+    connecting: retry ? [t("clientView.unreachable"), retry] : [t("clientView.searching"), s.message],
     connected: s.cursor_here
-      ? ["Der Cursor ist hier", `Zurück zu ${server} geht es über den Bildschirmrand.`]
-      : [`Der Cursor ist auf ${server}`, "Schieb die Maus dort über den Bildschirmrand, um hierher zu wechseln."],
-    error: ["Verbindung fehlgeschlagen", s.message],
+      ? [t("clientView.cursorHere"), t("clientView.backTo", { server })]
+      : [t("clientView.cursorOn", { server }), t("clientView.moveHere")],
+    error: [t("clientView.failed"), s.message],
   }[phase];
   $("#clientHeadline").textContent = headline;
   $("#clientMessage").textContent = message;
@@ -97,13 +100,13 @@ function renderServerCard(phase) {
   const name = (phase === "connected" && s.server_name) || found?.name || address;
   const os = found ? PLATFORMS[found.platform] || PLATFORMS.other : null;
   $("#serverCardOs").textContent = os ? os.short : "?";
-  $("#serverCardOs").title = os ? os.label : "System unbekannt";
+  $("#serverCardOs").title = os ? os.label : t("clientView.osUnknown");
   $("#serverCardName").textContent = name;
   const meta = [address !== name ? address : null, os?.label].filter(Boolean).join(" · ");
   const extra = found?.trust === "mismatch"
-    ? el("span", { class: "warn", text: "Fingerprint weicht vom gespeicherten ab" })
+    ? el("span", { class: "warn", text: t("discovery.fingerprintMismatch") })
     : found?.swaps_modifiers
-      ? el("span", { class: "swap", text: "Strg und Cmd werden automatisch getauscht" })
+      ? el("span", { class: "swap", text: t("discovery.swapsModifiers") })
       : null;
-  $("#serverCardMeta").replaceChildren(meta || (phase === "connected" ? "verbunden" : "noch nicht verbunden"), extra ? " · " : "", extra ?? "");
+  $("#serverCardMeta").replaceChildren(meta || (phase === "connected" ? t("clients.connected") : t("clientView.notYetConnected")), extra ? " · " : "", extra ?? "");
 }

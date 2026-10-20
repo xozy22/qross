@@ -16,11 +16,11 @@ fn main() -> anyhow::Result<()> {
     qross_platform::init_process();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(overlay) = qross_platform::finder_overlay() else {
-        anyhow::bail!("Cursor-Finder gibt es hier nicht (Wayland?)");
+        anyhow::bail!("no cursor finder here (Wayland?)");
     };
     let game = qross_platform::game_state();
     if game.is_active() {
-        println!("Im Vordergrund läuft etwas im Vollbild ({game:?}) – die Anzeige bleibt dann aus");
+        println!("Something is running full screen in the foreground ({game:?}); nothing will be shown");
     }
     if args.first().map(String::as_str) == Some("drag") {
         let names = if args.len() > 1 { args[1..].to_vec() } else { vec!["Bericht.pdf".to_owned()] };
@@ -28,8 +28,8 @@ fn main() -> anyhow::Result<()> {
             .iter()
             .map(|name| FileEntry { path: name.trim_end_matches('/').to_owned(), size: 3_141_592, is_dir: name.ends_with('/') })
             .collect();
-        let preview = DragPreview::of(&entries).expect("mindestens ein Name");
-        println!("zeige die Drag-Vorschau „{}“ ({}) – Maus bewegen, sie folgt dem Cursor", preview.title, preview.size);
+        let preview = DragPreview::of(&entries).expect("at least one name");
+        println!("Showing the drag preview '{}' ({}); move the mouse, it follows the cursor", preview.title, preview.size);
         overlay.show_drag(&preview);
         std::thread::sleep(Duration::from_secs(5));
         overlay.hide_drag();
@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     };
     let times: u32 = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(1);
     for _ in 0..times {
-        println!("zeige „{name}“");
+        println!("Showing '{name}'");
         overlay.show(style, &name);
         std::thread::sleep(qross_platform::finder::DURATION + Duration::from_millis(300));
     }

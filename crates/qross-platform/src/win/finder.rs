@@ -51,7 +51,7 @@ pub(crate) struct WinSurface {
 }
 
 pub(crate) fn surface() -> anyhow::Result<Box<dyn Surface>> {
-    anyhow::ensure!(class().is_some(), "Fensterklasse nicht registriert");
+    anyhow::ensure!(class().is_some(), "window class not registered");
     Ok(Box::new(WinSurface { hwnd: null_mut(), shown: false }))
 }
 
@@ -76,7 +76,7 @@ impl Surface for WinSurface {
                 )
             };
             if self.hwnd.is_null() {
-                tracing::warn!("Cursor-Finder: Fenster nicht angelegt ({})", std::io::Error::last_os_error());
+                tracing::warn!("cursor finder: failed to create the window ({})", std::io::Error::last_os_error());
             }
         }
         !self.hwnd.is_null()

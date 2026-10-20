@@ -32,7 +32,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 /// Ohne Dienst erst nach dieser Zeit wieder suchen
 const RETRY: Duration = Duration::from_secs(30);
 /// Unter Wayland gibt es ohne Dienst keinen Bildschirmschoner, den Qross erreicht
-const NO_SERVICE: &str = "ohne Bildschirmschoner-Dienst auf dem D-Bus";
+const NO_SERVICE: &str = "without a screen saver service on D-Bus";
 
 /// Der gefundene Dienst samt Verbindung
 #[derive(Clone)]
@@ -100,7 +100,7 @@ fn service() -> Option<Service> {
     })
     .flatten();
     if let Some(service) = &service {
-        tracing::debug!("Bildschirmschoner: {} auf dem Session-Bus", service.name);
+        tracing::debug!("screen saver: {} on the session bus", service.name);
     }
     found.0.clone_from(&service);
     service
@@ -172,7 +172,7 @@ pub fn start() -> Outcome {
         }
         return match service.set_active(true) {
             Some(true) => Outcome::Started,
-            _ => Outcome::Failed(format!("{} hat abgelehnt", service.name)),
+            _ => Outcome::Failed(format!("{} refused", service.name)),
         };
     }
     if !x11_session() {
@@ -187,7 +187,7 @@ pub fn start() -> Outcome {
     if x11_force(ScreenSaver::ACTIVE) {
         Outcome::Started
     } else {
-        Outcome::Failed("X-Server nicht erreichbar".into())
+        Outcome::Failed("X server not reachable".into())
     }
 }
 
@@ -200,7 +200,7 @@ pub fn stop() -> Outcome {
         if service.set_active(false) == Some(true) || service.invoke("SimulateUserActivity") {
             return Outcome::Stopped;
         }
-        return Outcome::Failed(format!("{} hat abgelehnt", service.name));
+        return Outcome::Failed(format!("{} refused", service.name));
     }
     if !x11_session() {
         return Outcome::Unsupported(NO_SERVICE);
@@ -211,7 +211,7 @@ pub fn stop() -> Outcome {
     if x11_force(ScreenSaver::RESET) {
         Outcome::Stopped
     } else {
-        Outcome::Failed("X-Server nicht erreichbar".into())
+        Outcome::Failed("X server not reachable".into())
     }
 }
 
@@ -222,6 +222,6 @@ pub fn lock() -> Outcome {
     }
     match service() {
         Some(service) if service.invoke("Lock") => Outcome::Locked,
-        _ => Outcome::Unsupported("ohne loginctl und Bildschirmschoner-Dienst"),
+        _ => Outcome::Unsupported("without loginctl or a screen saver service"),
     }
 }

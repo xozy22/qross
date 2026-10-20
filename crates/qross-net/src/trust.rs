@@ -37,8 +37,8 @@ impl TrustStore {
 
     pub fn load(path: &Path) -> Result<Self> {
         let peers = if path.exists() {
-            let text = fs::read_to_string(path).with_context(|| format!("{} lesen", path.display()))?;
-            toml::from_str::<File>(&text).with_context(|| format!("{} ist ungültig", path.display()))?.peers
+            let text = fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+            toml::from_str::<File>(&text).with_context(|| format!("{} is invalid", path.display()))?.peers
         } else {
             BTreeMap::new()
         };
@@ -73,7 +73,7 @@ impl TrustStore {
                 fs::create_dir_all(dir)?;
             }
             let text = toml::to_string(&File { peers: self.peers.clone() })?;
-            fs::write(path, text).with_context(|| format!("{} schreiben", path.display()))?;
+            fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))?;
         }
         Ok(())
     }
