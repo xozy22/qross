@@ -8,7 +8,7 @@ uses the section for its version.
 
 Sections: **New**, **Improved**, **Fixed**, **Important** (e.g. breaking changes).
 
-## [Unreleased]
+## [0.14.0] - 2026-10-20
 
 ### New
 
@@ -18,7 +18,7 @@ Sections: **New**, **Improved**, **Fixed**, **Important** (e.g. breaking changes
 - **CPU and memory of Qross per computer:** The details show how much processing time (percent of one core over the
   last 2 s) and memory Qross uses on a computer, including its web interface and all helper processes: for the
   server itself (“Qross here”), on the “Connection” tab of a client (“Qross there”) and in the client view. Qross
-  only measures while such a display is visible. Clients report their values from this version on.
+  only measures while such a display is visible. Clients report their values from Qross 0.14 on.
 
 ### Improved
 
@@ -554,6 +554,7 @@ Initial release.
 - Graphical interface with layout editor, approval dialog and tray icon.
 - Runs on Windows, Linux (X11) and macOS (Apple Silicon).
 
+[0.14.0]: https://github.com/xozy22/qross/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/xozy22/qross/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/xozy22/qross/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/xozy22/qross/compare/v0.12.0...v0.12.1
