@@ -120,7 +120,10 @@ pub async fn send_files(
                 bail!(Cancelled { by_peer: false });
             }
             let mut stream = conn.open_uni().await?;
-            stream.set_priority(BULK_PRIORITY)?;
+            // Jede Datei eine Stufe nach der vorigen: Gleich wichtige Streams teilt quinn reihum auf,
+            // dann würden die wartenden zugleich fertig, und bis die nächsten nachrücken, stünde die
+            // Leitung kurz still und bekäme danach einen Schwall. So geht die älteste zuerst hinaus.
+            stream.set_priority(BULK_PRIORITY.saturating_sub(index as i32))?;
             stream.write_all(&[kind as u8]).await.map_err(write_error)?;
             let header = FileHeader { transfer, index: index as u32, path: local.entry.path.clone(), size: local.entry.size };
             write_frame(&mut stream, &header).await.map_err(frame_write_error)?;
