@@ -8,6 +8,17 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.12.0] - 2026-10-20
+
+### Neu
+
+- **Fortschritt im Tray und in der Taskleiste:** Laufen Dateien hinüber oder herüber, zeigt das Tray-Symbol
+  unten einen Balken statt des Statuspunkts. Der Tooltip nennt Datei, Rechner, Prozent und Restzeit, etwa
+  „Film.mkv an „laptop“: 42 % · noch 21 s“, bei mehreren Übertragungen den Gesamtstand. Dazu füllt sich die
+  Schaltfläche in der Taskleiste (Windows, solange das Fenster offen oder minimiert ist) bzw. das Dock-Symbol
+  (macOS). Der Balken erscheint erst nach einer Sekunde, kleine Dateien blitzen nicht auf. Unter Linux zeigt
+  ihn das Tray-Symbol; Tooltips gibt es dort nicht.
+
 ## [0.11.0] - 2026-10-20
 
 ### Neu
@@ -473,6 +484,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.12.0]: https://github.com/xozy22/qross/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/xozy22/qross/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/xozy22/qross/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/xozy22/qross/compare/v0.8.3...v0.9.0
