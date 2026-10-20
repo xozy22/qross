@@ -755,6 +755,27 @@ select {
 
 .client-view { display: grid; align-content: start; justify-items: center; padding: 28px 24px 36px; }
 .client-col { width: 100%; max-width: 560px; display: grid; gap: 12px; }
+.client-side { display: grid; gap: 12px; align-content: start; min-width: 0; }
+/* Größere Fenster: Die Ansicht wächst mit. Verbunden und breit genug, steht die Verbindung mit
+   ihrem Verlauf links, Server und Serverwahl rechts; ohne Verbindung bleibt die Serverwahl allein
+   in der Mitte. */
+@media (min-width: 900px) {
+  .client-view { padding: 32px 32px 40px; }
+  .client-col { max-width: clamp(560px, 66vw, 860px); }
+}
+@media (min-width: 1180px) {
+  .client-col:has(> #clientConn:not([hidden])) {
+    max-width: 1320px;
+    grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr);
+    align-items: start;
+  }
+  .client-col:has(> #clientConn:not([hidden])) > :is(#clientStatus, #clientSharing) { grid-column: 1 / -1; }
+  .client-col:has(> #clientConn:not([hidden])) .qchart { height: 72px; }
+}
+/* Sehr große Fenster (etwa auf einem externen Monitor): alles etwas größer, nur wenn auch die Höhe reicht */
+@media (min-width: 1600px) and (min-height: 900px) { .client-col { zoom: 1.12; } }
+@media (min-width: 2000px) and (min-height: 1100px) { .client-col { zoom: 1.25; } }
+@media (min-width: 2500px) and (min-height: 1350px) { .client-col { zoom: 1.4; } }
 
 /* Status: kleine Skizze, Satz dazu, Latenz rechts */
 .client-status { display: flex; align-items: center; gap: 18px; padding: 16px 18px; }
