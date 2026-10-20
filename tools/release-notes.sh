@@ -5,7 +5,7 @@
 #   tools/release-notes.sh 0.2.1 [CHANGELOG.md] > notes.md
 set -euo pipefail
 
-version="${1:?Version fehlt, z. B. 0.2.1}"
+version="${1:?version missing, e.g. 0.2.1}"
 changelog="${2:-CHANGELOG.md}"
 
 # Umbrochene Listeneinträge (Folgezeilen mit zwei Leerzeichen) werden zu einer Zeile verbunden,
@@ -23,7 +23,7 @@ section="$(awk -v head="## [${version}]" '
 ' "$changelog" | sed '/./,$!d')"
 
 if [ -z "$section" ]; then
-  echo "${changelog} hat keinen Abschnitt für Version ${version}" >&2
+  echo "${changelog} has no section for version ${version}" >&2
   exit 1
 fi
 
@@ -37,16 +37,16 @@ printf '%s\n\n' "$section"
 cat <<'EOF'
 ### Downloads
 
-| System | App | Kommandozeile |
+| System | App | Command line |
 |---|---|---|
-| Windows x64 | `.msi` oder `-setup.exe` | `…-x86_64-pc-windows-msvc.zip` |
+| Windows x64 | `.msi` or `-setup.exe` | `…-x86_64-pc-windows-msvc.zip` |
 | macOS Apple Silicon | `.dmg` | `…-aarch64-apple-darwin.tar.gz` |
-| Linux x64 | `.AppImage` oder `.deb` | `…-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x64 | `.AppImage` or `.deb` | `…-x86_64-unknown-linux-gnu.tar.gz` |
 
-Die Programme sind nicht von Microsoft bzw. Apple beglaubigt, deshalb fragt das System beim ersten Start nach:
+The apps aren't signed by Microsoft or notarized by Apple, so the system asks for confirmation on first launch:
 
-- **Windows:** SmartScreen meldet sich, dann „Weitere Informationen → Trotzdem ausführen“.
-- **macOS:** Qross aus dem DMG in „Programme“ ziehen und öffnen. Meldet macOS, dass es die App nicht überprüfen kann, unter **Systemeinstellungen → Datenschutz & Sicherheit** ganz unten „Dennoch öffnen“ wählen und danach dort „Bedienungshilfen“ und „Eingabeüberwachung“ für Qross erlauben. Alternativ im Terminal: `xattr -dr com.apple.quarantine /Applications/Qross.app`. Kommen nach einem Update Maus oder Tastatur nicht an, zeigt Qross einen Hinweis; mehr unter [Rechte über Updates behalten](https://github.com/xozy22/qross#macos-rechte-über-updates-behalten).
+- **Windows:** SmartScreen appears; choose “More info → Run anyway”.
+- **macOS:** Drag Qross from the DMG into “Applications” and open it. If macOS says it can't verify the app, choose “Open Anyway” at the bottom of **System Settings → Privacy & Security**, then allow “Accessibility” and “Input Monitoring” for Qross there. Alternatively, in Terminal: `xattr -dr com.apple.quarantine /Applications/Qross.app`. If mouse or keyboard input doesn't arrive after an update, Qross shows a hint; more under [Keeping permissions across updates](https://github.com/xozy22/qross#macos-rechte-über-updates-behalten) (in German).
 
-Prüfsummen: `SHA256SUMS.txt` · Alle Versionen: [CHANGELOG.md](https://github.com/xozy22/qross/blob/main/CHANGELOG.md)
+Checksums: `SHA256SUMS.txt` · All versions: [CHANGELOG.md](https://github.com/xozy22/qross/blob/main/CHANGELOG.md)
 EOF
