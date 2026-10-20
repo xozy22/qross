@@ -36,19 +36,37 @@ Implementierung: `crates/qross-proto`.
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel`, im Zeichenmodus `Text`, `Shortcut`, `Locks` |
 | Datagramm | Server → Client | **nein** | `MouseMove`, im Spielemodus `MouseDelta` |
 | Clipboard (je Übertragung ein eigener Stream, Priorität −10) | ⇄ | ja | `Clipboard::Data { text, html, png }`, `Clipboard::Files { transfer, entries, data }` |
-| Datei für Drag & Drop (je Datei ein eigener Stream, Priorität −10) | Server → Client | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
+| Datei für Drag & Drop (je Datei ein eigener Stream, Priorität −10 und tiefer) | ⇄ | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
 | Datei aus der Zwischenablage (wie oben) | ⇄ | ja | `FileHeader`, Rohbytes, `FileTrailer` (SHA-256) |
 | Drag (je Nachricht ein eigener Stream, Priorität 10) | ⇄ | ja | `DragMessage::Query` / `Offer` |
 
 Jeder unidirektionale Stream beginnt mit einem Byte `StreamKind` (1 = Input, 2 = Clipboard, 3 = Datei für
 Drag & Drop, 4 = Datei aus der Zwischenablage, 5 = Drag-Nachricht). Dateien für Drag & Drop fließen seit
 Qross 0.4 in beide Richtungen.
-Durch die Trennung blockieren Clipboard und Dateien nie die Eingaben, das war im Benchmark der zweite
-große Schwachpunkt von Synergy.
+
+Durch die Trennung warten Eingaben nie hinter Clipboard und Dateien im selben Stream; das war im Benchmark der
+zweite große Schwachpunkt von Synergy. Ganz unabhängig sind sie trotzdem nicht: Alle Kanäle einer Verbindung
+teilen sich die Leitung, quinns Staukontrolle und sein Sendefenster (10 MB für alles, was geschrieben, aber noch
+nicht bestätigt ist). Deshalb, nach Qross 0.12.2 und ohne Änderung am Protokoll:
+
+- **Datei-Streams:** Höchstens drei fertig geschriebene Datei-Streams warten auf die Bestätigung der Gegenstelle
+  (`SendStream::stopped`), mit dem gerade geschriebenen vier. Ohne Grenze füllten viele Dateien das Sendefenster,
+  und ein Tastendruck wartete auf dem Input-Stream, bis wieder Platz war. Jede Datei bekommt eine Stufe niedrigere
+  Priorität als die vorige (−10, −11, …): So geht die älteste zuerst ganz hinaus. Liefen die wartenden reihum,
+  würden sie zugleich fertig, und die Leitung stünde kurz still und bekäme danach einen Schwall.
+- **Zwischenablage beim Wechsel:** Große Inhalte schickt der Server erst, wenn die Maus nach dem Wechsel ruht
+  (siehe [Zwischenablage](#zwischenablage)).
+- **Datagramme:** Die Warteschlange für ausgehende Datagramme fasst 4 KB, etwa 100 Mausbewegungen; kann nichts
+  hinaus, verdrängt die neueste die älteste. Mit quinns Standard (1 MB) lagen nach einem Hänger im WLAN über 20 s
+  Bewegungen bereit, und der Cursor fuhr die alte Bahn nach.
+
+Was bleibt: Füllt eine große Übertragung die Leitung, warten Eingaben in der Warteschlange am Engpass mit
+(Messung: [benchmark-ergebnisse.md](benchmark-ergebnisse.md), Abschnitt 3c).
 
 ## Kodierung
 
-- Stream-Frames: `u32` Länge (big-endian) + [postcard](https://postcard.jamesmunns.com/)-kodierte Nachricht, maximal 64 MiB
+- Stream-Frames: `u32` Länge (big-endian) + [postcard](https://postcard.jamesmunns.com/)-kodierte Nachricht, maximal 64 MiB;
+  das `Hello` höchstens 16 KiB (es kommt, bevor der Client geprüft ist)
 - Datagramme: reines postcard (`enum Datagram`), eine Mausbewegung braucht ca. 8–12 Bytes
 
 ## Ablauf
@@ -56,7 +74,9 @@ große Schwachpunkt von Synergy.
 0. Optional: Ohne angegebene Adresse sucht der Client per UDP-Broadcast (`Discovery::Probe`) auf jeder
    IPv4-Schnittstelle. Jeder Server antwortet mit Name, Port, Fingerprint und Betriebssystem. Die Antwort
    ist nur ein Vorschlag; vertraut wird erst beim Verbinden über den Fingerprint.
-1. Client öffnet den Control-Stream und sendet `Hello { version, name, screen, platform }`.
+1. Client öffnet den Control-Stream und sendet `Hello { version, name, screen, platform }`. Bis hierher kommt
+   jeder mit irgendeinem Zertifikat; deshalb nimmt der Server höchstens 16 KiB an und wartet höchstens 3 s nach
+   dem Handshake darauf (nach Qross 0.12.2), sonst trennt er.
 2. Server prüft Version, Namen (muss im Layout stehen) und Fingerprint und antwortet mit
    `Welcome { version, …, platform }` oder `Reject { reason }`. Ist derselbe Client (Name und Fingerprint)
    noch verbunden, ersetzt die neue Verbindung die alte; die alte schließt er mit dem Anwendungsfehlercode
@@ -79,7 +99,10 @@ große Schwachpunkt von Synergy.
 3. Der Server öffnet den Input-Stream.
 4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`, bei Clients mit
    `SyncsLocks` gleich gefolgt von `Locks`. Danach folgen `MouseMove`-Datagramme (im Spielemodus `MouseDelta`)
-   mit dieser `epoch` und steigender `seq`.
+   mit dieser `epoch` und steigender `seq`. Hat sich seine Zwischenablage geändert, schickt der Server sie mit
+   (siehe Zwischenablage). Muss ein Paket des Input-Streams nachgeschickt werden, kommen die ersten Datagramme
+   vor dem `Enter` an; der Client hebt das neueste auf und speist es gleich nach dem `Enter` ein (nach Qross 0.12.2;
+   bis dahin verwarf er sie).
 5. Verlässt der Cursor den Client: `Leave`. Der Client lässt alle Tasten los und schickt sein Clipboard,
    falls es sich geändert hat.
 
@@ -155,6 +178,12 @@ Der Empfänger stellt sie wieder gemeinsam bereit, sodass jedes Programm sein be
 Unter Windows sind das Unicode-Text, „HTML Format“, „PNG“ und zusätzlich ein DIB für ältere Programme.
 Lesen und PNG-Kodierung laufen in einem eigenen Thread, damit große Screenshots die Maus nicht ausbremsen.
 Bilder über der Frame-Grenze werden weggelassen, Text und HTML gehen trotzdem mit.
+
+Der Server schickt seine Zwischenablage beim `Enter`, wenn sie sich seit dem letzten Mal geändert hat, der
+Client seine beim `Leave`. Text geht sofort mit. Bilder, kopierte Dateien und alles über 64 KB schickt der
+Server erst, wenn die Maus nach dem Wechsel 200 ms ruht, höchstens 1 s danach (nach Qross 0.12.2): Genau beim
+Wechsel bewegt man drüben die Maus, und die ersten Bewegungen sollen die Leitung für sich haben. Kam inzwischen
+Neueres an den Client oder von ihm, entfällt der ältere Inhalt.
 
 ### Kopierte Dateien
 
@@ -428,8 +457,13 @@ Nachricht nicht lesen. Beide zeigen nichts und bleiben verbunden. Ältere Server
   Monitor des Clients. Ein verlorenes
   Datagramm wird vom nächsten überholt, Fehler summieren sich nicht auf. Nur im Spielemodus gehen
   Bewegungen relativ; ein verlorenes Delta fehlt dann wie bei einer echten Maus ein Ruckeln.
-- Der Client verwirft Datagramme mit falscher `epoch` (Nachzügler eines früheren Besuchs) und mit nicht
-  neuerer `seq` (Umsortierung im Netz). Der Vergleich ist wrap-around-sicher.
+- Der Client verwirft Datagramme eines früheren Besuchs (Nachzügler) und mit nicht neuerer `seq`
+  (Umsortierung im Netz). Von einem späteren Besuch, dessen `Enter` noch unterwegs ist, hebt er das neueste
+  auf (relative Bewegungen zusammengezählt) und speist es gleich nach dem `Enter` ein. Die Vergleiche von
+  `epoch` und `seq` sind wrap-around-sicher.
+- Warten im Einspeise-Thread des Clients schon mehrere Bewegungen, etwa weil nach einer Lücke im Netz viele auf
+  einmal ankamen, speist er von Positionen nur die letzte und relative Bewegungen zusammengezählt ein. Der Cursor
+  springt an die aktuelle Stelle, statt die alte Bahn nachzufahren.
 - `Button` enthält die Position. So landet ein Klick richtig, auch wenn das letzte Bewegungs-Datagramm fehlt.
 - Wechsel nur außerhalb der **Ecken-Totzone** (Standard 8 px) und optional erst nach einer
   **Wechselverzögerung**, also wenn eine bestimmte Zeit gegen die Kante gedrückt wird. Das verhindert
@@ -521,11 +555,15 @@ Sekunde auseinanderlaufen). Der Netzanteil einer Stichprobe ist T2 − T1 − θ
   bis zur Ereignisschleife des Servers (dafür müsste jede Erfassung selbst Zeitstempel setzen), außerdem alles nach
   dem Einspeisen bis zum Bildschirm. In der Oberfläche als Server zählt die Weitergabe der Erfassung an den
   laufenden Server mit, sie geschieht vor dem Abholen.
-- Bei zusammengefassten Mausbewegungen (mehrere warten schon) zählt die Zeit der ersten. Verlorene oder vom Client
-  verworfene Datagramme fehlen in Netz- und Client-Anteil, im Server-Anteil zählen sie mit.
+- Bei zusammengefassten Mausbewegungen (mehrere warten schon) zählt beim Server die Zeit der ersten; beim Client
+  gilt eine Bewegung als eingespeist, wenn die letzte der zusammengefassten eingespeist ist. Verlorene, vom Client
+  verworfene und vor ihrem `Enter` angekommene Datagramme fehlen in Netz- und Client-Anteil, im Server-Anteil
+  zählen sie mit.
 
-Messen auf einem Rechner ohne echte Erfassung und Einspeisung: `cargo run -p qross-net --example latency_probe`
-(Client im selben Prozess) bzw. mit `server` und `qross client … --dry-run` in einem zweiten Fenster.
+Messen auf einem Rechner ohne echte Erfassung und Einspeisung:
+`cargo run --release -p qross-net --example latency_probe` (Client im selben Prozess, zusätzlich von Ende zu
+Ende mit 99. Perzentil und Maximum; mit `files` gehen dabei kopierte Dateien über eine Leitung wie WLAN, mit
+`hang` hängt die Leitung zweimal 2 s) bzw. mit `server` und `qross client … --dry-run` in einem zweiten Fenster.
 
 **Kompatibilität:** Ein neuer Server meldet im `Welcome` die Version 11. Nur dann schickt der Client `Latency`;
 ältere Server bekommen die Nachricht nie (sie trennten bei unbekannten Control-Nachrichten). Das Ergebnis schickt
