@@ -8,6 +8,21 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [0.12.2] - 2026-10-20
+
+### Behoben
+
+- **Kopierter Text aus Chrome blieb auf dem Rechner:** Qross hielt unter Windows auch Inhalte zurück, die nur
+  aus dem Verlauf (Win+V) und der Cloud herausgehalten werden sollen. Chrome markiert so etwa Kopien aus einem
+  Inkognito-Fenster, auch eine einfache URL; im Protokoll stand „vertraulicher Inhalt (markiert mit
+  „CanIncludeInClipboardHistory“)“. Zurückgehalten wird jetzt nur noch, was Passwortmanager wie KeePass,
+  KeePassXC und 1Password eindeutig als vertraulich markieren.
+- **Sprung in die Bildmitte beim Wechsel:** Beim Wechsel auf einen Client parkt Qross den Windows-Cursor in der
+  Mitte. In der Millisekunde darum herum konnte eine Mausbewegung als Sprung um eine halbe Bildschirmbreite
+  gelten: Der Cursor kam sofort zurück (im Protokoll „größter Schritt 1909 px, nach 1,3 ms zurück auf dem
+  Server“) und landete auf dem Server in der Bildmitte statt an der Kante. Bewegungen um das Parken herum
+  rechnet Qross jetzt von dem Punkt aus, von dem Windows sie berechnet hat.
+
 ## [0.12.1] - 2026-10-20
 
 ### Behoben
@@ -494,6 +509,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.12.2]: https://github.com/xozy22/qross/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/xozy22/qross/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/xozy22/qross/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/xozy22/qross/compare/v0.10.0...v0.11.0
