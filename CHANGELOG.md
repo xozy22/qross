@@ -1,545 +1,541 @@
 # Changelog
 
-Alle nennenswerten Änderungen an Qross. Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
-die Versionen folgen [Semantic Versioning](https://semver.org/lang/de/).
+All notable changes to Qross. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
+versions follow [Semantic Versioning](https://semver.org/).
 
-Diese Datei ist die einzige Quelle für die Neuigkeiten: Die App zeigt sie unter „Neuigkeiten“ an, und
-jedes GitHub-Release übernimmt den Abschnitt seiner Version.
+This file is the single source of the release notes: the app shows it under “What's new”, and each GitHub release
+uses the section for its version.
 
-Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
+Sections: **New**, **Improved**, **Fixed**, **Important** (e.g. breaking changes).
 
 ## [0.13.0] - 2026-10-20
 
-### Neu
+### New
 
-- **Kopierte Dateien kommen unter Windows erst beim Einfügen:** Kopierst du am Mac (oder einem anderen Rechner)
-  Dateien und fügst sie am Windows-Rechner ein, liegen sie sofort in der Zwischenablage, übertragen wird aber
-  erst, wenn der Explorer sie einfügt. Damit fällt die Grenze von 1 GB weg, auch ein Film mit mehreren Gigabyte
-  lässt sich einfach einfügen, und was nie eingefügt wird, geht nie über die Leitung. Der Explorer zeigt dabei
-  seinen eigenen Fortschritt, Qross wie gewohnt seinen; Abbrechen geht im Explorer und in Qross auf beiden
-  Seiten. Beide Rechner brauchen dafür diese Version, sonst kommen kopierte Dateien wie bisher vorab. Programme,
-  die nur echte Dateien annehmen, bekommen so nichts; `QROSS_PASTE_ON_DEMAND=0` schaltet es dann ab. Unter macOS
-  und Linux bleibt es vorerst beim Übertragen vorab.
+- **On Windows, copied files only arrive when pasted:** If you copy files on a Mac (or another computer) and paste
+  them on the Windows computer, they're on the clipboard right away, but they're only transferred when
+  File Explorer pastes them. This removes the 1 GB limit: even a movie of several gigabytes can simply be pasted,
+  and whatever is never pasted never goes over the wire. Explorer shows its own progress, and Qross shows its own
+  as usual; canceling works in Explorer and in Qross on both sides. Both computers need this version; otherwise,
+  copied files arrive upfront as before. Programs that only accept real files get nothing this way; in that case,
+  `QROSS_PASTE_ON_DEMAND=0` turns it off. On macOS and Linux, files are still transferred upfront for now.
 
-### Verbessert
+### Improved
 
-- **Eingaben neben großen Übertragungen:** Liefen viele Dateien hinüber, konnte ein Tastendruck bis zu 2,4 s
-  warten, bis in der Verbindung wieder Platz war. Qross schickt Dateien jetzt nacheinander und lässt höchstens
-  drei unbestätigt: In der Messung warten Tasten und Mausbewegungen neben einer laufenden Übertragung höchstens
-  50 ms, 99 % unter 30 ms statt bis zu 2,2 s.
-- **Zwischenablage beim Wechsel:** Bilder, kopierte Dateien und andere große Inhalte gehen erst hinüber, wenn die
-  Maus nach dem Wechsel kurz ruht (spätestens nach 1 s), statt genau dann, wenn du drüben loslegst. Text geht
-  weiterhin sofort mit.
-- **Kein Nachfahren nach einem WLAN-Hänger:** Nach einem kurzen Funkloch fuhr der Cursor drüben die alte Bahn
-  nach (gemessen: rund 1700 veraltete Positionen nach 2 s). Jetzt steht er gleich dort, wo die Maus ist. Auch
-  Bewegungen, die kurz vor dem Wechsel ankommen, gehen nicht mehr verloren.
-- **Client-Ansicht wächst mit dem Fenster:** Bisher war sie höchstens 560 px breit. Jetzt wird sie mit dem
-  Fenster breiter, verbunden ab etwa 1180 px zweispaltig (links die Verbindung mit Verlauf, rechts Server und
-  Serverwahl), und in sehr großen Fenstern wird alles etwas größer.
-- **Robuster gegen fremde Geräte im Netz:** Die erste Nachricht einer neuen Verbindung darf vor der Prüfung
-  höchstens 16 KiB groß sein und muss binnen 3 s kommen. Bisher konnte jedes Gerät im LAN je Verbindung 64 MiB
-  Speicher belegen.
+- **Input during large transfers:** When many files were being sent over, a key press could wait up to 2.4 s until
+  there was room in the connection again. Qross now sends files one after another and leaves at most three
+  unacknowledged: in the measurement, keys and mouse movements during a running transfer wait at most 50 ms, 99% of
+  them under 30 ms, instead of up to 2.2 s.
+- **Clipboard when switching:** Images, copied files and other large content only go over once the mouse briefly
+  rests after the switch (after 1 s at the latest), instead of right when you get going on the other side. Text
+  still goes along immediately.
+- **No cursor replay after a Wi-Fi hiccup:** After a brief loss of signal, the cursor on the other side retraced
+  its old path (measured: around 1700 stale positions after 2 s). Now it's right where the mouse is. Movements that
+  arrive shortly before the switch are no longer lost either.
+- **Client view grows with the window:** Previously it was at most 560 px wide. Now it widens with the window,
+  switches to two columns from about 1180 px when connected (the connection with its history on the left, the
+  server and server selection on the right), and in very large windows everything gets a little bigger.
+- **More robust against untrusted devices on the network:** Before verification, the first message of a new
+  connection may be at most 16 KiB and must arrive within 3 s. Previously, any device on the LAN could tie up
+  64 MiB of memory per connection.
 
 ## [0.12.2] - 2026-10-20
 
-### Behoben
+### Fixed
 
-- **Kopierter Text aus Chrome blieb auf dem Rechner:** Qross hielt unter Windows auch Inhalte zurück, die nur
-  aus dem Verlauf (Win+V) und der Cloud herausgehalten werden sollen. Chrome markiert so etwa Kopien aus einem
-  Inkognito-Fenster, auch eine einfache URL; im Protokoll stand „vertraulicher Inhalt (markiert mit
-  „CanIncludeInClipboardHistory“)“. Zurückgehalten wird jetzt nur noch, was Passwortmanager wie KeePass,
-  KeePassXC und 1Password eindeutig als vertraulich markieren.
-- **Sprung in die Bildmitte beim Wechsel:** Beim Wechsel auf einen Client parkt Qross den Windows-Cursor in der
-  Mitte. In der Millisekunde darum herum konnte eine Mausbewegung als Sprung um eine halbe Bildschirmbreite
-  gelten: Der Cursor kam sofort zurück (im Protokoll „größter Schritt 1909 px, nach 1,3 ms zurück auf dem
-  Server“) und landete auf dem Server in der Bildmitte statt an der Kante. Bewegungen um das Parken herum
-  rechnet Qross jetzt von dem Punkt aus, von dem Windows sie berechnet hat.
+- **Text copied from Chrome stayed on the computer:** On Windows, Qross also withheld content that's only meant to
+  be kept out of the clipboard history (Win+V) and the cloud. Chrome, for example, marks copies from an Incognito
+  window this way, even a simple URL; the log said “confidential content (marked with
+  ‘CanIncludeInClipboardHistory’)”. Qross now only withholds what password managers like KeePass, KeePassXC and
+  1Password clearly mark as confidential.
+- **Jump to the center of the screen when switching:** When switching to a client, Qross parks the Windows cursor
+  in the center. In the millisecond around that, a mouse movement could count as a jump of half a screen width: the
+  cursor came right back (in the log: “largest step 1909 px, back on the server after 1.3 ms”) and landed in the
+  center of the server's screen instead of at the edge. Qross now calculates movements around the parking from the
+  point Windows calculated them from.
 
 ## [0.12.1] - 2026-10-20
 
-### Behoben
+### Fixed
 
-- **Kürzel aus einer einzelnen Zusatztaste:** War etwa „Strg links“ als Kürzel belegt, löste es schon beim
-  Drücken aus. Strg+C wechselte so sofort auf den anderen Rechner, mitten auf den Bildschirm, und das C
-  landete dort statt im Programm; kopiert wurde nichts. Eine Zusatztaste allein wirkt jetzt erst beim
-  Loslassen und nur, wenn dazwischen keine andere Taste kam: Strg+C bleibt Strg+C. Das gilt für Wechsel-Kürzel
-  und die Fang-Taste. Unter Windows öffnet ein so getipptes Win oder Alt kein Startmenü bzw. keine Menüleiste.
+- **Shortcuts made of a single modifier key:** If, for example, “Left Ctrl” was assigned as a shortcut, it
+  triggered as soon as it was pressed. Ctrl+C then immediately switched to the other computer, into the middle of
+  the screen, and the C ended up there instead of in the program; nothing was copied. A modifier key on its own now
+  only takes effect when released, and only if no other key was pressed in between: Ctrl+C stays Ctrl+C. This
+  applies to switching shortcuts and the cursor lock key. On Windows, a Win or Alt key tapped this way doesn't open
+  the Start menu or the menu bar.
 
 ## [0.12.0] - 2026-10-20
 
-### Neu
+### New
 
-- **Fortschritt im Tray und in der Taskleiste:** Laufen Dateien hinüber oder herüber, zeigt das Tray-Symbol
-  unten einen Balken statt des Statuspunkts. Der Tooltip nennt Datei, Rechner, Prozent und Restzeit, etwa
-  „Film.mkv an „laptop“: 42 % · noch 21 s“, bei mehreren Übertragungen den Gesamtstand. Dazu füllt sich die
-  Schaltfläche in der Taskleiste (Windows, solange das Fenster offen oder minimiert ist) bzw. das Dock-Symbol
-  (macOS). Der Balken erscheint erst nach einer Sekunde, kleine Dateien blitzen nicht auf. Unter Linux zeigt
-  ihn das Tray-Symbol; Tooltips gibt es dort nicht.
+- **Progress in the tray and the taskbar:** While files are being sent or received, the tray icon shows a bar at
+  the bottom instead of the status dot. The tooltip names the file, computer, percentage and time remaining, e.g.
+  “Film.mkv to ‘laptop’: 42% · 21 s left”, and for multiple transfers the overall progress. In addition, the
+  taskbar button (Windows, while the window is open or minimized) or the Dock icon (macOS) fills up. The bar only
+  appears after one second, so it doesn't flash for small files. On Linux, the tray icon shows it; there are no
+  tooltips there.
 
 ## [0.11.0] - 2026-10-20
 
-### Neu
+### New
 
-- **Eigene Titelleiste:** Minimieren, Maximieren und Schließen sitzen jetzt rechts in der Kopfzeile von Qross,
-  im selben Stil wie der Rest der Oberfläche, statt in der Leiste des Systems darüber. An der Kopfzeile lässt
-  sich das Fenster verschieben, ein Doppelklick maximiert es. Unter macOS bleiben die gewohnten Ampelknöpfe,
-  eingebettet in die Kopfzeile.
+- **Custom title bar:** Minimize, Maximize and Close now sit on the right of the Qross header, in the same style as
+  the rest of the interface, instead of in the system's bar above it. The window can be moved by dragging the
+  header, and a double-click maximizes it. On macOS, the familiar traffic light buttons remain, embedded in the
+  header.
 
-### Verbessert
+### Improved
 
-- **Windows: Ruhe im Hintergrund:** Liegt Qross im Tray oder ist das Fenster minimiert, ruht die Oberfläche
-  jetzt ganz. Bisher liefen ihre Animationen unsichtbar weiter, solange Server oder Client liefen, und kosteten
-  dauerhaft Rechenzeit: in der Messung rund 10 % eines Prozessorkerns, jetzt unter 0,5 %.
-- **Ruhe hinter Dialogen:** Hinter offenen Einstellungen, Neuigkeiten und Abfragen halten die Animationen der
-  Oberfläche an. Ohne Grafikkarte, etwa in einer VM oder über Remotedesktop, kostete der weichgezeichnete
-  Hintergrund sonst fast einen ganzen Prozessorkern.
-- **Weniger Arbeit bei jedem Wechsel:** Das Tray-Symbol ändert nur noch, was sich wirklich geändert hat, und
-  hält die Verbindung dabei nicht auf. Die Oberfläche baut sich höchstens einmal pro Bild neu auf und gar nicht,
-  solange das Fenster versteckt ist; beim Öffnen zeigt sie gleich den neuesten Stand.
-- **macOS: App Nap nur im Betrieb:** Qross schaltet App Nap nur noch ab, solange Server oder Client laufen.
-  Gestoppt darf macOS wieder sparen, das schont den Akku.
+- **Windows: quiet in the background:** When Qross is in the tray or the window is minimized, the interface now
+  rests completely. Previously, its animations kept running invisibly while the server or client was running,
+  constantly using CPU time: around 10% of a CPU core in the measurement, now under 0.5%.
+- **Quiet behind dialogs:** The interface's animations pause behind open settings, “What's new” and prompts.
+  Without a graphics card, for example in a VM or over Remote Desktop, the blurred background otherwise took almost
+  a whole CPU core.
+- **Less work on every switch:** The tray icon now only updates what has actually changed, without holding up the
+  connection. The interface redraws at most once per frame, and not at all while the window is hidden; when opened,
+  it shows the latest state right away.
+- **macOS: App Nap off only while running:** Qross now only turns off App Nap while the server or client is
+  running. When Qross is stopped, macOS may save power again, which is easier on the battery.
 
-### Behoben
+### Fixed
 
-- **Unruhige Kopfzeile ohne Server:** War der Server nicht erreichbar, sprang die Kopfzeile des Clients ständig
-  zwischen „Verbinde …“ und „keine Verbindung“ und verschob dabei ihre Aufteilung. Jetzt steht dort ruhig
-  „Server nicht erreichbar“, der Grund im Tooltip, bis die Verbindung steht; Tray und Client-Ansicht sagen
-  dasselbe.
+- **Restless header without a server:** If the server couldn't be reached, the client's header kept jumping between
+  “Connecting …” and “no connection”, rearranging itself each time. Now it calmly shows “Server unreachable”, with
+  the reason in the tooltip, until the connection is established; the tray and the client view say the same.
 
 ## [0.10.0] - 2026-10-19
 
-### Neu
+### New
 
-- **Drag-Vorschau am Cursor:** Ziehst du Dateien über die Kante auf einen anderen Rechner, hängt dort ein
-  Kärtchen am Cursor wie beim Ziehen auf dem eigenen: Symbol, Name der Datei (bei mehreren „3 Dateien“) und
-  Gesamtgröße. Es folgt dem Cursor, bis du loslässt, ohne Ablegen zurückgehst oder die Übertragung abgebrochen
-  wird; abgelegt wird wie bisher im Ordner unter dem Cursor. Funktioniert in beide Richtungen unter Windows,
-  macOS (in der App) und X11 mit Compositor, nicht über Programmen im Vollbild. Unter Wayland lassen sich keine
-  Fenster über andere Programme legen, dort bleibt es ohne Vorschau.
+- **Drag preview at the cursor:** When you drag files across the edge to another computer, a small card hangs from
+  the cursor there, just like when dragging on your own computer: icon, file name (“3 files” for several) and total
+  size. It follows the cursor until you release, go back without dropping, or the transfer is canceled; as before,
+  files are dropped into the folder under the cursor. Works in both directions on Windows, macOS (in the app) and
+  X11 with a compositor, but not over full-screen programs. On Wayland, no windows can be placed over other
+  programs, so there's no preview there.
 
 ## [0.9.0] - 2026-10-19
 
-### Verbessert
+### Improved
 
-- **Aufgeräumte Server-Ansicht:** Die Anordnung füllt die ganze Fläche. Die Seitenleiste zeigt nur noch die
-  Rechner und die Details des ausgewählten, in drei Reitern: Verbindung (Latenz, Verlauf, Verzögerung der
-  Eingabe), Rechte und Info mit Umbenennen und Entfernen. Ausgewählt wird per Klick in der Liste oder in der
-  Anordnung; der Server selbst zeigt dort Fläche, Port und Fingerprint. Bei mehreren Monitoren steht die Skizze
-  klein unter der Beschriftung statt dahinter.
-- **Eine Stelle für Verbindungsanfragen:** Eine Anfrage steht als schmale Zeile über den Rechnern. „Prüfen“
-  öffnet den Dialog mit dem Fingerprint, das × ignoriert sie.
-- **Einstellungen nach Geltung sortiert:** Oben die Bereiche „Server“ und „Client“ für das aktive Profil mit
-  allem, was bisher in der Hauptansicht stand: Name, Port, Auffindbarkeit, Ecken-Totzone, Verzögerung, Rechte
-  für neue Rechner, Fingerprints, Testmodus und die Konfiguration als Datei. Darunter, was für alle Profile gilt.
-- **Ruhigere Tastaturseite:** Die Kürzel stehen als Liste, jedes mit einem Menü für Ändern und Entfernen,
-  unbelegte mit „Belegen“. Standard und Aus der Fang-Taste liegen im selben Menü.
-- **Kompakte Client-Ansicht:** Oben der Status mit Latenz, darunter die Verbindungsqualität wie beim Server und
-  der eingestellte Server. Die Suche nach anderen Servern ist eingeklappt, solange eine Verbindung besteht; Name
-  und Testmodus stehen unter Einstellungen → Client.
-- **Kleinigkeiten:** Das Zahnrad für die Einstellungen sitzt rechts neben Start und Stopp. Lange Erklärungen
-  stehen hinter einem „?“.
+- **Tidier server view:** The layout fills the whole area. The sidebar now only shows the computers and the details
+  of the selected one, in three tabs: Connection (latency, history, input delay), Permissions, and Info with Rename
+  and Remove. You select a computer by clicking it in the list or in the layout; for the server itself, the details
+  show its area, port and fingerprint. With multiple monitors, the sketch sits small below the label instead of
+  behind it.
+- **One place for connection requests:** A request appears as a narrow row above the computers. “Review” opens the
+  dialog with the fingerprint, and the × ignores it.
+- **Settings sorted by scope:** At the top, the “Server” and “Client” sections for the active profile, with
+  everything that used to be in the main view: name, port, discoverability, corner dead zone, delay, permissions
+  for new computers, fingerprints, test mode and the configuration as a file. Below that, what applies to all
+  profiles.
+- **Calmer keyboard page:** The shortcuts are shown as a list, each with a menu for Change and Remove, and
+  unassigned ones with “Assign”. Reset to default and Turn off for the cursor lock key are in the same menu.
+- **Compact client view:** At the top, the status with latency; below it, the connection quality as on the server,
+  and the configured server. The search for other servers is collapsed while connected; name and test mode are
+  under Settings → Client.
+- **Small touches:** The settings gear sits to the right of Start and Stop. Long explanations are behind a “?”.
 
 ## [0.8.3] - 2026-10-19
 
-### Behoben
+### Fixed
 
-- **Haken am Rand des Windows-Servers beim schnellen Wechsel:** Zog man den Cursor zügig vom Windows-Server
-  auf einen Client, blieb er am Rand des Servers hängen, und zwar umso länger, je schneller man zog. Langsam
-  und auf dem Rückweg fiel nichts auf. Bei schneller Bewegung meldet Windows nicht, wo der Cursor steht,
-  sondern wohin er ohne Bildschirmrand käme, also einen Punkt hinter der Kante. Seit Qross mehrere Monitore
-  kennt (0.5.0), galt so eine Berührung nicht als Kante, und gewechselt wurde erst, wenn die Hand abbremste.
-  Jetzt zählt der Punkt auf dem Monitor. Die Änderungen dafür in 0.8.1 und 0.8.2 trafen nicht diese Ursache.
+- **Hitch at the edge of the Windows server when switching quickly:** If you moved the cursor swiftly from the
+  Windows server to a client, it got caught at the server's edge, and the faster you moved, the longer it stayed
+  there. Moving slowly or on the way back, nothing was noticeable. During fast movement, Windows doesn't report
+  where the cursor is, but where it would be without the screen edge, i.e. a point beyond the edge. Since Qross
+  became aware of multiple monitors (0.5.0), such a touch didn't count as the edge, and the switch only happened
+  once your hand slowed down. Now the point on the monitor counts. The changes made for this in 0.8.1 and 0.8.2
+  didn't address this cause.
 
-### Verbessert
+### Improved
 
-- **Protokoll jedes Wechsels:** Nach jedem Wechsel auf einen Client schreiben Server und Client je eine Zeile
-  ins Log: wie oft der Cursor gegen die Kante lief, ob die Bewegungen danach lückenlos ankamen und eingespeist
-  wurden und ob welche vor dem Betreten verloren gingen. Als Info erscheint sie nur, wenn etwas auffällt.
+- **A log entry for every switch:** After every switch to a client, the server and the client each write a line to
+  the log: how often the cursor ran against the edge, whether the movements afterward arrived and were injected
+  without gaps, and whether any were lost before the cursor entered. It only appears at info level when something
+  stands out.
 
 ## [0.8.2] - 2026-10-19
 
-### Behoben
+### Fixed
 
-- **Tastatur bei offenem Remotedesktop-Fenster:** War am Windows-Server ein Remotedesktop-Client im
-  Vordergrund, landeten die Tasten nach dem Wechsel auf einen Client weiter in der RDP-Sitzung, der Cursor
-  dagegen wanderte mit. Der RDP-Client hat einen eigenen Tastatur-Hook, und Windows fragte ihn vor dem von
-  Qross. Qross setzt seine Hooks jetzt bei jedem Wechsel neu und ist damit wieder zuerst an der Reihe. Das
-  hilft auch bei virtuellen Maschinen und Tastenkürzel-Werkzeugen mit eigenem Hook.
-- **Windows-Server: Wechsel ohne Warten auf den Mauszeiger:** Das Aus- und Einblenden des Mauszeigers hielt
-  die Weitergabe der Eingaben kurz auf. Es läuft jetzt nebenher.
+- **Keyboard with a Remote Desktop window open:** If a Remote Desktop client was in the foreground on the Windows
+  server, keys kept going to the RDP session after switching to a client, while the cursor did move over. The RDP
+  client has its own keyboard hook, and Windows asked it before the one from Qross. Qross now reinstalls its hooks
+  on every switch, which puts it first in line again. This also helps with virtual machines and keyboard shortcut
+  tools that have their own hook.
+- **Windows server: switching without waiting for the mouse pointer:** Hiding and showing the mouse pointer briefly
+  held up the forwarding of input. This now happens in parallel.
 
-### Verbessert
+### Improved
 
-- **Verzögerungen im Log:** Braucht eine Eingabe länger als 50 ms bis zum Client, schreibt der Server sie mit
-  ihren Teilen (Server, Netz, Client) ins Log, höchstens einmal je Sekunde. Hält ein Schritt am Server die
-  Weitergabe oder am Client das Einspeisen länger als 20 ms auf, steht auch das im Log. So lässt sich ein
-  Haken beim Wechsel einer Ursache zuordnen, etwa dem Stromsparmodus des WLAN.
+- **Delays in the log:** If an input takes longer than 50 ms to reach the client, the server writes it to the log
+  with its parts (server, network, client), at most once per second. If a step on the server holds up forwarding,
+  or one on the client holds up injection, for more than 20 ms, that's logged too. This way, a hitch when switching
+  can be traced to its cause, such as Wi-Fi power saving.
 
 ## [0.8.1] - 2026-10-19
 
-### Behoben
+### Fixed
 
-- **Hängen beim schnellen Wechsel auf einen Mac:** Zog man den Cursor zügig vom Server auf einen Mac, blieb
-  er dort kurz stehen; langsam und auf dem Rückweg fiel nichts auf. Seit 0.8.0 übernimmt der Mac beim Betreten
-  den Stand der Feststelltaste, und dafür baute Qross jedes Mal neu eine Verbindung zum Eingabesystem auf. So
-  lange warteten alle folgenden Mausbewegungen. Die Verbindung bleibt jetzt offen, die Abfrage dauert nur noch
-  einen Augenblick.
-- **macOS: kein App Nap mehr:** Lief Qross am Mac nur im Tray oder als `qross client`, bremste macOS es zusätzlich
-  aus. Qross schaltet App Nap jetzt für seine Laufzeit ab, wie Synergy. Bildschirmschoner, Display- und
-  Systemschlaf des Macs bleiben erlaubt.
+- **Hang when switching quickly to a Mac:** If you moved the cursor swiftly from the server to a Mac, it briefly
+  stopped there; moving slowly or on the way back, nothing was noticeable. Since 0.8.0, the Mac takes over the
+  Caps Lock state on entry, and for that Qross set up a new connection to the input system every time. All the
+  mouse movements that followed had to wait that long. The connection now stays open, and the query only takes a
+  moment.
+- **macOS: no more App Nap:** When Qross was running on a Mac only in the tray or as `qross client`, macOS also
+  throttled it. Qross now turns off App Nap for as long as it runs, like Synergy. The Mac's screen saver, display
+  sleep and system sleep remain allowed.
 
 ## [0.8.0] - 2026-10-19
 
-### Neu
+### New
 
-- **macOS: Hinweis bei „Sicherer Tastatureingabe“:** Schaltet auf dem Mac als Server ein Programm die sichere
-  Tastatureingabe ein – ein aktives Passwortfeld, Terminal mit „Sichere Tastatureingabe“, ein Passwortmanager –,
-  bekommt Qross keine Tasten mehr mit. Bisher landete dann unbemerkt im Programm vorn auf dem Mac, was du für
-  einen anderen Rechner getippt hast. Jetzt holt Qross den Cursor in diesem Moment zurück auf den Mac und hält
-  ihn dort, bis sie wieder aus ist. Oben im Fenster und im Tray steht, welches Programm sie hält und was hilft
-  (Passwortfeld verlassen, in Terminal ausschalten, Programm beenden, beim hängenden Anmeldefenster sperren und
-  entsperren). Wird der Cursor deshalb zurückgeholt oder bleibt er an der Kante stehen, kommt einmal eine
-  Systembenachrichtigung. Ohne verbundenen Client bleibt alles still. `qross server` hält den Cursor ebenso und
-  schreibt es ins Protokoll.
-- **Feststelltaste, Num und Rollen auf allen Rechnern gleich:** Betritt der Cursor einen Client, übernimmt der
-  den Stand des Servers. Drückst du die Feststelltaste, während der Cursor auf einem Client ist, schaltet der
-  Server mit: Die Leuchten der Tastatur stimmen, und nach dem Zurückwechseln kommt nicht plötzlich alles in
-  Großbuchstaben. Wie bei Synergy, ohne Einstellung. Unter Windows alle drei, unter X11 Feststelltaste und Num.
-  Am Mac schaltet Qross die Feststelltaste über das System um, denn ein künstlicher Tastendruck tut das dort
-  nicht; Num und Rollen gibt es am Mac nicht, sie bleiben am Client, wie sie sind. Unter Wayland nur als
-  Client, per Tastendruck und so gut der Compositor seinen Stand meldet (siehe `docs/wayland.md`).
-  Kompatibel: Mit Clients und Servern bis 0.7 geht die Taste wie bisher nur an den Rechner mit dem Cursor.
-- **Cursor-Finder:** Beim Wechsel blitzt auf dem Rechner, auf dem der Cursor ankommt, etwa eine Sekunde lang ein
-  Ring um den Cursor auf, der sich um ihn zusammenzieht, und darunter der Name des Rechners. Ring und Name lassen
-  sich einzeln einschalten (Einstellungen → Allgemein bzw. `[finder]` in `qross.toml`); Standard ist aus.
-  Eingestellt wird am Server, er gibt es ohne neue Verbindung an alle Clients weiter, und auch zurück auf dem
-  Server erscheint es. Die Anzeige folgt dem Cursor, richtet sich nach Monitor und Skalierung, lässt Klicks
-  hindurch, nimmt keinen Fokus und bleibt aus, wenn dort ein Programm im Vollbild läuft. „Ausprobieren“ zeigt
-  sie sofort. Clients ab Qross 0.8; ältere zeigen nichts. Unter Wayland lässt sich nichts über andere Fenster
-  legen, dort gibt es ihn nicht; unter macOS nur in der App, nicht mit `qross` auf der Kommandozeile.
-- **Bildschirmschoner abgleichen, wie bei Synergy:** Startet auf dem Server der Bildschirmschoner, starten ihn
-  auch die verbundenen Clients; bewegst du am Server die Maus oder drückst eine Taste, enden alle, auch wenn
-  der Cursor gerade auf einem Client steht. Er bleibt dabei, wo er ist. Clients ohne eingerichteten
-  Bildschirmschoner oder mit laufendem Video bleiben, wie sie sind. Standard an, einstellbar
-  unter Einstellungen → Bildschirmschoner bzw. mit `[screensaver]` in `qross.toml`.
-- **Clients mitsperren** (Standard aus): Beginnt der Bildschirmschoner des Servers, sperren sich die Clients,
-  statt nur ihren eigenen zu starten.
-- **Verzögerung der Eingabe messen:** Die Verbindungsqualität zeigt jetzt auch, wie lange eine Eingabe wirklich
-  braucht, vom Server bis sie am Client eingespeist ist – für Mausbewegungen und Tasten getrennt, als Median und
-  95. Perzentil der letzten Minute, aufgeteilt in Server, Netz und Client. Ein Balken zeigt, wo die Zeit bleibt,
-  der Tooltip erklärt die Teile. Gemessen wird an Stichproben (jede 32. Mausbewegung, jeder Tastendruck und
-  Klick), ohne ein Byte mehr auf dem Eingabeweg; der Client meldet seine Zeiten alle 200 ms zurück. Den
-  Unterschied der Uhren beider Rechner schätzt Qross wie NTP; wie genau der Netzanteil damit ist, steht dabei. Mit
-  einem älteren Client zeigt der Server nur seinen eigenen Anteil. Beschreibung in `docs/protokoll.md`.
-- **Drag & Drop vom Mac- und vom Linux-Server:** Dateien lassen sich jetzt auch von einem Mac oder einem
-  Linux-Rechner mit X11 über die Kante zu einem Client ziehen, nicht mehr nur von Windows aus: mit gedrückter
-  Taste aus dem Finder bzw. Dateimanager an die Kante ziehen und drüben loslassen. Fortschritt, Abbrechen, die
-  Rückkehr ohne Loslassen und die Rechte je Rechner gelten wie gewohnt. Unter X11 geht auch die Gegenrichtung,
-  vom Linux-Client zum Server. Unter Wayland bleibt Drag & Drop aus: Dort sieht kein Programm fremde
-  Drag-&-Drop-Vorgänge.
-- **Ablegen unter dem Cursor auch am Mac und unter Linux:** Am Mac landen gezogene Dateien im Ordner des
-  Finder-Fensters unter dem Cursor oder auf dem Schreibtisch, unter Linux (X11) auf dem Schreibtisch, sonst wie
-  bisher in `Downloads/Qross`. Direkt in ein Programm, etwa als Anhang in eine E-Mail, legt Qross weiterhin
-  nicht ab.
+- **macOS: notice for “Secure Keyboard Entry”:** If an app on the Mac acting as the server turns on
+  Secure Keyboard Entry – an active password field, Terminal with “Secure Keyboard Entry”, a password manager –
+  Qross no longer receives any keystrokes. Previously, whatever you typed for another computer then ended up
+  unnoticed in the frontmost app on the Mac. Now Qross brings the cursor back to the Mac at that moment and keeps
+  it there until Secure Keyboard Entry is off again. The top of the window and the tray show which app is holding
+  it and what helps (leave the password field, turn it off in Terminal, quit the app, lock and unlock if the login
+  window is stuck). If the cursor is brought back for this reason or stops at the edge, a system notification
+  appears once. Without a connected client, everything stays quiet. `qross server` holds the cursor the same way
+  and writes it to the log.
+- **Caps Lock, Num Lock and Scroll Lock in sync on all computers:** When the cursor enters a client, the client
+  takes over the server's state. If you press Caps Lock while the cursor is on a client, the server toggles along:
+  the keyboard lights are right, and after switching back, your typing doesn't suddenly come out in capitals. Like
+  Synergy, with no setting. On Windows all three, on X11 Caps Lock and Num Lock. On a Mac, Qross toggles Caps Lock
+  through the system, because a synthetic key press doesn't do that there; Macs have no Num Lock or Scroll Lock,
+  and those stay as they are on the client. On Wayland only as a client, by key press and only as well as the
+  compositor reports its state (see `docs/wayland.md`). Compatible: with clients and servers up to 0.7, the key
+  only goes to the computer with the cursor, as before.
+- **Cursor finder:** When switching, a ring flashes around the cursor for about a second on the computer where the
+  cursor arrives, contracting around it, with the computer's name below. The ring and the name can be turned on
+  separately (Settings → General or `[finder]` in `qross.toml`); the default is off. It's set on the server, which
+  passes it on to all clients without reconnecting, and it also appears back on the server. The display follows the
+  cursor, adapts to the monitor and scaling, lets clicks through, doesn't take focus and stays off when a program
+  is running in full screen there. “Try it” shows it right away. Clients from Qross 0.8 on; older ones show
+  nothing. On Wayland, nothing can be placed over other windows, so it isn't available there; on macOS only in the
+  app, not with `qross` on the command line.
+- **Screen saver sync, like Synergy:** When the screen saver starts on the server, the connected clients start
+  theirs too; when you move the mouse or press a key on the server, they all end, even if the cursor is on a client
+  at the time. The cursor stays where it is. Clients without a screen saver set up or with a video playing stay as
+  they are. On by default, configurable under Settings → Screen saver or with `[screensaver]` in `qross.toml`.
+- **Lock the clients too** (off by default): When the server's screen saver starts, the clients lock themselves
+  instead of just starting their own.
+- **Measuring input delay:** The connection quality now also shows how long an input really takes, from the server
+  until it's injected on the client – separately for mouse movements and keys, as the median and 95th percentile of
+  the last minute, split into server, network and client. A bar shows where the time goes, and the tooltip explains
+  the parts. Measurements use samples (every 32nd mouse movement, every key press and click), without a single
+  extra byte on the input path; the client reports its times back every 200 ms. Qross estimates the difference
+  between the two computers' clocks like NTP; how accurate this makes the network share is shown alongside. With an
+  older client, the server only shows its own share. Description in `docs/protokoll.md`.
+- **Drag and drop from Mac and Linux servers:** Files can now also be dragged across the edge to a client from a
+  Mac or a Linux computer with X11, not just from Windows: drag them with the button held down from Finder or the
+  file manager to the edge and release them on the other side. Progress, canceling, going back without releasing
+  and the permissions per computer work as usual. On X11, the reverse direction works too, from the Linux client to
+  the server. On Wayland, drag and drop stays off: there, no program can see another program's drag-and-drop
+  operations.
+- **Dropping under the cursor on a Mac and on Linux too:** On a Mac, dragged files land in the folder of the Finder
+  window under the cursor or on the desktop, on Linux (X11) on the desktop, otherwise in `Downloads/Qross` as
+  before. Qross still doesn't drop directly into a program, e.g. as an attachment into an email.
 
-### Verbessert
+### Improved
 
-- **Einstellungen mit Bereichen:** Allgemein, Profile, Tastatur, Spielemodus, Bildschirmschoner, Updates,
-  Zwischenablage und Info sind jetzt je eine eigene Seite statt einer langen Liste zum Scrollen. Bei schmalem Fenster stehen die Bereiche
-  als Zeile oben; Pfeiltasten wechseln zwischen ihnen, und beim nächsten Öffnen kommt der zuletzt gewählte.
-- **Autostart auf allen Systemen überarbeitet:** Qross verwaltet den Eintrag jetzt selbst, an denselben Orten
-  wie bisher (Windows: Autostart-Liste, macOS: Anmeldeobjekte, Linux: `~/.config/autostart`). Verschiebst du
-  Qross oder die AppImage, folgt der Eintrag beim nächsten Start. Unter Windows steht der Pfad in
-  Anführungszeichen (Pfade mit Leerzeichen), unter macOS zeigen die Anmeldeobjekte „Qross“. Im System
-  abgeschaltet (Task-Manager, GNOME Tweaks) zeigt Qross ihn als aus. Unter dem Schalter steht, wo der Eintrag
-  zu finden ist. Alles dazu, auch für `qross` ohne Oberfläche als Dienst, steht in `docs/autostart.md`.
-- **Rückfrage beim Wechsel der Rolle:** Läuft der Server und du wechselst zum Client – über den Schalter, ein
-  Profil oder das Tray-Menü –, fragt Qross erst nach, denn der Server schaltet sich dabei aus und verbundene
-  Rechner verlieren Maus und Tastatur. Ebenso, wenn ein verbundener Client zum Server werden soll.
-- **Linux-Server unter X11 ohne festen Takt:** Die Erfassung fragt nicht mehr alle 4 ms nach dem Zeiger,
-  sondern wartet auf den X-Server; von Mausbewegungen erfährt sie über XInput 2. Kanten und Kürzel greifen
-  dadurch bis zu 4 ms früher, und im Leerlauf schläft sie, statt rund 500-mal je Sekunde (Cursor auf einem
-  Client: 940-mal) aufzuwachen. Wie unter Windows und macOS zählt für die Wechselverzögerung jetzt nur
-  Drücken gegen die Kante, nicht schon das Stehenbleiben dort. Ohne XInput 2.1 bleibt es beim Takt.
-- **Schneller wieder da nach dem Ruhezustand und bei Netzwechseln:** Qross achtet jetzt auf Ruhezustand,
-  Aufwachen und Netzwechsel (WLAN gewechselt, Kabel ab oder an, VPN) und wartet nicht mehr auf eine
-  Zeitüberschreitung. Wacht der Laptop auf, prüft der Client die Verbindung sofort und baut sie, wenn nötig,
-  ohne Wartezeit neu auf – meist in Sekundenbruchteilen, sobald das Netz wieder da ist. Mit neuer Adresse zieht
-  die Verbindung einfach mit um, ohne Neuaufbau. Geht ein Rechner in den Ruhezustand, meldet er sich vorher
-  ab: Der Server holt den Cursor sofort zurück, statt ihn 5 s ins Leere zu schicken, und ein schlafender Server
-  sagt es seinen Clients. Wacht der Server auf, trennt er Clients, die nicht mehr antworten. Ist der Server
-  nicht erreichbar, versucht es der Client in der ersten Minute etwa jede Sekunde neu, danach seltener. Hängt
-  nach dem Aufwachen die Namensauflösung, nimmt er die zuletzt erreichte Adresse.
+- **Settings in sections:** General, Profiles, Keyboard, Game mode, Screen saver, Updates, Clipboard and About are
+  now each a page of their own instead of one long list to scroll through. In a narrow window, the sections appear
+  as a row at the top; arrow keys switch between them, and the next time you open the settings, the last one you
+  chose comes up.
+- **Autostart reworked on all systems:** Qross now manages the entry itself, in the same places as before (Windows:
+  startup apps, macOS: Login Items, Linux: `~/.config/autostart`). If you move Qross or the AppImage, the entry
+  follows at the next start. On Windows, the path is in quotation marks (paths with spaces), and on macOS,
+  Login Items show “Qross”. If it's turned off in the system (Task Manager, GNOME Tweaks), Qross shows it as off.
+  Below the toggle, it says where to find the entry. Everything about it, including running `qross` without an
+  interface as a service, is in `docs/autostart.md`.
+- **Confirmation when changing roles:** If the server is running and you switch to client – via the toggle, a
+  profile or the tray menu – Qross asks first, because the server shuts down in the process and connected computers
+  lose the mouse and keyboard. The same applies when a connected client is about to become the server.
+- **Linux server on X11 without fixed polling:** Capture no longer asks for the pointer every 4 ms but waits for
+  the X server; it learns about mouse movements via XInput 2. As a result, edges and shortcuts take effect up to
+  4 ms sooner, and when idle it sleeps instead of waking up around 500 times per second (cursor on a client: 940
+  times). As on Windows and macOS, only pushing against the edge now counts toward the switch delay, not merely
+  stopping there. Without XInput 2.1, it keeps polling.
+- **Back faster after sleep and network changes:** Qross now watches for sleep, wake-up and network changes (Wi-Fi
+  network changed, cable unplugged or plugged in, VPN) and no longer waits for a timeout. When the laptop wakes up,
+  the client checks the connection immediately and, if necessary, re-establishes it without waiting – usually
+  within a fraction of a second once the network is back. With a new address, the connection simply moves along,
+  without being re-established. When a computer goes to sleep, it signs off first: the server brings the cursor
+  back immediately instead of sending it into the void for 5 s, and a server going to sleep tells its clients. When
+  the server wakes up, it disconnects clients that no longer respond. If the server can't be reached, the client
+  retries about every second for the first minute, then less often. If name resolution hangs after waking up, it
+  uses the address it last reached.
 
-### Behoben
+### Fixed
 
-- **Windows: Erfassung übersteht Lastspitzen:** Brauchte der Server-PC kurz zu lange für eine Eingabe, entfernte
-  Windows die Eingabe-Hooks ohne jede Meldung. Qross bekam danach keine Eingaben mehr und wechselte bis zum
-  Neustart nicht mehr. Ein Wächter merkt das jetzt nach etwa zwei Sekunden, setzt die Hooks neu und schreibt es
-  mit Zähler ins Log. Läuft der Cursor gerade auf einem Client, lässt Qross dort alle Tasten und Maustasten los,
-  damit nichts hängen bleibt. Sperrbildschirm, UAC, Fenster mit Administratorrechten und der Ruhezustand lösen
-  keinen Fehlalarm aus. Vorbeugend wartet der Hook selbst nie mehr: Ereignisse gehen über eine sperrfreie
-  Warteschlange an den Server-Kern, und der Hook-Thread läuft mit höchster Priorität, auch im Hintergrund.
-- **„Ein Client namens … ist bereits verbunden“:** Meldete sich ein Rechner neu an, während der Server die alte
-  Verbindung noch hielt (nach dem Aufwachen, einem Netzwechsel oder einem Neustart von Qross), wies der Server
-  ihn ab, bis die alte nach einigen Sekunden auslief. Jetzt ersetzt die neue Verbindung die alte sofort, sofern
-  sie vom selben Rechner kommt (gleicher Schlüssel). Laufen versehentlich zwei Clients mit demselben Namen und
-  Schlüssel, gewinnt der neuere, und der ältere hört mit einer Meldung auf.
-- **macOS: Autostart aus dem DMG:** Startete Qross das erste Mal direkt aus dem DMG oder aus der
-  Quarantäne-Kopie, zeigte der Autostart danach ins Leere. Jetzt trägt es sich erst ein, wenn es im Ordner
-  „Programme“ läuft, und sagt in den Einstellungen, warum.
+- **Windows: capture survives load spikes:** If the server PC briefly took too long to process an input, Windows
+  removed the input hooks without any notice. Qross then received no more input and stopped switching until it was
+  restarted. A watchdog now notices this after about two seconds, reinstalls the hooks and writes it to the log
+  with a counter. If the cursor is on a client at the time, Qross releases all keys and mouse buttons there so
+  nothing gets stuck. The lock screen, UAC, windows with administrator rights and sleep don't trigger false alarms.
+  As a precaution, the hook itself never waits anymore: events go to the server core through a lock-free queue, and
+  the hook thread runs at the highest priority, even in the background.
+- **“A client named … is already connected”:** If a computer reconnected while the server was still holding on to
+  the old connection (after waking up, a network change or a restart of Qross), the server rejected it until the
+  old one expired after a few seconds. Now the new connection replaces the old one immediately, provided it comes
+  from the same computer (same key). If two clients with the same name and key are accidentally running, the newer
+  one wins, and the older one stops with a message.
+- **macOS: autostart from the DMG:** If Qross was first started directly from the DMG or from the quarantined copy,
+  the autostart entry afterward pointed nowhere. Now it only adds itself once it's running from the “Applications”
+  folder, and explains why in the settings.
 
-### Wichtig
+### Important
 
-- Verlangt ein Client nach seinem Bildschirmschoner ein Passwort, oder ist „Clients mitsperren“ an, ist er
-  danach gesperrt. Entsperren musst du ihn an seiner eigenen Tastatur: Qross kann nicht in den Sperrbildschirm
-  tippen. Unter KDE ist der Bildschirmschoner immer die Sperre.
-- Dem Bildschirmschoner folgen Clients ab dieser Version. Ältere Clients bleiben verbunden und unverändert.
+- If a client asks for a password after its screen saver, or “Lock the clients too” is on, it is locked afterward.
+  You have to unlock it at its own keyboard: Qross can't type into the lock screen. On KDE, the screen saver is
+  always the lock screen.
+- Clients follow the screen saver from this version on. Older clients stay connected and unchanged.
 
 ## [0.7.0] - 2026-10-18
 
-### Neu
+### New
 
-- **Profile je Ort:** mehrere benannte Profile, z. B. „Büro“ und „Zuhause“, jedes mit eigener Rolle, Anordnung
-  der Bildschirme, Name und Port, Wechsel-Einstellungen und Server-Adresse. Umschalten in der Kopfzeile oder im
-  Tray-Menü; anlegen, umbenennen, duplizieren und löschen unter Einstellungen → Profile. Tastatur, Spielemodus,
-  Zwischenablage, Updates und Autostart gelten weiter für alle Profile.
-- **Profil automatisch nach Netzwerk:** Jedes Profil lässt sich an ein oder mehrere Netzwerke binden
-  („Aktuelles Netzwerk übernehmen“). Qross erkennt das Netzwerk am Router, an Adresse und MAC-Adresse des
-  Gateways, ohne zusätzliche Rechte. Es wechselt beim Start und sobald sich das Netzwerk ändert, startet Server
-  bzw. Client mit dem neuen Profil neu und meldet den Wechsel. Passt kein Profil, gilt ein wählbares Profil für
-  andere Netzwerke. Abschaltbar je Profil und insgesamt, auch im Tray-Menü.
-- **Rechte je Rechner:** Der Server legt je Client fest, was geteilt wird: Zwischenablage (Text, HTML, Bild),
-  kopierte Dateien und Drag & Drop, jeweils senden und empfangen, nur empfangen, nur senden oder gar nicht. Eine
-  Vorgabe gilt für Rechner, die neu dazukommen. Einstellbar in der Server-Ansicht unter „Rechte je Rechner“ bzw.
-  mit `[sharing]` in `qross.toml`. Änderungen gelten sofort, ohne die Verbindung zu trennen; laufende
-  Übertragungen, die nicht mehr erlaubt sind, brechen ab.
-- Eingeschränkte Rechner tragen in der Anordnung ein Schild. Clients zeigen an, was der Server für sie
-  einschränkt, und versuchen es gar nicht erst: Wohin Drag & Drop nicht darf, wechselt der Cursor mit gedrückter
-  Taste auch nicht.
-- **Zeichen statt Tastenposition, je Rechner:** Steht ein Rechner unter Einstellungen → Tastatur auf „Zeichen“,
-  kommt dort an, was du auf dem Server tippst, auch wenn er ein anderes Tastaturlayout hat (z. B. Server
-  Deutsch, Mac US): Y und Z, Umlaute, @, €, Klammern, tote Tasten wie ^ und ´ sowie alle AltGr-Zeichen. Kürzel
-  wie Strg+Z gehen nach dem Zeichen und bleiben dort „Rückgängig“, Pfeile, F-Tasten und Co. bleiben Tasten.
-  Standard bleibt „Tastenposition“, wie sie Spiele brauchen. In `qross.toml`: `[keys.mode]`.
-- **Passwörter bleiben, wo sie kopiert wurden:** Inhalte, die ein Passwortmanager wie KeePassXC als vertraulich
-  markiert, teilt Qross nicht mit anderen Rechnern, weder als Text noch als Bild oder Dateiliste, in keiner
-  Richtung. Drüben bleibt der vorige Inhalt, und der nächste normale Inhalt wird wieder geteilt. Qross erkennt
-  die Markierungen von Windows (Verlauf, Cloud-Zwischenablage, Zwischenablage-Programme), macOS
-  (`org.nspasteboard.ConcealedType` und `TransientType`) und Linux (`x-kde-passwordManagerHint`). Ein kurzer
-  Hinweis im Fenster und im Protokoll sagt, wenn etwas zurückgehalten wurde, ohne den Inhalt zu zeigen.
-  Abschaltbar unter Einstellungen → Zwischenablage bzw. mit `[clipboard] share_concealed = true`.
+- **Profiles per location:** multiple named profiles, e.g. “Office” and “Home”, each with its own role, screen
+  layout, name and port, switching settings and server address. Switch profiles in the header or the tray menu;
+  create, rename, duplicate and delete them under Settings → Profiles. Keyboard, game mode, clipboard, updates and
+  autostart still apply to all profiles.
+- **Automatic profile by network:** Each profile can be tied to one or more networks (“Add current network”). Qross
+  recognizes the network by its router, from the gateway's address and MAC address, without extra permissions. It
+  switches at startup and whenever the network changes, restarts the server or client with the new profile and
+  reports the switch. If no profile matches, a selectable profile for other networks applies. Can be turned off per
+  profile and globally, also in the tray menu.
+- **Permissions per computer:** The server decides for each client what is shared: clipboard (text, HTML, image),
+  copied files, and drag and drop, each as send and receive, receive only, send only or not at all. A default
+  applies to newly added computers. Configurable in the server view under “Permissions per computer” or with
+  `[sharing]` in `qross.toml`. Changes take effect immediately without disconnecting; running transfers that are no
+  longer allowed are canceled.
+- Restricted computers carry a badge in the layout. Clients show what the server restricts for them and don't even
+  try: where drag and drop isn't allowed, the cursor doesn't switch with the button held down either.
+- **Characters instead of key positions, per computer:** If a computer is set to “Characters” under
+  Settings → Keyboard, what you type on the server arrives there, even if it has a different keyboard layout (e.g.
+  server German, Mac US): Y and Z, umlauts, @, €, brackets, dead keys like ^ and ´, and all AltGr characters.
+  Shortcuts like Ctrl+Z follow the character and remain “Undo” there; arrows, F keys and the like stay keys. The
+  default remains “Key position”, which games need. In `qross.toml`: `[keys.mode]`.
+- **Passwords stay where they were copied:** Qross doesn't share content that a password manager like KeePassXC
+  marks as confidential with other computers, whether as text, image or file list, in either direction. The other
+  side keeps its previous content, and the next normal content is shared again. Qross recognizes the markers of
+  Windows (history, cloud clipboard, clipboard programs), macOS (`org.nspasteboard.ConcealedType` and
+  `TransientType`) and Linux (`x-kde-passwordManagerHint`). A short notice in the window and in the log says when
+  something was withheld, without showing the content. Can be turned off under Settings → Clipboard or with
+  `[clipboard] share_concealed = true`.
 
-### Behoben
+### Fixed
 
-- In den Einstellungen schob der Sprung zu einem Bereich die Kopfzeile des Fensters aus dem Bild.
+- In the settings, jumping to a section pushed the window's header out of view.
 
-### Wichtig
+### Important
 
-- Die bisherigen Einstellungen werden beim ersten Start zum Profil „Standard“. Die Profile stehen in
-  `profiles.json` neben `gui.json`; eine ältere Version lädt `gui.json` weiter und lässt die Profile in Ruhe.
-- Den WLAN-Namen zeigt Qross unter Windows und Linux (NetworkManager). macOS gibt ihn ab Version 14 nur mit
-  Ortungsdiensten heraus; dort zeigt Qross das Subnetz und erkennt das Netzwerk trotzdem.
-- Der Server setzt die Rechte auch gegenüber Clients mit Qross 0.5 und 0.6 durch: Was sie trotzdem schicken,
-  weist er ab, ohne Reste zu hinterlassen. Anzeigen können die Rechte erst Clients ab dieser Version.
-- Zeichen bekommen nur Rechner mit dem neuen Qross unter Windows, macOS oder X11. Ältere Clients und Clients
-  unter Wayland bekommen weiter Tastenpositionen; die Oberfläche zeigt das beim Rechner an. Ein Server unter
-  Wayland schickt immer Tastenpositionen.
+- On first start, the existing settings become the “Default” profile. The profiles are stored in `profiles.json`
+  next to `gui.json`; an older version keeps loading `gui.json` and leaves the profiles alone.
+- Qross shows the Wi-Fi name on Windows and Linux (NetworkManager). Since version 14, macOS only reveals it with
+  Location Services; there, Qross shows the subnet and still recognizes the network.
+- The server also enforces the permissions for clients running Qross 0.5 and 0.6: whatever they send anyway, it
+  rejects without leaving anything behind. Only clients from this version on can display the permissions.
+- Only computers with the new Qross on Windows, macOS or X11 receive characters. Older clients and clients on
+  Wayland still receive key positions; the interface shows this for the computer. A server on Wayland always sends
+  key positions.
 
 ## [0.6.0] - 2026-10-18
 
-### Neu
+### New
 
-- **Spielemodus:** Läuft auf dem Rechner mit dem Cursor ein Spiel, ein Video oder eine Präsentation im Vollbild,
-  bleibt der Cursor dort, bis es endet. Die Fang-Taste gibt ihn sofort frei. Die Oberfläche zeigt an, warum der
-  Cursor festgehalten wird. Abschaltbar in den Einstellungen bzw. mit `[game] enabled = false`.
-- Spiele auf einem Client bekommen relative Mausbewegungen wie von einer echten Maus, auch Spiele, die den
-  Zeiger einfangen. Die Kamera dreht so auch am Bildschirmrand weiter.
-- **Tastenkürzel zum Wechseln:** frei belegbare Kürzel springen direkt zu einem Rechner (der Cursor landet in
-  dessen Mitte) oder zum Nachbarn in einer Richtung, z. B. Strg+Alt+1 oder Strg+Alt+Pfeil links. Einstellbar
-  unter Einstellungen → Tastatur bzw. `[keys.switch]` in `qross.toml`.
-- **Fortschritt bei Dateiübertragungen:** Drag & Drop und kopierte Dateien zeigen Prozent, Rate und Restzeit und
-  lassen sich auf beiden Seiten abbrechen, ohne Reste zu hinterlassen.
-- **Linux mit Wayland** (GNOME ab 45, KDE Plasma ab 6.1): Maus und Tastatur laufen über die Desktop-Portale.
-  Beim ersten Start fragt das System einmal nach der Freigabe; wo der Desktop es kann, merkt sich Qross sie.
-  Als Server erfasst Qross über InputCapture (auch Hyprland ab 0.56). Ohne passendes Portal speist der Client
-  über XWayland ein. Die Oberfläche erklärt, wenn das Portal fehlt oder die Freigabe abgelehnt wurde.
-- **macOS: Hinweis bei fehlenden Rechten:** Fehlen Qross „Bedienungshilfen“ oder „Eingabeüberwachung“, zeigt
-  es das oben im Fenster an, mit einem Knopf, der Qross in die Liste der Systemeinstellungen einträgt und die
-  passende Seite öffnet. Bisher kamen Maus und Tastatur dann einfach nicht an.
+- **Game mode:** When a game, video or presentation runs in full screen on the computer with the cursor, the cursor
+  stays there until it ends. The cursor lock key releases it immediately. The interface shows why the cursor is
+  being held. Can be turned off in the settings or with `[game] enabled = false`.
+- Games on a client get relative mouse movements as if from a real mouse, including games that capture the pointer.
+  This way, the camera keeps turning even at the edge of the screen.
+- **Keyboard shortcuts for switching:** freely assignable shortcuts jump directly to a computer (the cursor lands
+  in its center) or to the neighbor in a direction, e.g. Ctrl+Alt+1 or Ctrl+Alt+Left Arrow. Configurable under
+  Settings → Keyboard or `[keys.switch]` in `qross.toml`.
+- **Progress for file transfers:** Drag and drop and copied files show percentage, rate and time remaining, and can
+  be canceled on both sides without leaving anything behind.
+- **Linux with Wayland** (GNOME 45 or later, KDE Plasma 6.1 or later): mouse and keyboard go through the desktop
+  portals. At first start, the system asks for permission once; where the desktop supports it, Qross remembers it.
+  As a server, Qross captures input via InputCapture (also Hyprland 0.56 or later). Without a suitable portal, the
+  client injects via XWayland. The interface explains when the portal is missing or permission was denied.
+- **macOS: notice for missing permissions:** If Qross lacks “Accessibility” or “Input Monitoring”, it shows this at
+  the top of the window, with a button that adds Qross to the list in System Settings and opens the right page.
+  Previously, mouse and keyboard input simply didn't arrive.
 
-### Verbessert
+### Improved
 
-- Nach dem Notausgang zeigt die Oberfläche die Fang-Taste wieder als gelöst an.
+- After the emergency exit, the interface shows the cursor lock key as released again.
 
-### Behoben
+### Fixed
 
-- **macOS: Rechte bleiben nach Updates erhalten:** Qross ist jetzt mit einem eigenen, dauerhaften Zertifikat
-  signiert statt nur ad hoc. Bisher galt jede neue Version für macOS als andere App: Qross blieb unter
-  „Bedienungshilfen“ und „Eingabeüberwachung“ eingeschaltet, die Rechte wirkten aber nicht mehr.
+- **macOS: permissions survive updates:** Qross is now signed with its own permanent certificate instead of just
+  ad hoc. Previously, macOS treated every new version as a different app: Qross stayed switched on under
+  “Accessibility” and “Input Monitoring”, but the permissions no longer took effect.
 
-### Wichtig
+### Important
 
-- Mac-Nutzer müssen die Rechte nach diesem Update ein letztes Mal neu erteilen: Qross unter Systemeinstellungen
-  → Datenschutz & Sicherheit → Bedienungshilfen (und, als Server, Eingabeüberwachung) mit „−“ entfernen und
-  über den Hinweis in Qross neu eintragen. Ab dann bleiben sie über Updates erhalten.
-- Rechner mit Qross 0.5 bleiben verbunden. Mit ihnen gilt der Spielemodus nur für ein Vollbild auf dem Server
-  selbst.
-- Unter Wayland wirkt die Fang-Taste nur, solange der Cursor auf einem Client ist, Drag & Drop geht dort noch
-  nicht, und unter GNOME läuft die Zwischenablage über XWayland.
+- Mac users have to grant the permissions again one last time after this update: remove Qross under
+  System Settings → Privacy & Security → Accessibility (and, as a server, Input Monitoring) with “−” and add it
+  again via the notice in Qross. From then on, they're kept across updates.
+- Computers with Qross 0.5 stay connected. With them, game mode only applies to full screen on the server itself.
+- On Wayland, the cursor lock key only works while the cursor is on a client, drag and drop doesn't work there yet,
+  and on GNOME the clipboard goes through XWayland.
 
 ## [0.5.0] - 2026-10-18
 
-### Neu
+### New
 
-- **Mehrere Monitore je Rechner:** Qross kennt jetzt jeden Monitor eines Rechners einzeln. Der Layout-Editor
-  zeigt sie maßstäblich im Kasten des Rechners, mit den Auflösungen im Tooltip.
-- **Verbindungsqualität:** Für jede Verbindung zeigt Qross Latenz, Jitter, Paketverlust und Durchsatz, dazu eine
-  Stufe von „Sehr gut“ bis „Schlecht“ und einen Verlauf der letzten Minute. Beim Server steht das je Client
-  unter „Verbundene Rechner“, beim Client im Status. Gemessen wird ohne zusätzlichen Netzverkehr.
+- **Multiple monitors per computer:** Qross now knows each monitor of a computer individually. The layout editor
+  shows them to scale in the computer's box, with the resolutions in the tooltip.
+- **Connection quality:** For each connection, Qross shows latency, jitter, packet loss and throughput, plus a
+  rating from “Very good” to “Poor” and a history of the last minute. On the server, this appears per client under
+  “Connected computers”; on the client, in the status. It's measured without extra network traffic.
 
-### Verbessert
+### Improved
 
-- Bei unterschiedlich großen oder versetzten Monitoren bleibt der Cursor auf echten Bildschirmflächen, statt in
-  toten Ecken des umschließenden Rechtecks zu hängen. Gewechselt wird nur dort, wo wirklich ein Monitor an der
-  Kante liegt, und der Cursor kommt auf dem nächstgelegenen Monitor an.
+- With monitors of different sizes or offset from each other, the cursor stays on actual screen areas instead of
+  getting stuck in dead corners of the bounding rectangle. Switching only happens where a monitor actually lies at
+  the edge, and the cursor arrives on the nearest monitor.
 
-### Wichtig
+### Important
 
-- Die einzelnen Monitore meldet ein Client nur an einen Server ab 0.5.0. Mit älteren Servern bleibt es beim
-  umschließenden Rechteck, die Verbindung funktioniert weiter.
+- A client only reports its individual monitors to a server running 0.5.0 or later. With older servers, it stays
+  with the bounding rectangle, and the connection keeps working.
 
 ## [0.4.0] - 2026-10-18
 
-### Neu
+### New
 
-- **Automatische Updates:** Qross prüft beim Start und danach täglich, ob es eine neue Version gibt. Es lädt
-  sie im Hintergrund, prüft ihre Signatur und installiert sie in einem ruhigen Moment, nie mitten in einer
-  Fernsteuerung. Danach startet Qross neu und setzt Server bzw. Client fort.
-- **Mit dem System starten:** Qross startet bei der Anmeldung unauffällig im Tray und setzt fort, was zuletzt
-  lief.
-- **Einstellungen:** ein eigener Bereich für Autostart, Updates, Zwischenablage und Tastatur, der mit künftigen
-  Optionen wächst.
-- **Drag & Drop in beide Richtungen:** Dateien lassen sich jetzt auch vom Client auf den Server ziehen. Im
-  Explorer oder Finder greifen, über die Kante ziehen und auf dem Server loslassen. Sie landen im Ordner unter
-  dem Cursor (Windows) bzw. in „Downloads/Qross“.
-- **Fang-Taste frei wählbar:** Statt der Rollen-Taste z. B. Strg+Alt+L, auch auf dem Mac, der keine Rollen-Taste
-  hat.
-- **Medientasten:** Wiedergabe/Pause, Weiter, Zurück und Stopp gehen mit. Auf dem Mac wirken Lautstärke und
-  Wiedergabe jetzt tatsächlich. Auf Wunsch bleiben Medientasten immer auf dem Server.
-- **Tasten je Rechner umbelegen**, z. B. Alt und Windows-Taste für einen Mac tauschen.
+- **Automatic updates:** Qross checks for a new version at startup and daily after that. It downloads it in the
+  background, verifies its signature and installs it at a quiet moment, never in the middle of a remote-control
+  session. Qross then restarts and resumes the server or client.
+- **Start with the system:** Qross starts unobtrusively in the tray when you sign in and resumes whatever was
+  running last.
+- **Settings:** a dedicated section for autostart, updates, clipboard and keyboard that grows with future options.
+- **Drag and drop in both directions:** Files can now also be dragged from the client to the server. Grab them in
+  File Explorer or Finder, drag them across the edge and release them on the server. They land in the folder under
+  the cursor (Windows) or in “Downloads/Qross”.
+- **Freely selectable cursor lock key:** Instead of the Scroll Lock key, e.g. Ctrl+Alt+L, also on the Mac, which
+  has no Scroll Lock key.
+- **Media keys:** Play/pause, next, previous and stop are passed along. On the Mac, volume and playback now
+  actually work. Optionally, media keys always stay on the server.
+- **Remap keys per computer**, e.g. swap Alt and the Windows key for a Mac.
 
-### Behoben
+### Fixed
 
-- Wer auf dem Client etwas mit gedrückter Maustaste an die Kante zum Server zog, wechselte sofort zurück, und
-  der Client ließ die Taste los. Gezogene Dateien landeten dabei ungewollt am Bildschirmrand. Mit gedrückter
-  Taste wird jetzt nur gewechselt, wenn Dateien gezogen werden.
+- If you dragged something on the client with the mouse button held down to the edge toward the server, Qross
+  switched back immediately, and the client released the button. Dragged files then ended up at the edge of the
+  screen unintentionally. With the button held down, Qross now only switches when files are being dragged.
 
-### Wichtig
+### Important
 
-- Automatische Updates gibt es ab dieser Version. Wer eine ältere Version nutzt, installiert 0.4.0 einmal von
-  Hand.
-- Drag & Drop zum Server braucht Qross 0.4.0 auf beiden Rechnern. „Medientasten immer auf dem Server“ wirkt,
-  wenn der Server unter Windows läuft.
+- Automatic updates are available from this version on. If you're using an older version, install 0.4.0 manually
+  once.
+- Drag and drop to the server requires Qross 0.4.0 on both computers. “Media keys always on the server” works when
+  the server runs on Windows.
 
 ## [0.3.1] - 2026-10-18
 
-### Behoben
+### Fixed
 
-- macOS: Nach dem Download meldete macOS „Qross ist beschädigt und kann nicht geöffnet werden“. Das App-Paket
-  ist jetzt vollständig signiert, macOS fragt stattdessen nach, ob Qross geöffnet werden soll.
+- macOS: After downloading, macOS reported “Qross is damaged and can't be opened”. The app bundle is now fully
+  signed, and macOS instead asks whether Qross should be opened.
 
-### Verbessert
+### Improved
 
-- Die Anleitung für den ersten Start beschreibt den Weg über „Dennoch öffnen“ in den Systemeinstellungen,
-  wie ihn aktuelle macOS-Versionen verlangen.
+- The first-launch instructions describe the way via “Open Anyway” in System Settings, as current macOS versions
+  require.
 
 ## [0.3.0] - 2026-10-18
 
-### Neu
+### New
 
-- **Dateien per Zwischenablage:** Dateien und Ordner im Explorer, Finder oder Dateimanager kopieren, den
-  Cursor auf den anderen Rechner bewegen und dort einfügen. Das klappt in beide Richtungen und über den
-  Server auch von einem Client zum nächsten.
-- Die Übertragung läuft im Hintergrund, Maus und Tastatur bleiben flüssig. Jede Datei wird per SHA-256
-  geprüft, eingefügt werden kann erst, wenn alles vollständig angekommen ist.
-- Bis 1 GB geht das automatisch, die Grenze ist einstellbar (0 = aus). Größere Dateien wie bisher per
-  Drag & Drop ziehen.
-- Die App meldet, sobald die Dateien bereit zum Einfügen sind oder wenn sie zu groß sind. Liegt das Fenster
-  im Hintergrund, kommt eine Systembenachrichtigung.
+- **Files via the clipboard:** Copy files and folders in File Explorer, Finder or a file manager, move the cursor
+  to the other computer and paste them there. This works in both directions and, via the server, also from one
+  client to another.
+- The transfer runs in the background, and mouse and keyboard stay smooth. Every file is verified with SHA-256, and
+  pasting is only possible once everything has arrived completely.
+- Up to 1 GB this happens automatically; the limit is configurable (0 = off). Use drag and drop for larger files,
+  as before.
+- The app tells you as soon as the files are ready to paste, or if they're too large. If the window is in the
+  background, a system notification appears.
 
-### Wichtig
+### Important
 
-- Für Dateien in der Zwischenablage brauchen beide Rechner Qross 0.3.0. Rechner mit 0.2 bleiben verbunden,
-  Text, formatierter Text und Bilder funktionieren mit ihnen weiter.
+- Files on the clipboard require Qross 0.3.0 on both computers. Computers with 0.2 stay connected; text, formatted
+  text and images keep working with them.
 
 ## [0.2.1] - 2026-10-18
 
-### Neu
+### New
 
-- Die App zeigt unter „Neuigkeiten“, was sich in jeder Version geändert hat – nach einem Update mit
-  Hinweis auf die neue Version.
+- The app shows what changed in each version under “What's new” – after an update, with a notice about the new
+  version.
 
-### Verbessert
+### Improved
 
-- Die Release-Notizen auf GitHub stammen jetzt direkt aus diesem Changelog.
+- The release notes on GitHub now come directly from this changelog.
 
 ## [0.2.0] - 2026-10-18
 
-### Neu
+### New
 
-- Die Zwischenablage überträgt jetzt **Bilder** (z. B. Screenshots mit Win+Shift+S) und **formatierten Text**
-  (HTML aus Browser oder Office) – zusätzlich zu reinem Text und in beide Richtungen.
+- The clipboard now transfers **images** (e.g. screenshots with Win+Shift+S) and **formatted text** (HTML from a
+  browser or Office) – in addition to plain text, and in both directions.
 
-### Verbessert
+### Improved
 
-- Große Bilder werden im Hintergrund umgewandelt und mit niedriger Priorität übertragen. Maus und Tastatur
-  bleiben dabei flüssig.
-- Unter Windows landet ein Bild zusätzlich als Bitmap in der Zwischenablage, damit auch ältere Programme wie
-  Paint es einfügen können.
+- Large images are converted in the background and transferred at low priority. Mouse and keyboard stay smooth
+  throughout.
+- On Windows, an image is also placed on the clipboard as a bitmap so that older programs like Paint can paste it
+  too.
 
-### Wichtig
+### Important
 
-- Neue Protokollversion 3: Alle Rechner brauchen Qross 0.2.0 oder neuer. Ältere Versionen werden mit einem
-  klaren Hinweis abgelehnt.
+- New protocol version 3: all computers need Qross 0.2.0 or later. Older versions are rejected with a clear
+  message.
 
 ## [0.1.2] - 2026-10-18
 
-### Verbessert
+### Improved
 
-- Das Logo in der Kopfzeile ist größer, die beiden Bildschirme im Motiv sind jetzt gut erkennbar.
+- The logo in the header is larger, and the two screens in the artwork are now easy to make out.
 
 ## [0.1.1] - 2026-10-18
 
-### Verbessert
+### Improved
 
-- Im Logo sitzt die Zeigerspitze jetzt genau am Ende der Spur.
-- Die Kopfzeile der App zeigt das volle Logo.
+- In the logo, the pointer tip now sits exactly at the end of the trail.
+- The app's header shows the full logo.
 
-### Behoben
+### Fixed
 
-- Linux ohne Tray-Symbol (z. B. GNOME ohne AppIndicator-Erweiterung): Schließen beendet die App jetzt sauber,
-  statt sie unsichtbar weiterlaufen zu lassen.
+- Linux without a tray icon (e.g. GNOME without the AppIndicator extension): closing now quits the app cleanly
+  instead of leaving it running invisibly.
 
 ## [0.1.0] - 2026-10-18
 
-Erste Veröffentlichung.
+Initial release.
 
-### Neu
+### New
 
-- Maus und Tastatur über mehrere Rechner teilen – über **QUIC** statt TCP, damit der Cursor auch bei
-  Paketverlust im WLAN flüssig bleibt.
-- **Drag & Drop** großer Dateien und ganzer Ordner über die Bildschirmkante, mit SHA-256-Prüfung.
-- Text-Zwischenablage in beide Richtungen.
-- **Server-Suche im Netzwerk**: Clients finden den Server ohne IP-Eingabe.
-- **Ecken-Totzone** und optionale **Wechselverzögerung** gegen versehentliches Wechseln.
-- Strg und Cmd werden zwischen PC und Mac automatisch getauscht.
-- **Rollen-Taste** hält den Cursor auf dem aktuellen Bildschirm fest, **Strg+Alt+Shift+Esc** holt Maus und
-  Tastatur sofort zurück.
-- Sichere Verbindung mit gegenseitigen Zertifikaten: Neue Rechner werden erst nach Fingerprint-Vergleich
-  freigegeben.
-- Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
-- Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
+- Share mouse and keyboard across multiple computers – over **QUIC** instead of TCP, so the cursor stays smooth
+  even with packet loss on Wi-Fi.
+- **Drag and drop** of large files and entire folders across the screen edge, with SHA-256 verification.
+- Text clipboard in both directions.
+- **Server discovery on the network**: clients find the server without entering an IP address.
+- **Corner dead zone** and optional **switch delay** against accidental switching.
+- Ctrl and Cmd are swapped automatically between PC and Mac.
+- **Scroll Lock** keeps the cursor on the current screen, **Ctrl+Alt+Shift+Esc** brings mouse and keyboard back
+  immediately.
+- Secure connection with mutual certificates: new computers are only approved after comparing fingerprints.
+- Graphical interface with layout editor, approval dialog and tray icon.
+- Runs on Windows, Linux (X11) and macOS (Apple Silicon).
 
 [0.13.0]: https://github.com/xozy22/qross/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/xozy22/qross/compare/v0.12.1...v0.12.2
