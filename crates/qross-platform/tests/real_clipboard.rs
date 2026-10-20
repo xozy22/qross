@@ -184,15 +184,12 @@ mod windows {
         assert_eq!(clipboard.concealed(), Some("ExcludeClipboardContentFromMonitorProcessing"));
         assert_eq!(clipboard.text().as_deref(), Some("geheim"), "lesen darf Qross, nur nicht teilen");
 
-        for (name, data) in [
-            ("CanIncludeInClipboardHistory", &[0u8; 4][..]),
-            ("CanUploadToCloudClipboard", &[0; 4][..]),
-            ("Clipboard Viewer Ignore", &[][..]),
-        ] {
-            copy("geheim", &[(name, data)]);
-            assert_eq!(clipboard.concealed(), Some(name), "{name} allein");
-        }
+        copy("geheim", &[("Clipboard Viewer Ignore", &[])]);
+        assert_eq!(clipboard.concealed(), Some("Clipboard Viewer Ignore"), "allein");
 
+        // So legt Chrome eine URL aus einem Inkognito-Fenster ab: nur aus Verlauf und Cloud heraus
+        copy("https://example.org", &[("CanIncludeInClipboardHistory", &[0; 4]), ("CanUploadToCloudClipboard", &[0; 4])]);
+        assert_eq!(clipboard.concealed(), None, "nur nicht in den Verlauf");
         copy("erlaubt", &[("CanIncludeInClipboardHistory", &1u32.to_le_bytes()), ("CanUploadToCloudClipboard", &1u32.to_le_bytes())]);
         assert_eq!(clipboard.concealed(), None, "ausdrücklich erlaubt");
         clipboard.set_text("Notiz").unwrap();

@@ -65,7 +65,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Client: Eingaben einspeisen | ✔ | ✔ | ✔ GNOME ≥ 45, KDE ≥ 6.1, sonst über XWayland | ✔¹ |
 | Zwischenablage in beide Richtungen: Text, HTML, Bilder (z. B. Screenshots) | ✔ | ✔ | ✔ KDE, wlroots direkt; GNOME über XWayland | ✔¹ |
 | Dateien kopieren und einfügen, in beide Richtungen | ✔ Explorer | ✔ Dateimanager mit `text/uri-list` (Nautilus, Dolphin) | wie Zwischenablage | ✔ Finder¹ |
-| Passwörter nicht teilen: was Passwortmanager als vertraulich markieren, bleibt auf dem Rechner | ✔ Formate für Verlauf, Cloud und Zwischenablage-Programme | ✔ `x-kde-passwordManagerHint` (KeePassXC) | wie Zwischenablage | ✔ `ConcealedType`, `TransientType`¹ |
+| Passwörter nicht teilen: was Passwortmanager als vertraulich markieren, bleibt auf dem Rechner | ✔ `ExcludeClipboardContentFromMonitorProcessing` (KeePass, KeePassXC, 1Password) | ✔ `x-kde-passwordManagerHint` (KeePassXC) | wie Zwischenablage | ✔ `ConcealedType`, `TransientType`¹ |
 | Cursor auf dem Server ausblenden | ✔ | ✔ | Sache des Compositors | soweit macOS es zulässt¹ |
 | Drag & Drop **vom Server** ziehen⁸ | ✔ | ✔ Dateimanager (XDND) | – | ✔ Finder¹ |
 | Drag & Drop **vom Client** zum Server ziehen⁸ | ✔ Explorer | ✔ Dateimanager (XDND) | – | ✔ Finder¹ |
