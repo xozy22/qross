@@ -19,7 +19,7 @@ use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
     DragMessage, FileEntry, FrameError, GameState, Input, Latency, LatencySummary, MouseDelta, MouseMove, Platform, Rect,
     SampleId, ScreenInfo, Sharing, StreamKind, DEFAULT_PORT, GAME_MODE_SINCE, LATENCY_SINCE, LOCKS_SINCE, MONITORS_SINCE,
-    PROTOCOL_VERSION, SCREEN_SAVER_SINCE, SHARING_SINCE, TEXT_SINCE,
+    PASTE_ON_DEMAND_SINCE, PROTOCOL_VERSION, SCREEN_SAVER_SINCE, SHARING_SINCE, TEXT_SINCE,
 };
 use quinn::{Connection, ConnectionError, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -31,7 +31,8 @@ use crate::drag_preview::DragView;
 use crate::files::{self, FileOutcome, Receiver, Staging};
 use crate::game::{self, Detector};
 use crate::latency::{self, Collector, Measured, Stamp};
-use crate::progress::{Progress, Transfers};
+use crate::ondemand::{self, Link, Offered, Offers, Pastes};
+use crate::progress::{Direction, Progress, Transfers};
 use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
 use crate::screensaver;
@@ -166,6 +167,10 @@ enum FromServer {
     File(FileOutcome),
     ClipboardFiles { transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     ClipboardFile(FileOutcome),
+    /// Kopierte Dateien des Servers auf Abruf: nur die Liste (seit Qross 0.13)
+    ClipboardFilesOnDemand { transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
+    /// Der Server fügt kopierte Dateien auf Abruf ein (seit Qross 0.13)
+    PastesOnDemand,
     /// Server fragt: Werden hier gerade Dateien gezogen? (Drag & Drop zum Server)
     DragQuery { probe: u32 },
     /// Was der Server mit diesem Rechner teilt (seit Qross 0.7)
@@ -185,6 +190,12 @@ struct ClipboardSide {
     notify: Notify,
     /// Fortschritt und Abbrechen aller Dateiübertragungen (auch Drag & Drop)
     transfers: Transfers,
+    /// Kopierte Dateien auf Abruf: was der Server hier abrufen darf, seine Abrufe und die hiesigen bei ihm.
+    /// Bleibt über Neuverbindungen bestehen; `link` nennt die jeweils aktuelle Verbindung.
+    offers: Offers,
+    serving: Pastes,
+    pasting: Pastes,
+    link: watch::Sender<Option<Connection>>,
 }
 
 /// Aufträge an den Einspeise-Thread. Die Ablageordner-Abfrage läuft dort, damit sie nach den
@@ -353,6 +364,10 @@ async fn run_inner(
             }
         }),
         incoming: Incoming::new(Staging::persistent(&clipfiles::default_store())?, transfers.clone()),
+        offers: Offers::default(),
+        serving: Pastes::new(Direction::Sending, transfers.clone()),
+        pasting: Pastes::new(Direction::Receiving, transfers.clone()),
+        link: watch::channel(None).0,
         transfers,
         notify: {
             let notices = notices.cloned();
@@ -552,6 +567,11 @@ async fn session(
     if server_version >= SCREEN_SAVER_SINCE && screen.follows_saver {
         write_frame(&mut control, &Control::FollowsScreenSaver).await?;
     }
+    // Kopierte Dateien erst beim Einfügen: nur mit Servern, die das kennen, und wenn dieses System es kann
+    if server_version >= PASTE_ON_DEMAND_SINCE && clip.hub.pastes_on_demand() {
+        info!("Kopierte Dateien vom Server kommen erst beim Einfügen");
+        write_frame(&mut control, &Control::PastesOnDemand).await?;
+    }
     // Die einzelnen Monitore nur an Server, die sie kennen: ältere trennen bei unbekannten Nachrichten.
     let report_monitors = server_version >= MONITORS_SINCE;
     let mut monitors = (screen.monitors)();
@@ -597,6 +617,13 @@ async fn session(
     tokio::spawn(receive_datagrams(conn.clone(), tx.clone()));
     let stagings = (receiver.staging(), clip.incoming.staging(), clip.transfers.clone());
     tokio::spawn(receive_streams(conn.clone(), tx, stagings));
+    // Kopierte Dateien auf Abruf: Der Server ruft hier ab, und hiesige Abrufe gehen über diese Verbindung.
+    tokio::spawn(ondemand::accept_fetches(conn.clone(), server_name.clone(), clip.offers.clone(), clip.serving.clone(), || true));
+    clip.link.send_replace(Some(conn.clone()));
+    let link: Link = {
+        let current = clip.link.subscribe();
+        Arc::new(move || current.borrow().clone().ok_or_else(|| "nicht mit dem Server verbunden".to_owned()))
+    };
     // Übertragungen der vorigen Verbindung kommen nie mehr vollständig an.
     clip.incoming.supersede();
 
@@ -619,6 +646,8 @@ async fn session(
     let mut probe: Option<Probe> = None;
     // Was der Cursor-Finder hier zeigt; ältere Server melden nichts, dann bleibt er aus.
     let mut finder_style = CursorFinder::OFF;
+    // Fügt der Server kopierte Dateien auf Abruf ein? Ältere melden nichts und bekommen sie vorab.
+    let mut server_on_demand = false;
     // Protokoll des Betretens (siehe `switch_trace`): verworfene Bewegungen, das laufende Protokoll
     // und die Rückmeldungen des Einspeise-Threads dazu
     let mut discarded = Discarded::default();
@@ -725,12 +754,13 @@ async fn session(
                                     let (hub, synced, conn) = (clip.hub.clone(), clip_synced.clone(), conn.clone());
                                     let (limit, peer, notify) = (config.clipboard_file_limit, server_name.clone(), clip.notify.clone());
                                     let transfers = clip.transfers.clone();
+                                    let on_demand = server_on_demand.then(|| clip.offers.clone());
                                     tokio::spawn(async move {
                                         let known = *synced.lock().unwrap();
                                         let (seq, content) = hub.changed_since(Some(known)).await;
                                         *synced.lock().unwrap() = seq;
                                         if let Some(content) = content.and_then(|c| rights::content(c, allowed)) {
-                                            clipfiles::send(conn, content, limit, peer, notify, transfers).await;
+                                            clipfiles::send(conn, content, limit, peer, notify, transfers, on_demand).await;
                                         }
                                     });
                                 } else {
@@ -763,6 +793,28 @@ async fn session(
                                 (clip.notify)(FilesNotice::Failed { peer: server_name.clone(), reason: format!("{e:#}") });
                             }
                         }
+                    }
+                    FromServer::ClipboardFilesOnDemand { transfer, entries, data } => {
+                        // Was vorab unterwegs war, ist überholt.
+                        clip.incoming.supersede();
+                        match Offered::new(server_name.clone(), transfer, entries, link.clone(), clip.pasting.clone()) {
+                            Ok(offered) => {
+                                let (hub, synced, notify) = (clip.hub.clone(), clip_synced.clone(), clip.notify.clone());
+                                tokio::spawn(async move {
+                                    if let Some(seq) = ondemand::deliver(offered, data, &hub, &notify).await {
+                                        *synced.lock().unwrap() = seq;
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                warn!("kopierte Dateien vom Server abgelehnt: {e:#}");
+                                (clip.notify)(FilesNotice::Failed { peer: server_name.clone(), reason: format!("{e:#}") });
+                            }
+                        }
+                    }
+                    FromServer::PastesOnDemand => {
+                        debug!("der Server fügt kopierte Dateien auf Abruf ein");
+                        server_on_demand = true;
                     }
                     FromServer::DragQuery { probe } => {
                         let (reply, dragged) = oneshot::channel();
@@ -876,6 +928,7 @@ async fn session(
     }
     drag_view.hide();
     receiver.cancel_undropped();
+    clip.link.send_replace(None);
     // Was noch ankam, wird nie vollständig.
     clip.transfers.abort_receiving(None, "Verbindung getrennt");
     outcome
@@ -1009,6 +1062,9 @@ async fn receive_control(mut control: RecvStream, tx: mpsc::UnboundedSender<From
             Ok(Some(Control::Latency(Latency::Summary(summary)))) => {
                 let _ = tx.send(FromServer::Latency(summary));
             }
+            Ok(Some(Control::PastesOnDemand)) => {
+                let _ = tx.send(FromServer::PastesOnDemand);
+            }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht vom Server"),
             // Von einer neueren Version: überspringen, der Frame ist gelesen
             Err(FrameError::Codec(e)) => debug!("unbekannte Control-Nachricht vom Server: {e}"),
@@ -1105,6 +1161,9 @@ async fn read_server_stream(
             Some(ClipboardMsg::Files { transfer, entries, data }) => {
                 let _ = tx.send(FromServer::ClipboardFiles { transfer, entries, data });
             }
+            Some(ClipboardMsg::FilesOnDemand { transfer, entries, data }) => {
+                let _ = tx.send(FromServer::ClipboardFilesOnDemand { transfer, entries, data });
+            }
             None => {}
         },
         StreamKind::File => {
@@ -1120,6 +1179,8 @@ async fn read_server_stream(
                 let _ = tx.send(FromServer::DragQuery { probe });
             }
         }
+        // Abrufe kommen auf bidirektionalen Streams (siehe `ondemand::accept_fetches`).
+        StreamKind::Fetch => bail!("Abruf auf einem unidirektionalen Stream"),
     }
     Ok(())
 }

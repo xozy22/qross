@@ -15,6 +15,7 @@ pub mod files;
 pub mod game;
 mod identity;
 pub mod latency;
+mod ondemand;
 pub mod progress;
 pub mod quality;
 pub mod secure_input;

@@ -28,6 +28,7 @@ use crate::drag_preview::DragView;
 use crate::files::{FileOutcome, Receiver, Staging};
 use crate::game::{self, Detector};
 use crate::latency::{self, Meter};
+use crate::ondemand::{self, Link, Offered, Offers, Pastes};
 use crate::progress::{Direction, Kind, Progress, Transfers};
 use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
@@ -222,6 +223,10 @@ enum NetEvent {
     Clipboard { name: String, id: usize, data: ClipboardData },
     ClipboardFiles { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     ClipboardFile { name: String, id: usize, outcome: FileOutcome },
+    /// Der Client fügt kopierte Dateien auf Abruf ein (`Control::PastesOnDemand`)
+    PastesOnDemand { name: String, id: usize },
+    /// Kopierte Dateien des Clients auf Abruf: nur die Liste
+    ClipboardFilesOnDemand { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     /// Antwort auf eine Drag-Nachfrage (Drag & Drop vom Client zum Server)
     DragOffer { name: String, id: usize, probe: u32, transfer: u64, entries: Vec<FileEntry> },
     DragFile { name: String, id: usize, outcome: FileOutcome },
@@ -229,13 +234,54 @@ enum NetEvent {
 }
 
 /// Angenommen: Name des Servers fürs `Welcome`, die Rechte des Clients, die sich mit den Regeln ändern,
-/// der Cursor-Finder, weitere Nachrichten an ihn auf dem Control-Stream und die Messung der Eingabekette
+/// der Cursor-Finder, weitere Nachrichten an ihn auf dem Control-Stream, die Messung der Eingabekette und
+/// was er beim Einfügen abrufen darf
 struct Admitted {
     server_name: String,
     sharing: watch::Receiver<Sharing>,
     cursor_finder: watch::Receiver<CursorFinder>,
     control: mpsc::UnboundedReceiver<Control>,
     latency: latency::Shared,
+    /// Der Server fügt kopierte Dateien auf Abruf ein (er sagt es dem Client).
+    pastes_on_demand: bool,
+    offers: Offers,
+    /// Seine Abrufe beim Server
+    serving: Pastes,
+}
+
+/// Verbindungen und Rechte der Clients, für Abrufe kopierter Dateien beim Einfügen (aus Systemthreads)
+#[derive(Clone, Default)]
+struct Peers(Arc<Mutex<HashMap<String, Peer>>>);
+
+/// Verbindung eines Clients und was er teilen darf
+type Peer = (Connection, watch::Receiver<Sharing>);
+
+impl Peers {
+    fn set(&self, name: &str, conn: Connection, sharing: watch::Receiver<Sharing>) {
+        self.0.lock().unwrap().insert(name.to_owned(), (conn, sharing));
+    }
+
+    /// Nur, wenn es noch dieselbe Verbindung ist
+    fn remove(&self, name: &str, id: usize) {
+        let mut peers = self.0.lock().unwrap();
+        if peers.get(name).is_some_and(|(conn, _)| conn.stable_id() == id) {
+            peers.remove(name);
+        }
+    }
+
+    /// Die jeweils aktuelle Verbindung zu `name`, solange er kopierte Dateien abgeben darf
+    fn link(&self, name: &str) -> Link {
+        let (peers, name) = (self.clone(), name.to_owned());
+        Arc::new(move || {
+            let peers = peers.0.lock().unwrap();
+            let (conn, sharing) = peers.get(&name).ok_or_else(|| format!("„{name}“ ist nicht verbunden"))?;
+            let allowed = sharing.borrow().files.from_client();
+            if !allowed {
+                return Err(format!("„{name}“ darf keine kopierten Dateien mehr abgeben"));
+            }
+            Ok(conn.clone())
+        })
+    }
 }
 
 /// Zwischenordner für ankommende Dateien
@@ -267,6 +313,8 @@ struct ClientHandle {
     control: mpsc::UnboundedSender<Control>,
     /// Folgt dem Bildschirmschoner des Servers (`Control::FollowsScreenSaver`)
     follows_saver: bool,
+    /// Fügt kopierte Dateien auf Abruf ein (`Control::PastesOnDemand`)
+    pastes_on_demand: bool,
     /// Verzögerung der Eingabekette; das Ergebnis geht jede Sekunde hinaus, solange er verbunden ist
     /// (an die Oberfläche und über den Control-Stream an ihn)
     latency: latency::Shared,
@@ -474,6 +522,11 @@ impl Server {
         // Vom Client gezogene Dateien warten hier, bis sie auf dem Server abgelegt werden.
         let mut drops = Receiver::new(Staging::create(&files::drag_staging_base())?, transfers.clone());
         let stagings = Stagings { clipboard: incoming.staging(), drag: drops.staging(), transfers: transfers.clone() };
+        // Kopierte Dateien auf Abruf: was Clients hier abrufen dürfen, ihre Abrufe hier und die hiesigen bei ihnen
+        let offers = Offers::default();
+        let serving = Pastes::new(Direction::Sending, transfers.clone());
+        let pasting = Pastes::new(Direction::Receiving, transfers.clone());
+        let peers = Peers::default();
         let _progress = {
             let notices = self.notices.clone();
             transfers.spawn_reporter(move |progress| {
@@ -509,6 +562,15 @@ impl Server {
                 }
             }
         });
+        // Auf Abruf nur mit einem einzigen Client: Was ein Client kopiert, gibt der Server sonst als
+        // Datei an den nächsten weiter, und virtuelle Dateien hat er dafür nicht.
+        let clients_in_layout = self.config.layout.screens().filter(|s| *s != self.config.name).count();
+        let paste_here = clipboard.pastes_on_demand() && clients_in_layout == 1;
+        if paste_here {
+            info!("Kopierte Dateien vom Client kommen erst beim Einfügen");
+        } else if clipboard.pastes_on_demand() {
+            info!("Kopierte Dateien von Clients kommen vorab: Mit mehreren Clients gibt der Server sie weiter");
+        }
         let files_notify: Notify = {
             let notices = self.notices.clone();
             Arc::new(move |notice| {
@@ -642,6 +704,7 @@ impl Server {
                                 let (sharing_tx, sharing_rx) = watch::channel(sharing);
                                 let (control_tx, control_rx) = mpsc::unbounded_channel();
                                 let latency_reports = self.report_latency(&name, &latency, control_tx.clone());
+                                peers.set(&name, conn.clone(), sharing_rx.clone());
                                 let handle = ClientHandle {
                                     id: conn.stable_id(),
                                     conn,
@@ -654,6 +717,7 @@ impl Server {
                                     told_positions: Default::default(),
                                     control: control_tx,
                                     follows_saver: false,
+                                    pastes_on_demand: false,
                                     latency: latency.clone(),
                                     _latency_reports: latency_reports,
                                 };
@@ -665,6 +729,9 @@ impl Server {
                                     cursor_finder: self.cursor_finder.0.subscribe(),
                                     control: control_rx,
                                     latency,
+                                    pastes_on_demand: paste_here,
+                                    offers: offers.clone(),
+                                    serving: serving.clone(),
                                 }));
                                 info!("Client „{name}“ verbunden ({}×{})", screen.width, screen.height);
                                 if sharing != Sharing::ALL {
@@ -769,6 +836,33 @@ impl Server {
                         }
                         Vec::new()
                     }
+                    NetEvent::PastesOnDemand { name, id } if is_current(&clients, &name, id) => {
+                        if let Some(client) = clients.get_mut(&name) {
+                            client.pastes_on_demand = true;
+                        }
+                        debug!("„{name}“ fügt kopierte Dateien auf Abruf ein");
+                        Vec::new()
+                    }
+                    NetEvent::ClipboardFilesOnDemand { name, id, transfer, entries, data } if is_current(&clients, &name, id) => {
+                        // Was vorab unterwegs war, ist überholt.
+                        incoming.supersede();
+                        match Offered::new(name.clone(), transfer, entries, peers.link(&name), pasting.clone()) {
+                            Ok(offered) => {
+                                let (clipboard, synced, notify) = (clipboard.clone(), clip_synced.clone(), files_notify.clone());
+                                tokio::spawn(async move {
+                                    if let Some(seq) = ondemand::deliver(offered, data, &clipboard, &notify).await {
+                                        // Nicht an denselben Client zurückschicken
+                                        synced.lock().unwrap().insert(name, seq);
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                warn!("kopierte Dateien von „{name}“ abgelehnt: {e:#}");
+                                files_notify(FilesNotice::Failed { peer: name, reason: format!("{e:#}") });
+                            }
+                        }
+                        Vec::new()
+                    }
                     NetEvent::DragOffer { name, id, probe, transfer, entries } if is_current(&clients, &name, id) => {
                         let has_files = !entries.is_empty();
                         if has_files {
@@ -788,6 +882,7 @@ impl Server {
                             }
                         }
                         info!("Client „{name}“ getrennt");
+                        peers.remove(&name, id);
                         transfers.abort_receiving(Some(&name), "Verbindung getrennt");
                         self.notify(ServerNotice::ClientDisconnected { name: name.clone() });
                         state.handle(ServerEvent::ClientDisconnected { name })
@@ -889,7 +984,8 @@ impl Server {
                     Action::DropIncoming { .. } | Action::CancelIncoming { .. } => drag_view.hide(),
                     _ => {}
                 }
-                let files = FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers };
+                let files =
+                    FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers, offers: &offers };
                 let (step, started) = (platform_step(&action), Instant::now());
                 apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops, captured);
                 let took = started.elapsed();
@@ -1050,11 +1146,13 @@ fn describe_monitors(monitors: &[Rect]) -> String {
 /// Je Client die zuletzt übertragene Clipboard-Sequenznummer
 type ClipSynced = Arc<Mutex<HashMap<String, u64>>>;
 
-/// Für ausgehende Dateien: Grenze für kopierte Dateien (0 = nie), Meldungen, Fortschritt
+/// Für ausgehende Dateien: Grenze für kopierte Dateien (0 = nie), Meldungen, Fortschritt und was Clients
+/// auf Abruf holen dürfen
 struct FileSide<'a> {
     limit: u64,
     notify: &'a Notify,
     transfers: &'a Transfers,
+    offers: &'a Offers,
 }
 
 /// Fertig übertragene Dateien eines Clients in die Zwischenablage legen.
@@ -1142,6 +1240,7 @@ fn apply(
             }
             let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), client.conn.clone());
             let (limit, notify, transfers) = (files.limit, files.notify.clone(), files.transfers.clone());
+            let on_demand = client.pastes_on_demand.then(|| files.offers.clone());
             // Lesen und PNG-Kodierung im Clipboard-Thread; die Ereignisschleife läuft weiter.
             tokio::spawn(async move {
                 let known = synced.lock().unwrap().get(&to).copied();
@@ -1149,7 +1248,7 @@ fn apply(
                 synced.lock().unwrap().insert(to.clone(), seq);
                 let Some(content) = content else { return };
                 match rights::content(content, allowed) {
-                    Some(content) => clipfiles::send(conn, content, limit, to, notify, transfers).await,
+                    Some(content) => clipfiles::send(conn, content, limit, to, notify, transfers, on_demand).await,
                     None => debug!("Zwischenablage nicht an „{to}“: nicht erlaubt"),
                 }
             });
@@ -1307,14 +1406,18 @@ async fn handle_connection(
         reply_rx.await.map_err(|_| anyhow!("Server wurde beendet"))?
     };
     let (sharing, latency) = match verdict {
-        Ok(Admitted { server_name, sharing, cursor_finder, control, latency }) => {
+        Ok(Admitted { server_name, sharing, cursor_finder, control, latency, pastes_on_demand, offers, serving }) => {
             debug!("„{name}“ läuft unter {platform:?}");
             // Ältere Clients werten die Version nicht aus; neuere melden daraufhin ihre Monitore,
             // ob sie Zeichen eingeben, die Sperrtasten setzen und dem Bildschirmschoner folgen können
             // und, sobald dort etwas im Vollbild läuft, den Spielemodus.
             let welcome = Control::Welcome { version: SERVER_VERSION, server_name, platform: Platform::current() };
             write_frame(&mut send, &welcome).await?;
-            tokio::spawn(send_control(send, sharing.clone(), cursor_finder, control, name.clone()));
+            tokio::spawn(send_control(send, sharing.clone(), cursor_finder, control, pastes_on_demand, name.clone()));
+            // Abrufe kopierter Dateien (weitere bidirektionale Streams), nur solange er sie bekommen darf
+            let rights = sharing.clone();
+            let allowed = move || rights.borrow().files.to_client();
+            tokio::spawn(ondemand::accept_fetches(conn.clone(), name.clone(), offers, serving, allowed));
             (sharing, latency)
         }
         Err(reason) => {
@@ -1349,6 +1452,9 @@ async fn handle_connection(
             Ok(Some(Control::FollowsScreenSaver)) => {
                 let _ = tx.send(NetEvent::FollowsScreenSaver { name: name.clone(), id });
             }
+            Ok(Some(Control::PastesOnDemand)) => {
+                let _ = tx.send(NetEvent::PastesOnDemand { name: name.clone(), id });
+            }
             Ok(Some(Control::Latency(Latency::Report(report)))) => {
                 latency.lock().unwrap().report(&report, Instant::now());
             }
@@ -1361,21 +1467,26 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Schickt dem Client nach dem `Welcome` seine Rechte und den Cursor-Finder (diesen nur, wenn er
-/// eingeschaltet ist), danach jede Änderung und was sonst ansteht (Bildschirmschoner, Ergebnis der
-/// Messung der Eingabekette). Clients bis Qross 0.6 lesen den Control-Stream nach dem `Welcome` nicht
-/// mehr, bei ihnen bleibt das ungelesen liegen; Clients aus 0.7 überspringen, was sie nicht kennen.
+/// Schickt dem Client nach dem `Welcome` seine Rechte, den Cursor-Finder (diesen nur, wenn er
+/// eingeschaltet ist) und ob der Server kopierte Dateien auf Abruf einfügt, danach jede Änderung und was
+/// sonst ansteht (Bildschirmschoner, Ergebnis der Messung der Eingabekette). Clients bis Qross 0.6 lesen
+/// den Control-Stream nach dem `Welcome` nicht mehr, bei ihnen bleibt das ungelesen liegen; Clients ab
+/// 0.7 überspringen, was sie nicht kennen.
 async fn send_control(
     mut control: SendStream,
     mut sharing: watch::Receiver<Sharing>,
     mut finder: watch::Receiver<CursorFinder>,
     mut extra: mpsc::UnboundedReceiver<Control>,
+    pastes_on_demand: bool,
     name: String,
 ) {
     let mut messages = vec![Control::Sharing(*sharing.borrow_and_update())];
     let style = *finder.borrow_and_update();
     if style.is_on() {
         messages.push(Control::CursorFinder(style));
+    }
+    if pastes_on_demand {
+        messages.push(Control::PastesOnDemand);
     }
     loop {
         for message in messages.drain(..) {
@@ -1445,7 +1556,7 @@ async fn receive_client_streams(
                         let Some(message) = read_frame::<_, ClipboardMsg>(&mut stream).await? else { return Ok(()) };
                         let rights = *sharing.borrow();
                         let allowed = Allowed { clipboard: rights.clipboard.from_client(), files: rights.files.from_client() };
-                        if matches!(message, ClipboardMsg::Files { .. }) && !allowed.files {
+                        if matches!(message, ClipboardMsg::Files { .. } | ClipboardMsg::FilesOnDemand { .. }) && !allowed.files {
                             info!("kopierte Dateien von „{name}“ abgewiesen: nicht erlaubt");
                         }
                         match rights::message(message, allowed) {
@@ -1454,6 +1565,9 @@ async fn receive_client_streams(
                             }
                             Some(ClipboardMsg::Files { transfer, entries, data }) => {
                                 let _ = tx.send(NetEvent::ClipboardFiles { name, id, transfer, entries, data });
+                            }
+                            Some(ClipboardMsg::FilesOnDemand { transfer, entries, data }) => {
+                                let _ = tx.send(NetEvent::ClipboardFilesOnDemand { name, id, transfer, entries, data });
                             }
                             None if !allowed.clipboard => info!("Zwischenablage von „{name}“ abgewiesen: nicht erlaubt"),
                             None => {}

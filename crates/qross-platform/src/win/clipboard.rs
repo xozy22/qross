@@ -21,10 +21,11 @@ use windows_sys::Win32::System::DataExchange::{
 };
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 
+use super::virtual_clipboard;
 use crate::clipformat::{
     build_cf_html, build_dropfiles, cf_html_fragment, dib_to_rgba, parse_dropfiles, png_to_rgba, rgba_to_dib, rgba_to_png,
 };
-use crate::{concealed, Clipboard};
+use crate::{concealed, Clipboard, VirtualFiles};
 
 const CF_UNICODETEXT: u32 = 13;
 const CF_DIB: u32 = 8;
@@ -46,7 +47,7 @@ fn registered(name: &'static str, slot: &'static OnceLock<u32>) -> u32 {
 }
 
 /// Nummer eines registrierten Formats; derselbe Name liefert immer dieselbe Nummer (0: Fehler).
-fn register(name: &str) -> u32 {
+pub(super) fn register(name: &str) -> u32 {
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe { RegisterClipboardFormatW(wide.as_ptr()) }
 }
@@ -107,7 +108,7 @@ unsafe fn raw(format: u32) -> Option<Vec<u8>> {
 }
 
 /// Kopiert Bytes in einen beweglichen globalen Speicherblock für SetClipboardData.
-unsafe fn global(bytes: &[u8]) -> anyhow::Result<*mut core::ffi::c_void> {
+pub(super) unsafe fn global(bytes: &[u8]) -> anyhow::Result<*mut core::ffi::c_void> {
     let mem = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1));
     if mem.is_null() {
         bail!("GlobalAlloc fehlgeschlagen");
@@ -169,6 +170,19 @@ impl Clipboard for WinClipboard {
         formats.push((CF_HDROP, Some(build_dropfiles(files))));
         formats.push((drop_effect_format(), Some(DROPEFFECT_COPY.to_le_bytes().to_vec())));
         put(formats)
+    }
+
+    fn pastes_on_demand(&self) -> bool {
+        virtual_clipboard::enabled()
+    }
+
+    /// Als virtuelle Dateien über OLE (siehe `virtual_clipboard`), dazu wie bei `write_files` alle
+    /// Darstellungen aus `data` und „Preferred DropEffect = Kopieren“.
+    fn write_virtual_files(&mut self, files: VirtualFiles, data: &ClipboardData) -> anyhow::Result<()> {
+        let mut formats: Vec<(u32, Vec<u8>)> =
+            formats(data)?.into_iter().filter_map(|(format, bytes)| Some((format, bytes?))).collect();
+        formats.push((drop_effect_format(), DROPEFFECT_COPY.to_le_bytes().to_vec()));
+        virtual_clipboard::set(files, formats)
     }
 
     fn sequence(&mut self) -> u64 {

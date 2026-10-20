@@ -31,7 +31,8 @@ delay_ms = 0
 # Zwischenablage (optional)
 [clipboard]
 # Kopierte Dateien (Strg+C im Explorer) bis zu dieser Gesamtgröße in MB beim Wechsel mitgeben,
-# damit sie drüben mit Strg+V eingefügt werden können. Größeres per Drag & Drop ziehen. 0 = aus
+# damit sie drüben mit Strg+V eingefügt werden können. Größeres per Drag & Drop ziehen. 0 = aus.
+# Fügt drüben Windows ein, kommen sie erst beim Einfügen, und die Grenze gilt nicht.
 max_file_mb = 1000
 # Inhalte, die ein Passwortmanager (z. B. KeePassXC) als vertraulich markiert, bleiben auf dem
 # Rechner, auf dem sie kopiert wurden. true teilt sie trotzdem.

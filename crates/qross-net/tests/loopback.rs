@@ -17,7 +17,7 @@ use qross_net::server::{CursorFinderHandle, Server, ServerConfig, ServerNotice, 
 use qross_net::{clipfiles, files};
 use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, FinderCall, RecordingCapture, RecordingFinder, RecordingInjector, SharedClipboard};
-use qross_platform::Clipboard;
+use qross_platform::{Clipboard, VirtualFiles};
 use qross_proto::{
     read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, DragMessage, Edge,
     FileEntry, FrameError, GameState, KeyCode, Latency, LatencySummary, LockState, MouseButton, MouseMove, Platform,
@@ -108,6 +108,23 @@ fn start_client_screen(
     bounds: Rect,
     monitors: Vec<Rect>,
 ) -> Setup {
+    let clipboards = (SharedClipboard::default(), SharedClipboard::default());
+    start_full(trust_client, pin, file_limit, bounds, monitors, clipboards)
+}
+
+/// Wie `start`, mit diesen Zwischenablagen für Server und Client (etwa einer, die auf Abruf einfügt)
+fn start_with_clipboards(server_clip: SharedClipboard, client_clip: SharedClipboard) -> Setup {
+    start_full(true, None, clipfiles::DEFAULT_LIMIT, LAPTOP, Vec::new(), (server_clip, client_clip))
+}
+
+fn start_full(
+    trust_client: bool,
+    pin: Option<qross_net::Fingerprint>,
+    file_limit: u64,
+    bounds: Rect,
+    monitors: Vec<Rect>,
+    (server_clip, client_clip): (SharedClipboard, SharedClipboard),
+) -> Setup {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let server_id = Identity::generate().unwrap();
     let client_id = Identity::generate().unwrap();
@@ -134,7 +151,6 @@ fn start_client_screen(
 
     let capture = RecordingCapture::default();
     let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
-    let server_clip = SharedClipboard::default();
     let (server_game, client_game) = (Game::default(), Game::default());
     let server_task = tokio::spawn(server.run(ServerPlatform {
         capture: Arc::new(capture.clone()),
@@ -147,7 +163,6 @@ fn start_client_screen(
     }));
 
     let injected = RecordingInjector::default();
-    let client_clip = SharedClipboard::default();
     let client_screen: ClientScreen = Arc::new(Mutex::new((bounds, monitors)));
     let (screen, monitors) = (client_screen.clone(), client_screen.clone());
     let client_config = ClientConfig {
@@ -1070,6 +1085,11 @@ fn is_latency_announcement(frame: &[u8]) -> bool {
 
 /// Alles, was der Client nach dem `Welcome` mit `welcome_version` auf dem Control-Stream schickt
 async fn client_sends(welcome_version: u16, injector: RecordingInjector) -> Vec<Vec<u8>> {
+    client_sends_with(welcome_version, injector, SharedClipboard::default()).await
+}
+
+/// Wie `client_sends`, mit eigener Zwischenablage des Clients
+async fn client_sends_with(welcome_version: u16, injector: RecordingInjector, clipboard: SharedClipboard) -> Vec<Vec<u8>> {
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let server_id = Identity::generate().unwrap();
     let endpoint =
@@ -1088,7 +1108,7 @@ async fn client_sends(welcome_version: u16, injector: RecordingInjector) -> Vec<
         TrustStore::in_memory(),
         ClientPlatform {
             injector: Box::new(injector),
-            clipboard: Box::new(SharedClipboard::default()),
+            clipboard: Box::new(clipboard),
             screen: Box::new(|| LAPTOP),
             monitors: Box::new(Vec::new),
             game: Box::new(|| FULLSCREEN),
@@ -2788,4 +2808,335 @@ async fn the_client_measures_the_input_chain_only_with_servers_that_know_it() {
     // Ein neuer Server erfährt gleich nach dem `Welcome`, dass der Client mitmisst.
     let frames = client_sends(LATENCY_SINCE, RecordingInjector::default()).await;
     assert_eq!(frames.iter().filter(|f| is_latency_announcement(f)).count(), 1, "{frames:?}");
+}
+
+// --- Kopierte Dateien auf Abruf -----------------------------------------------------------------
+
+/// Wie `start_with_clipboards`; wartet, bis der Client verbunden ist und beide Seiten wissen, wer auf
+/// Abruf einfügt (das melden sie sich gleich nach dem `Welcome`; ein Wechsel davor bekäme Dateien vorab).
+async fn start_on_demand(server_clip: SharedClipboard, client_clip: SharedClipboard) -> Setup {
+    let s = start_with_clipboards(server_clip, client_clip);
+    let notices = s.client_notices.clone();
+    wait_for("Verbindung", || notices.lock().unwrap().iter().any(|n| matches!(n, ClientNotice::Connected { .. }))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    s
+}
+
+/// Fügt die Dateien auf Abruf aus `clip` in `target` ein wie der Explorer (in einem eigenen Thread).
+async fn paste_into(clip: &SharedClipboard, target: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let files = clip.virtual_files().expect("Dateien auf Abruf in der Zwischenablage");
+    let target = target.to_owned();
+    tokio::task::spawn_blocking(move || qross_platform::dryrun::paste(&files, &target)).await.unwrap()
+}
+
+/// Liest Datei `index` gemächlich (wie ein Programm, das gleichzeitig schreibt), bis zum Ende oder einem
+/// Fehler. Mit `stop_after` hört es nach so vielen Bytes einfach auf, wie „Abbrechen“ im Explorer.
+fn read_slowly(files: &VirtualFiles, index: usize, stop_after: Option<u64>) -> std::io::Result<u64> {
+    let mut file = files.source.open(index);
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut offset = 0;
+    loop {
+        if stop_after.is_some_and(|limit| offset >= limit) {
+            return Ok(offset);
+        }
+        let n = file.read_at(offset, &mut buf)?;
+        if n == 0 {
+            return Ok(offset);
+        }
+        offset += n as u64;
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Die eingefügten Dateien aus `copied_files` sind vollständig.
+fn assert_pasted(target: &Path, pasted: &[PathBuf], report: &[u8]) {
+    assert_eq!(pasted, [target.join("Bericht.pdf"), target.join("Projekt")]);
+    assert_eq!(std::fs::read(target.join("Bericht.pdf")).unwrap(), report);
+    assert_eq!(std::fs::read_to_string(target.join("Projekt/sub/notiz.txt")).unwrap(), "Grüße");
+    assert!(target.join("Projekt/leer").is_dir(), "leere Ordner kommen mit");
+}
+
+/// Eigener Zielordner je Test
+fn paste_target(test: &str) -> PathBuf {
+    let target = std::env::temp_dir().join(format!("qross-eingefuegt-{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::create_dir_all(&target).unwrap();
+    target
+}
+
+#[tokio::test]
+async fn copied_files_reach_a_client_that_pastes_on_demand_only_when_pasted() {
+    let mut s = start_on_demand(SharedClipboard::default(), SharedClipboard::pasting_on_demand()).await;
+    let (source, report) = copied_files("abruf-zum-client");
+    let names = ClipboardData::from_text("Bericht.pdf\nProjekt");
+    s.server_clip.write_files(&[source.join("Bericht.pdf"), source.join("Projekt")], &names).unwrap();
+    enter_laptop(&s).await;
+    let client_clip = s.client_clip.clone();
+    wait_for("Dateien auf Abruf beim Client", || client_clip.virtual_files().is_some()).await;
+    assert_eq!(s.client_clip.read(), Some(names), "Dateinamen als Text kommen mit");
+    assert!(s.client_clip.files().is_empty(), "keine echten Dateien");
+    let listed: Vec<(String, u64, bool)> =
+        s.client_clip.virtual_files().unwrap().entries.into_iter().map(|e| (e.path, e.size, e.is_dir)).collect();
+    let notes = "Grüße".len() as u64;
+    assert_eq!(
+        listed,
+        [
+            ("Bericht.pdf".into(), report.len() as u64, false),
+            ("Projekt".into(), 0, true),
+            ("Projekt/leer".into(), 0, true),
+            ("Projekt/sub".into(), 0, true),
+            ("Projekt/sub/notiz.txt".into(), notes, false),
+        ]
+    );
+
+    // Ohne Einfügen geht nichts über die Leitung.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(server_progress(&s).is_empty() && client_progress(&s).is_empty(), "nichts übertragen");
+
+    let target = paste_target("zum-client");
+    let pasted = paste_into(&s.client_clip, &target).await.unwrap();
+    assert_pasted(&target, &pasted, &report);
+
+    // Beide Seiten melden das Einfügen als eine Übertragung.
+    let total = report.len() as u64 + notes;
+    let done = |direction| move |p: &Progress| p.direction == direction && p.phase == Phase::Done;
+    let sent = wait_for_progress("fertig beim Server", || server_progress(&s), done(Direction::Sending)).await;
+    assert_eq!((sent.kind, sent.peer.as_str(), sent.total, sent.bytes), (Kind::Clipboard, "laptop", total, total));
+    assert_eq!(sent.names, ["Bericht.pdf", "Projekt"]);
+    let got = wait_for_progress("fertig beim Client", || client_progress(&s), done(Direction::Receiving)).await;
+    assert_eq!((got.transfer, got.kind, got.peer.as_str(), got.total), (sent.transfer, Kind::Clipboard, "pc", total));
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+#[tokio::test]
+async fn copied_files_reach_a_server_that_pastes_on_demand_only_when_pasted() {
+    // Wie beim Windows-PC als Server und dem Mac als Client: am Mac kopiert, am PC eingefügt
+    let mut s = start_on_demand(SharedClipboard::pasting_on_demand(), SharedClipboard::default()).await;
+    enter_laptop(&s).await;
+    let (source, report) = copied_files("abruf-zum-server");
+    s.client_clip.write_files(&[source.join("Bericht.pdf"), source.join("Projekt")], &ClipboardData::default()).unwrap();
+    leave_laptop(&s).await;
+    let server_clip = s.server_clip.clone();
+    wait_for("Dateien auf Abruf beim Server", || server_clip.virtual_files().is_some()).await;
+    assert!(s.server_clip.files().is_empty(), "keine echten Dateien");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(server_progress(&s).is_empty() && client_progress(&s).is_empty(), "nichts übertragen");
+
+    let target = paste_target("zum-server");
+    let pasted = paste_into(&s.server_clip, &target).await.unwrap();
+    assert_pasted(&target, &pasted, &report);
+    let done = |direction| move |p: &Progress| p.direction == direction && p.phase == Phase::Done;
+    let got = wait_for_progress("fertig beim Server", || server_progress(&s), done(Direction::Receiving)).await;
+    assert_eq!(got.peer, "laptop");
+    let sent = wait_for_progress("fertig beim Client", || client_progress(&s), done(Direction::Sending)).await;
+    assert_eq!((sent.transfer, sent.peer.as_str(), sent.bytes), (got.transfer, "pc", got.total));
+
+    // Zurück zum Laptop: Der Server schickt ihm seine eigenen Dateien nicht zurück.
+    reenter_laptop(&s).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.client_clip.files(), [source.join("Bericht.pdf"), source.join("Projekt")]);
+    assert!(!client_progress(&s).iter().any(|p| p.direction == Direction::Receiving));
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+#[tokio::test]
+async fn pasting_on_demand_can_be_cancelled_on_either_side_and_in_the_program() {
+    let mut s = start_on_demand(SharedClipboard::default(), SharedClipboard::pasting_on_demand()).await;
+    let base = std::env::temp_dir().join(format!("qross-abbruch-abruf-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let name = "abbrechen-auf-abruf.bin";
+    s.server_clip.write_files(&[big_file(&base, name)], &ClipboardData::from_text(name)).unwrap();
+    enter_laptop(&s).await;
+    let client_clip = s.client_clip.clone();
+    wait_for("Dateien auf Abruf beim Client", || client_clip.virtual_files().is_some()).await;
+    let files = s.client_clip.virtual_files().unwrap();
+    let read = |stop_after| {
+        let files = files.clone();
+        tokio::task::spawn_blocking(move || read_slowly(&files, 0, stop_after))
+    };
+
+    // Abbrechen beim Empfänger (Knopf in der Oberfläche): Das Programm bekommt „abgebrochen“.
+    let reader = read(None);
+    let receiving = wait_for_progress("Einfügen läuft", || client_progress(&s), running(Direction::Receiving)).await;
+    assert_eq!((receiving.kind, receiving.peer.as_str(), receiving.total), (Kind::Clipboard, "pc", BIG));
+    assert_eq!(receiving.names, [name]);
+    let first = receiving.transfer;
+    assert!(s.client_transfers.cancel(Direction::Receiving, first));
+    let error = reader.await.unwrap().unwrap_err();
+    assert!(qross_platform::virtual_files::is_cancelled(&error), "{error}");
+    wait_for_progress("Abbruch beim Client", || client_progress(&s), ended(first, Phase::Cancelled { by_peer: false })).await;
+    wait_for_progress("Abbruch beim Server", || server_progress(&s), ended(first, Phase::Cancelled { by_peer: true })).await;
+
+    // Abbrechen beim Sender: ein neues Einfügen derselben Datei
+    let reader = read(None);
+    let sending = wait_for_progress("Einfügen läuft beim Server", || server_progress(&s), |p| {
+        running(Direction::Sending)(p) && p.transfer != first
+    })
+    .await;
+    let second = sending.transfer;
+    assert!(s.server_transfers.cancel(Direction::Sending, second));
+    let error = reader.await.unwrap().unwrap_err();
+    assert!(qross_platform::virtual_files::is_cancelled(&error), "{error}");
+    wait_for_progress("Abbruch beim Server", || server_progress(&s), ended(second, Phase::Cancelled { by_peer: false })).await;
+    wait_for_progress("Abbruch beim Client", || client_progress(&s), ended(second, Phase::Cancelled { by_peer: true })).await;
+
+    // Das Programm hört mittendrin auf (Abbrechen im Explorer): Der Sender erfährt es.
+    let stopped = read(Some(4 << 20)).await.unwrap().unwrap();
+    assert!((4 << 20..BIG).contains(&stopped), "{stopped}");
+    let abandoned = wait_for_progress("Abbruch beim Client", || client_progress(&s), |p| {
+        p.direction == Direction::Receiving && ![first, second].contains(&p.transfer) && p.phase == Phase::Cancelled { by_peer: false }
+    })
+    .await;
+    wait_for_progress("Abbruch beim Server", || server_progress(&s), ended(abandoned.transfer, Phase::Cancelled { by_peer: true }))
+        .await;
+
+    // Ein neues Einfügen geht danach ganz normal: Der Abbruch galt nur seinem Vorgang.
+    let again = read(Some(8 << 20)).await.unwrap().unwrap();
+    assert!(again >= 8 << 20, "{again}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test]
+async fn pasting_twice_at_once_fills_both_places() {
+    let mut s = start_on_demand(SharedClipboard::pasting_on_demand(), SharedClipboard::default()).await;
+    enter_laptop(&s).await;
+    let (source, report) = copied_files("abruf-zweimal");
+    s.client_clip.write_files(&[source.join("Bericht.pdf"), source.join("Projekt")], &ClipboardData::default()).unwrap();
+    leave_laptop(&s).await;
+    let server_clip = s.server_clip.clone();
+    wait_for("Dateien auf Abruf beim Server", || server_clip.virtual_files().is_some()).await;
+
+    let (here, there) = (paste_target("zweimal-hier"), paste_target("zweimal-dort"));
+    let (first, second) = tokio::join!(paste_into(&s.server_clip, &here), paste_into(&s.server_clip, &there));
+    assert_pasted(&here, &first.unwrap(), &report);
+    assert_pasted(&there, &second.unwrap(), &report);
+    let done = |progress: Vec<Progress>, direction| {
+        progress.iter().filter(|p| p.direction == direction && p.phase == Phase::Done).count()
+    };
+    wait_for("zwei fertige Einfügevorgänge beim Server", || done(server_progress(&s), Direction::Receiving) == 2).await;
+    wait_for("zwei fertige beim Client", || done(client_progress(&s), Direction::Sending) == 2).await;
+    for dir in [&source, &here, &there] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[tokio::test]
+async fn files_on_demand_need_the_right_to_share_files_also_when_pasting() {
+    let mut s = start_on_demand(SharedClipboard::pasting_on_demand(), SharedClipboard::default()).await;
+    enter_laptop(&s).await;
+    let (source, _) = copied_files("abruf-rechte");
+    s.client_clip.write_files(&[source.join("Bericht.pdf")], &ClipboardData::from_text("Bericht.pdf")).unwrap();
+    leave_laptop(&s).await;
+    let server_clip = s.server_clip.clone();
+    wait_for("Dateien auf Abruf beim Server", || server_clip.virtual_files().is_some()).await;
+
+    // Danach kein Recht mehr: Einfügen scheitert mit Grund, statt zu hängen, und es fließt nichts.
+    share_with_laptop(&s, Sharing { files: Share::Off, ..Sharing::ALL }).await;
+    let target = paste_target("ohne-recht");
+    let error = paste_into(&s.server_clip, &target).await.unwrap_err();
+    assert!(error.to_string().contains("darf keine kopierten Dateien mehr abgeben"), "{error}");
+    let failed = wait_for_progress("Fehler beim Server", || server_progress(&s), |p| matches!(p.phase, Phase::Failed(_))).await;
+    assert_eq!(failed.bytes, 0);
+    assert!(client_progress(&s).is_empty(), "der Client hat nichts geliefert");
+    let _ = std::fs::remove_dir_all(&source);
+    let _ = std::fs::remove_dir_all(&target);
+}
+
+#[tokio::test]
+async fn the_client_offers_to_paste_on_demand_only_to_servers_that_know_it() {
+    // Ein Server aus 0.12 trennte bei `PastesOnDemand`: Er bekommt nur, was er lesen kann.
+    for frame in client_sends_with(LATENCY_SINCE, RecordingInjector::default(), SharedClipboard::pasting_on_demand()).await {
+        assert_ne!(postcard::from_bytes::<Control>(&frame).ok(), Some(Control::PastesOnDemand));
+    }
+    let frames = client_sends_with(SERVER_VERSION, RecordingInjector::default(), SharedClipboard::pasting_on_demand()).await;
+    let offers = frames.iter().filter(|f| postcard::from_bytes::<Control>(f).ok() == Some(Control::PastesOnDemand)).count();
+    assert_eq!(offers, 1, "ein neuer Server erfährt es gleich nach dem Welcome");
+    // Wer nicht auf Abruf einfügen kann (macOS, Linux), sagt es auch nicht.
+    let frames = client_sends_with(SERVER_VERSION, RecordingInjector::default(), SharedClipboard::default()).await;
+    assert!(!frames.iter().any(|f| postcard::from_bytes::<Control>(f).ok() == Some(Control::PastesOnDemand)));
+}
+
+/// Läuft, solange die Erfassung lebt
+type BareServer = (UnboundedSender<CaptureEvent>, JoinHandle<anyhow::Result<()>>);
+
+/// Server „pc“ mit diesen Nachbarn und Zwischenablage; ein Client namens „laptop“ ist freigegeben.
+fn start_bare(neighbors: &[&str], clipboard: SharedClipboard) -> (std::net::SocketAddr, Identity, BareServer) {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let (server_id, client_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let edges = [Edge::Right, Edge::Left, Edge::Top, Edge::Bottom];
+    let links: Vec<LinkConfig> =
+        neighbors.iter().zip(edges).map(|(to, edge)| LinkConfig { from: "pc".into(), edge, to: (*to).into() }).collect();
+    let layout = Layout::from_links(&links).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let server = Server::bind(config, &server_id, trust).unwrap();
+    let addr = server.local_addr().unwrap();
+    let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(RecordingCapture::default()),
+        events: events_rx,
+        clipboard: Box::new(clipboard),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+        finder: None,
+    }));
+    (addr, client_id, (events, task))
+}
+
+/// Verbindung wie ein Client aus Qross 0.12; der Control-Stream bleibt offen, solange sie lebt.
+type RawClient = (quinn::Endpoint, quinn::Connection, quinn::SendStream);
+
+/// Meldet sich wie ein Client aus Qross 0.12 an und liest, was der Server danach auf dem Control-Stream schickt.
+async fn hello_as_0_12(addr: std::net::SocketAddr, id: &Identity) -> (RawClient, Vec<Control>) {
+    let (endpoint, conn) = connect_raw(addr, id).await;
+    let (mut control, mut control_rx) = conn.open_bi().await.unwrap();
+    let hello =
+        Control::Hello { version: PROTOCOL_VERSION, name: "laptop".into(), screen: ScreenInfo { bounds: LAPTOP }, platform: Platform::MacOs };
+    write_frame(&mut control, &hello).await.unwrap();
+    let mut messages = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_millis(600), async {
+        while let Ok(Some(message)) = read_frame::<_, Control>(&mut control_rx).await {
+            messages.push(message);
+        }
+    })
+    .await;
+    ((endpoint, conn, control), messages)
+}
+
+#[tokio::test]
+async fn a_server_that_pastes_on_demand_still_takes_files_ahead_from_older_clients() {
+    let server_clip = SharedClipboard::pasting_on_demand();
+    let (addr, client_id, (_events, server_task)) = start_bare(&["laptop"], server_clip.clone());
+    let ((_endpoint, conn, _control), messages) = hello_as_0_12(addr, &client_id).await;
+    assert!(matches!(messages.first(), Some(Control::Welcome { version: SERVER_VERSION, .. })), "{messages:?}");
+    assert!(messages.contains(&Control::PastesOnDemand), "der Server sagt es; Qross 0.12 überspringt es: {messages:?}");
+
+    // Ein Client aus 0.12 kennt das nicht und schickt kopierte Dateien wie bisher samt Inhalt.
+    let (source, report) = copied_files("abruf-alter-client");
+    let entries = files::collect(&[source.join("Bericht.pdf")]).unwrap();
+    let list: Vec<FileEntry> = entries.iter().map(|e| e.entry.clone()).collect();
+    let transfer = clipfiles::new_transfer_id();
+    let message = ClipboardMsg::Files { transfer, entries: list, data: ClipboardData::default() };
+    send_raw(&conn, StreamKind::Clipboard, &message).await;
+    files::send_tracked(conn.clone(), StreamKind::ClipboardFile, transfer, entries, "pc", &Transfers::new()).await.unwrap();
+    let clip = server_clip.clone();
+    wait_up_to(Duration::from_secs(20), "echte Dateien beim Server", || !clip.clone().files().is_empty()).await;
+    assert!(server_clip.virtual_files().is_none());
+    assert_eq!(std::fs::read(&server_clip.clone().files()[0]).unwrap(), report);
+    server_task.abort();
+    let _ = std::fs::remove_dir_all(&source);
+}
+
+#[tokio::test]
+async fn a_server_with_several_clients_takes_copied_files_ahead() {
+    // Was ein Client kopiert, gibt der Server als Datei an den nächsten weiter: Dafür braucht er sie ganz.
+    let (addr, client_id, (_events, server_task)) = start_bare(&["laptop", "tablet"], SharedClipboard::pasting_on_demand());
+    let (_client, messages) = hello_as_0_12(addr, &client_id).await;
+    assert!(matches!(messages.first(), Some(Control::Welcome { .. })), "{messages:?}");
+    assert!(!messages.contains(&Control::PastesOnDemand), "{messages:?}");
+    server_task.abort();
 }

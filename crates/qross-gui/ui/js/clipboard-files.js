@@ -14,7 +14,9 @@ export function renderClipLimit() {
 export function setupClipboardFiles() {
   const mod = state.platform === "macos" ? "Cmd" : "Strg";
   for (const hint of $$("[data-clip-hint]")) {
-    hint.textContent = `${mod}+C auf Dateien, drüben ${mod}+V. Größeres per Drag & Drop. 0 schaltet es aus.`;
+    hint.textContent =
+      `${mod}+C auf Dateien, drüben ${mod}+V. Größeres per Drag & Drop; fügt drüben Windows ein, kommen sie erst ` +
+      "beim Einfügen und ohne Grenze. 0 schaltet es aus.";
   }
   for (const input of $$("[data-clip-limit]")) {
     input.addEventListener("input", () => {

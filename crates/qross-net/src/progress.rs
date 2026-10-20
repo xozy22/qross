@@ -277,6 +277,10 @@ impl Transfers {
         {
             let mut entries = self.entries();
             let entry = entries.entry((direction, transfer)).or_insert_with(Entry::new);
+            // Beendet und mit derselben Nummer neu begonnen (ein Einfügevorgang auf Abruf geht weiter)
+            if !entry.phase.is_running() {
+                *entry = Entry::new();
+            }
             entry.info = Some(info);
             entry.cancel = Some(Arc::new(cancel));
         }
@@ -297,6 +301,26 @@ impl Transfers {
     pub(crate) fn end(&self, direction: Direction, transfer: u64, phase: Phase) {
         if let Some(entry) = self.entries().get_mut(&(direction, transfer)) {
             entry.finish(phase);
+        }
+        self.0.wake.notify_one();
+    }
+
+    /// Wie es um eine Übertragung steht; `None`, wenn sie unbekannt ist (oder schon gemeldet und vergessen)
+    pub(crate) fn phase(&self, direction: Direction, transfer: u64) -> Option<Phase> {
+        self.entries().get(&(direction, transfer)).map(|entry| entry.phase.clone())
+    }
+
+    /// Ende ohne Fehler, obwohl nicht alles übertragen wurde (beim Einfügen auf Abruf hat das Programm
+    /// Dateien übersprungen): Die Gesamtgröße wird zum Übertragenen.
+    pub(crate) fn settle(&self, direction: Direction, transfer: u64) {
+        if let Some(entry) = self.entries().get_mut(&(direction, transfer)) {
+            if entry.phase.is_running() {
+                let bytes = entry.bytes.load(Ordering::Relaxed);
+                if let Some(info) = &mut entry.info {
+                    info.total = info.total.min(bytes);
+                }
+                entry.finish(Phase::Done);
+            }
         }
         self.0.wake.notify_one();
     }
@@ -534,6 +558,17 @@ mod tests {
             assert_eq!(phase(id), Some(Phase::Running), "Übertragung {id}");
         }
         assert_eq!(transfers.cancel_with("laptop", Direction::Sending, Kind::Clipboard), 0, "läuft nicht mehr");
+    }
+
+    #[test]
+    fn a_settled_transfer_counts_only_what_was_transferred() {
+        let transfers = Transfers::new();
+        transfers.begin(Direction::Receiving, 8, info(1000), || {});
+        transfers.counter(Direction::Receiving, 8).fetch_add(400, Ordering::Relaxed);
+        transfers.settle(Direction::Receiving, 8);
+        let (out, idle) = collect(&transfers, Instant::now());
+        assert_eq!((out[0].phase.clone(), out[0].bytes, out[0].total), (Phase::Done, 400, 400));
+        assert!(idle);
     }
 
     #[test]

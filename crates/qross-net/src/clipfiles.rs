@@ -4,6 +4,8 @@
 //! (`Clipboard::Files`) und die Inhalte (Streams vom Typ `ClipboardFile`, niedrige Priorität) an
 //! die Gegenstelle – bis zu einer Gesamtgröße (Standard 1 GB). Größeres bleibt Drag & Drop
 //! vorbehalten, sonst wanderten bei jedem Wechsel Gigabytes, die vielleicht nie eingefügt werden.
+//! Fügt die Gegenstelle auf Abruf ein (Windows, `Control::PastesOnDemand`), geht nur die Liste,
+//! ohne Größengrenze; sie holt die Dateien erst beim Einfügen (siehe `ondemand`).
 //!
 //! **Empfangen:** Die Dateien landen in einem eigenen Ordner im Cache, der Neuverbindungen und
 //! Programmende übersteht, denn eingefügt wird oft erst später. In die Zwischenablage kommen sie
@@ -24,7 +26,8 @@ use quinn::Connection;
 use tracing::{debug, info, warn};
 
 use crate::clipboard::Content;
-use crate::files::{self, human_size, sanitize, FileOutcome, Staging};
+use crate::files::{self, human_size, sanitize, FileOutcome, LocalEntry, Staging};
+use crate::ondemand::{Offers, MAX_ENTRIES};
 use crate::progress::{self, Direction, Info, Kind, Phase, Transfers};
 use crate::streams::{send_clipboard, send_clipboard_message};
 
@@ -32,7 +35,7 @@ use crate::streams::{send_clipboard, send_clipboard_message};
 pub const DEFAULT_LIMIT: u64 = 1_000_000_000;
 
 /// Vorherige Übertragungen bleiben so lange liegen – falls gerade noch daraus eingefügt wird.
-const KEEP_PREVIOUS: Duration = Duration::from_secs(10 * 60);
+pub(crate) const KEEP_PREVIOUS: Duration = Duration::from_secs(10 * 60);
 
 /// Meldungen für eine Oberfläche. `names` sind die obersten kopierten Dateien und Ordner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,8 +82,21 @@ pub fn new_transfer_id() -> u64 {
 
 /// Überträgt den Inhalt der lokalen Zwischenablage an `peer`. Dateien nur bis `limit` Bytes
 /// (0 = nie); sonst geht nur mit, was außer den Dateien in der Zwischenablage liegt. Die Dateien
-/// erscheinen in `transfers`.
-pub async fn send(conn: Connection, content: Content, limit: u64, peer: String, notify: Notify, transfers: Transfers) {
+/// erscheinen in `transfers`. Fügt `peer` auf Abruf ein (`on_demand`), geht nur ihre Liste (ohne
+/// Größengrenze, höchstens `MAX_ENTRIES` Einträge), und `peer` holt sie beim Einfügen.
+pub(crate) async fn send(
+    conn: Connection,
+    content: Content,
+    limit: u64,
+    peer: String,
+    notify: Notify,
+    transfers: Transfers,
+    on_demand: Option<Offers>,
+) {
+    // Neuer Inhalt: Was `peer` bisher auf Abruf hatte, ist überholt.
+    if let Some(offers) = &on_demand {
+        offers.supersede(&peer);
+    }
     let (paths, data) = match content {
         Content::Data(data) => {
             info!("Zwischenablage → „{peer}“: {}", data.summary());
@@ -90,6 +106,15 @@ pub async fn send(conn: Connection, content: Content, limit: u64, peer: String, 
     };
     let names: Vec<String> =
         paths.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
+    if let Some(offers) = on_demand.filter(|_| limit != 0) {
+        let roots = paths.clone();
+        match tokio::task::spawn_blocking(move || files::collect_within(&roots, u64::MAX, MAX_ENTRIES)).await {
+            Ok(Ok(Some(entries))) => return offer(&conn, entries, data, peer, names, &offers, &notify).await,
+            Ok(Ok(None)) => info!("Mehr als {MAX_ENTRIES} Dateien und Ordner für „{peer}“ – sie gehen vorab statt auf Abruf"),
+            // Nicht lesbar: Das stellt das Vorab-Übertragen gleich noch einmal fest und meldet es.
+            _ => {}
+        }
+    }
     let collected = if limit == 0 {
         debug!("kopierte Dateien werden nicht übertragen (ausgeschaltet)");
         None
@@ -137,6 +162,27 @@ pub async fn send(conn: Connection, content: Content, limit: u64, peer: String, 
         Ok(()) => debug!("kopierte Dateien an „{peer}“ gesendet in {:.1} s", started.elapsed().as_secs_f64()),
         // Neuerer Inhalt beim Empfänger, Verbindung weg oder eine Qross-Version ohne Dateien in der Zwischenablage
         Err(e) => info!("Übertragung kopierter Dateien an „{peer}“ beendet: {e:#}"),
+    }
+}
+
+/// Kopierte Dateien auf Abruf: Nur die Liste geht an `peer`, der sie beim Einfügen holt (siehe `ondemand`).
+async fn offer(
+    conn: &Connection,
+    entries: Vec<LocalEntry>,
+    data: ClipboardData,
+    peer: String,
+    names: Vec<String>,
+    offers: &Offers,
+    notify: &Notify,
+) {
+    let transfer = new_transfer_id();
+    let list: Vec<FileEntry> = entries.iter().map(|e| e.entry.clone()).collect();
+    let bytes = list.iter().map(|e| e.size).sum();
+    offers.add(transfer, &peer, entries);
+    info!("Zwischenablage → „{peer}“: {} ({}, auf Abruf)", names.join(", "), human_size(bytes));
+    notify(FilesNotice::Sending { peer: peer.clone(), names, bytes });
+    if let Err(e) = send_clipboard_message(conn, &Clipboard::FilesOnDemand { transfer, entries: list, data }).await {
+        warn!("Kopierte Dateien an „{peer}“ nicht gesendet: {e:#}");
     }
 }
 

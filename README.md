@@ -16,7 +16,8 @@ Eine eigene Implementierung in der Art von Synergy, geschrieben in Rust. Statt T
 Protokoll über **QUIC**. Bei Paketverlust (WLAN) bleibt der Cursor damit flüssig, wo ein TCP-Transport wie der von
 Synergy 200–600 ms hängt ([Benchmark](docs/benchmark-ergebnisse.md)). Große Dateien wandern per **Drag & Drop** über
 die Bildschirmkante, ohne dass Maus und Tastatur ins Stocken geraten. Kopierte Dateien lassen sich auf dem
-anderen Rechner einfach **einfügen** (Strg+C hier, Strg+V dort).
+anderen Rechner einfach **einfügen** (Strg+C hier, Strg+V dort); unter Windows kommen sie erst beim Einfügen,
+auch mehrere Gigabyte.
 
 <p align="center">
   <img src="docs/assets/screenshots/server.png" width="820" alt="Server-Ansicht: Anordnung der Bildschirme, Rechnerliste mit Freigabe-Anfrage und die Details des ausgewählten Rechners, hier seine Rechte">
@@ -47,7 +48,7 @@ anderen Rechner einfach **einfügen** (Strg+C hier, Strg+V dort).
 | Eingaben während eines 2-MB-Clipboards (p99)¹ | 116 ms (0 % Verlust) / 248 ms (1 %) | 32 ms / 5 ms, keine Ruckler über 50 ms |
 | Screenshots & formatierter Text in der Zwischenablage | ja | ja, als PNG bzw. HTML, ohne die Eingaben auszubremsen |
 | Dateien per Drag & Drop | über dieselbe Verbindung wie die Eingaben | eigener Stream je Datei, SHA-256-geprüft, auch GB-große Dateien und Ordner |
-| Dateien kopieren und einfügen | nicht über die Zwischenablage, nur per Drag & Drop | Strg+C im Explorer, Strg+V auf dem anderen Rechner, in beide Richtungen, bis 1 GB automatisch |
+| Dateien kopieren und einfügen | nicht über die Zwischenablage, nur per Drag & Drop | Strg+C im Explorer, Strg+V auf dem anderen Rechner, in beide Richtungen; nach Windows erst beim Einfügen und ohne Größengrenze, sonst bis 1 GB automatisch |
 | Vertrauen | TLS mit Fingerprint-Bestätigung | gegenseitige Zertifikate: der Server gibt Clients explizit frei, der Client merkt sich den Server |
 | Versehentliches Wechseln an Ecken | Ecken-Schutz muss konfiguriert werden | Ecken-Totzone ab Werk, optionale Wechselverzögerung |
 | PC ↔ Mac | Modifier von Hand umbelegen | Strg/Cmd wird automatisch getauscht |
@@ -64,7 +65,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Server: Eingaben erfassen, Kanten pro Monitor | ✔ | ✔ | ✔ GNOME ≥ 45, KDE ≥ 6.1, Hyprland ≥ 0.56 | ✔¹ |
 | Client: Eingaben einspeisen | ✔ | ✔ | ✔ GNOME ≥ 45, KDE ≥ 6.1, sonst über XWayland | ✔¹ |
 | Zwischenablage in beide Richtungen: Text, HTML, Bilder (z. B. Screenshots) | ✔ | ✔ | ✔ KDE, wlroots direkt; GNOME über XWayland | ✔¹ |
-| Dateien kopieren und einfügen, in beide Richtungen | ✔ Explorer | ✔ Dateimanager mit `text/uri-list` (Nautilus, Dolphin) | wie Zwischenablage | ✔ Finder¹ |
+| Dateien kopieren und einfügen, in beide Richtungen | ✔ Explorer, übertragen erst beim Einfügen¹⁰ | ✔ Dateimanager mit `text/uri-list` (Nautilus, Dolphin) | wie Zwischenablage | ✔ Finder¹ |
 | Passwörter nicht teilen: was Passwortmanager als vertraulich markieren, bleibt auf dem Rechner | ✔ `ExcludeClipboardContentFromMonitorProcessing` (KeePass, KeePassXC, 1Password) | ✔ `x-kde-passwordManagerHint` (KeePassXC) | wie Zwischenablage | ✔ `ConcealedType`, `TransientType`¹ |
 | Cursor auf dem Server ausblenden | ✔ | ✔ | Sache des Compositors | soweit macOS es zulässt¹ |
 | Drag & Drop **vom Server** ziehen⁸ | ✔ | ✔ Dateimanager (XDND) | – | ✔ Finder¹ |
@@ -139,6 +140,16 @@ Cursors deckt sie nie ab. Immer an, nicht über Programmen im Vollbild. Wie beim
 Wayland keine Fenster über andere Programme legen, und unter macOS zeigt nur die App etwas, nicht `qross` auf
 der Kommandozeile. Geprüft sind Bild und Ablauf im Test, beide Richtungen über echtes QUIC; auf echten Rechnern
 ist sie noch nicht geprüft.
+¹⁰ Fügt ein Windows-Rechner ein (ab Qross 0.13 auf beiden Seiten), liegt die Liste sofort in seiner
+Zwischenablage, als „virtuelle Dateien“ wie bei Outlook-Anhängen oder Remotedesktop. Übertragen wird erst, wenn
+der Explorer einfügt, mit seinem Fortschrittsdialog und dem von Qross; ohne Einfügen fließt nichts, und die Grenze
+für kopierte Dateien gilt nicht. Abbrechen geht im Explorer und in Qross auf beiden Seiten. Programme, die nur
+echte Dateien annehmen (manche Chat- und Upload-Felder), bekommen so nichts; mit der Umgebungsvariablen
+`QROSS_PASTE_ON_DEMAND=0` kommen kopierte Dateien wieder vorab. Ein Server mit mehreren Clients holt sie weiterhin
+vorab, weil er sie an den nächsten weitergibt. macOS und Linux übertragen weiter vorab: Der Finder nimmt beim
+Einfügen keine Dateiversprechen an. Geprüft im Test über echtes QUIC (beide Richtungen, Abbrechen auf jeder Seite
+und im Programm, zweimal gleichzeitig, ältere Gegenstellen) und unter Windows mit der echten Zwischenablage und
+dem Einfügen des Explorers, auch mit 1,2 GB; mit einem echten Mac noch nicht.
 
 **Wie geprüft wurde:**
 - Plattformunabhängige Logik, Protokoll und Netzwerk: Unit-Tests und Ende-zu-Ende-Tests über echtes QUIC
@@ -159,6 +170,10 @@ ist sie noch nicht geprüft.
   sie auf dem Rechner eingerichtet sind.
 - Windows-Zwischenablage: echter Test mit Text, HTML, PNG und Screenshot-Bitmap (DIB) sowie kopierten Dateien,
   die der Explorer anschließend selbst einfügt, und mit den Formaten, mit denen Passwortmanager markieren.
+  Kopierte Dateien auf Abruf: virtuelle Dateien (Ordner, große und leere Datei), die der Explorer in einem zweiten
+  Prozess über sein Drop-Ziel einfügt, so wie Strg+V; dabei auch ein Abbruch mitten in einer Datei und 1,2 GB
+  über QUIC von einem Client im selben Prozess. Die Shell-Automatisierung (`Shell.Application`, Verb „Einfügen“)
+  holt virtuelle Dateien nicht ab; dafür gibt es den Weg über das Drop-Ziel.
 - Feststelltaste und Num unter Windows: echt umgeschaltet und zurückgestellt (`SendInput`, `GetKeyState`),
   solange der Rechner nicht gesperrt ist. Unter X11 setzt und liest der X11-Test sie. macOS
   (`IOHIDSetModifierLockState`) ist nur übersetzt, nicht auf einem echten Mac geprüft.
@@ -367,7 +382,8 @@ Hinweise:
   übernimmt ein Rechner aus `[sharing]`.
 - `[clipboard] max_file_mb` in `qross.toml` bzw. `qross client --clipboard-max-mb`: kopierte Dateien bis zu
   dieser Gesamtgröße beim Wechsel mitgeben (Standard 1000, 0 = aus). Sie liegen danach im Cache
-  (`%LOCALAPPDATA%\Qross\clipboard`) und werden nach einem Tag aufgeräumt.
+  (`%LOCALAPPDATA%\Qross\clipboard`) und werden nach einem Tag aufgeräumt. Fügt die Gegenstelle auf Abruf ein
+  (Windows), gilt die Grenze nicht; 0 schaltet kopierte Dateien auch dann aus.
 - `[clipboard] share_concealed` in `qross.toml` bzw. `qross client --share-concealed`: auch Inhalte teilen, die
   ein Passwortmanager als vertraulich markiert (Standard `false`: sie bleiben auf dem Rechner).
 - Solange kein Client verbunden ist, verhält sich der Server völlig unauffällig.
@@ -425,6 +441,10 @@ Diagnose für Drag & Drop: `cargo run -p qross-platform --example folder_at -- <
 an einer Bildschirmposition, `cargo run -p qross-platform --example finder -- drag <Datei …>` die Drag-Vorschau
 am Cursor, ohne dass etwas gezogen wird. `cargo run -p qross-platform --example clipboard_check` prüft die echte
 Zwischenablage dieses Rechners mit allen Formaten und stellt den vorherigen Inhalt danach wieder her.
+Kopierte Dateien auf Abruf unter Windows: `cargo run -p qross-platform --example virtual_files` legt virtuelle
+Dateien in die echte Zwischenablage und lässt sie den Explorer einfügen, `cargo run --release -p qross-net --example
+paste_on_demand` dasselbe von Ende zu Ende über QUIC mit einer Datei von 1,2 GB; beide stellen den vorherigen
+Inhalt wieder her.
 `cargo run -p qross-net --example scripted_server -- drag <Client-Name> <Datei>` spielt einen Server mit
 simulierter Maus, der einer Oberfläche im Client-Modus eine Datei hinüberzieht (oder mit `copy` kopiert, mit
 `receive` ihre kopierten Dateien abholt). So lassen sich Fortschritt und Abbrechen ohne zweiten Rechner
