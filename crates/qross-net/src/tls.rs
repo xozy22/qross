@@ -50,7 +50,7 @@ pub fn client_config(identity: &Identity) -> Result<quinn::ClientConfig> {
     Ok(config)
 }
 
-fn transport() -> quinn::TransportConfig {
+pub(crate) fn transport() -> quinn::TransportConfig {
     let mut t = quinn::TransportConfig::default();
     // Verbindungsabbrüche schnell erkennen, damit der Server die Eingaben zurückholt: Jede Seite meldet
     // sich spätestens nach 1 s, nach 5 s Stille gilt die Verbindung als tot. Nicht kürzer: WLAN hakt
