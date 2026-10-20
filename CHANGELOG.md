@@ -8,7 +8,7 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
-## [Unreleased]
+## [0.13.0] - 2026-10-20
 
 ### Neu
 
@@ -20,6 +20,25 @@ Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible 
   Seiten. Beide Rechner brauchen dafür diese Version, sonst kommen kopierte Dateien wie bisher vorab. Programme,
   die nur echte Dateien annehmen, bekommen so nichts; `QROSS_PASTE_ON_DEMAND=0` schaltet es dann ab. Unter macOS
   und Linux bleibt es vorerst beim Übertragen vorab.
+
+### Verbessert
+
+- **Eingaben neben großen Übertragungen:** Liefen viele Dateien hinüber, konnte ein Tastendruck bis zu 2,4 s
+  warten, bis in der Verbindung wieder Platz war. Qross schickt Dateien jetzt nacheinander und lässt höchstens
+  drei unbestätigt: In der Messung warten Tasten und Mausbewegungen neben einer laufenden Übertragung höchstens
+  50 ms, 99 % unter 30 ms statt bis zu 2,2 s.
+- **Zwischenablage beim Wechsel:** Bilder, kopierte Dateien und andere große Inhalte gehen erst hinüber, wenn die
+  Maus nach dem Wechsel kurz ruht (spätestens nach 1 s), statt genau dann, wenn du drüben loslegst. Text geht
+  weiterhin sofort mit.
+- **Kein Nachfahren nach einem WLAN-Hänger:** Nach einem kurzen Funkloch fuhr der Cursor drüben die alte Bahn
+  nach (gemessen: rund 1700 veraltete Positionen nach 2 s). Jetzt steht er gleich dort, wo die Maus ist. Auch
+  Bewegungen, die kurz vor dem Wechsel ankommen, gehen nicht mehr verloren.
+- **Client-Ansicht wächst mit dem Fenster:** Bisher war sie höchstens 560 px breit. Jetzt wird sie mit dem
+  Fenster breiter, verbunden ab etwa 1180 px zweispaltig (links die Verbindung mit Verlauf, rechts Server und
+  Serverwahl), und in sehr großen Fenstern wird alles etwas größer.
+- **Robuster gegen fremde Geräte im Netz:** Die erste Nachricht einer neuen Verbindung darf vor der Prüfung
+  höchstens 16 KiB groß sein und muss binnen 3 s kommen. Bisher konnte jedes Gerät im LAN je Verbindung 64 MiB
+  Speicher belegen.
 
 ## [0.12.2] - 2026-10-20
 
@@ -522,6 +541,7 @@ Erste Veröffentlichung.
 - Grafische Oberfläche mit Layout-Editor, Freigabe-Dialog und Tray-Symbol.
 - Läuft unter Windows, Linux (X11) und macOS (Apple Silicon).
 
+[0.13.0]: https://github.com/xozy22/qross/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/xozy22/qross/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/xozy22/qross/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/xozy22/qross/compare/v0.11.0...v0.12.0
