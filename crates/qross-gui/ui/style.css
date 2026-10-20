@@ -1466,7 +1466,7 @@ dialog.settings { width: min(800px, calc(100vw - 32px)); height: min(660px, calc
   border-top: 1px solid var(--line);
 }
 .qchain[hidden] { display: none; }
-.qchain-head { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--text); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.qchain-head, .qusage-head { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--text); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
 .qinfo {
   display: inline-grid;
   place-items: center;
@@ -1506,8 +1506,13 @@ dialog.settings { width: min(800px, calc(100vw - 32px)); height: min(660px, calc
   background: var(--part);
 }
 .qchain-parts span[hidden] { display: none; }
-.qchain-empty, .qchain-note { margin: 0; color: var(--faint); font-size: 11.5px; }
-.qchain-empty[hidden], .qchain-note[hidden] { display: none; }
+.qchain-empty, .qchain-note, .qusage-note { margin: 0; color: var(--faint); font-size: 11.5px; }
+.qchain-empty[hidden], .qchain-note[hidden], .qusage-note[hidden] { display: none; }
+
+/* CPU und Arbeitsspeicher von Qross, im Panel unter der Verzögerung der Eingabe (siehe usage.js) */
+.qusage { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+.qusage .qstats[hidden] { display: none; }
+.usage-line { font-variant-numeric: tabular-nums; }
 
 /* Plakette in Listen: nur Anzeige, die Details stehen im Detailbereich */
 .qpill { cursor: inherit; }

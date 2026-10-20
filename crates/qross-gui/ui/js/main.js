@@ -19,6 +19,7 @@ import { renderKeyModes } from "./keys.js";
 import { pickProfile, renderProfilePick, renderProfiles, setupProfiles } from "./profiles.js";
 import { onQuality, pruneQualities } from "./quality.js";
 import { onLatency } from "./latency.js";
+import { onUsage, setupUsage } from "./usage.js";
 import { checkPermissions, renderPermissions } from "./permissions.js";
 import { forgetPortal, refreshPortal, renderPortal } from "./portal.js";
 import { renderSecureInput } from "./secure-input.js";
@@ -113,6 +114,8 @@ async function init() {
   await listen("log", (e) => appendLogs([e.payload]));
   await listen("quality", (e) => onQuality(e.payload));
   await listen("latency", (e) => onLatency(e.payload));
+  await listen("usage", (e) => onUsage(e.payload));
+  setupUsage();
   await listen("transfer", (e) => onTransfer(e.payload));
   await listen("start-from-tray", () => {
     if (!running()) startFlow();

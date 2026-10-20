@@ -16,7 +16,7 @@ use qross_platform::{Capture, Clipboard, FinderOverlay, SecureInput};
 use qross_proto::{
     encode_datagram, is_sampled_input, is_sampled_move, read_frame, read_frame_up_to, write_frame, Clipboard as ClipboardMsg,
     ClipboardData, Control, CursorFinder, Datagram, DragMessage, FileEntry, GameState, Input, Latency, LatencySummary,
-    Platform, Rect, SampleId, Sharing, StreamKind, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
+    Platform, Rect, SampleId, Sharing, StreamKind, UsageReport, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -94,6 +94,8 @@ pub struct Server {
     /// Bildschirmschoner mit den Clients abgleichen; mit `lock_clients` sperren sie sich stattdessen
     screen_saver: bool,
     lock_clients: bool,
+    /// Wessen CPU und Arbeitsspeicher die Oberfläche gerade zeigt
+    usage: UsageHandle,
 }
 
 /// Ändert die Rechte je Rechner eines laufenden Servers (siehe [`Server::sharing`]). Sie gelten
@@ -136,6 +138,26 @@ impl CursorFinderHandle {
 
     pub fn get(&self) -> CursorFinder {
         *self.0.borrow()
+    }
+}
+
+/// Wessen CPU und Arbeitsspeicher eine Oberfläche gerade zeigt (siehe [`Server::usage`]). Nur dieser
+/// Client misst und meldet sie, etwa alle 2 s (`ServerNotice::Usage`); Clients vor Qross 0.14 nie.
+#[derive(Clone)]
+pub struct UsageHandle(Arc<watch::Sender<Option<String>>>);
+
+impl UsageHandle {
+    /// `None`: niemandes
+    pub fn watch(&self, client: Option<String>) {
+        self.0.send_if_modified(|current| {
+            let changed = *current != client;
+            *current = client;
+            changed
+        });
+    }
+
+    pub fn watched(&self) -> Option<String> {
+        self.0.borrow().clone()
     }
 }
 
@@ -194,6 +216,12 @@ pub enum ServerNotice {
     /// (siehe [`latency`]). Ohne `client_reports` (Client älter als `LATENCY_SINCE`) gibt es nur den
     /// Server-Anteil.
     Latency { name: String, summary: LatencySummary, client_reports: bool },
+    /// Der Client meldet auf Nachfrage CPU und Arbeitsspeicher (ab Qross 0.14). Kommt kurz nach
+    /// `ClientConnected`; bleibt sie aus, gibt es von ihm keine Werte.
+    ClientReportsUsage { name: String },
+    /// CPU und Arbeitsspeicher von Qross auf einem Client, etwa alle 2 s, solange die Oberfläche sie
+    /// zeigt (siehe [`Server::usage`])
+    Usage { name: String, usage: UsageReport },
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -228,6 +256,9 @@ enum NetEvent {
     PastesOnDemand { name: String, id: usize },
     /// Kopierte Dateien des Clients auf Abruf: nur die Liste
     ClipboardFilesOnDemand { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
+    /// Der Client meldet auf Nachfrage CPU und Arbeitsspeicher (`Control::ReportsUsage`)
+    ReportsUsage { name: String, id: usize },
+    Usage { name: String, id: usize, report: UsageReport },
     /// Antwort auf eine Drag-Nachfrage (Drag & Drop vom Client zum Server)
     DragOffer { name: String, id: usize, probe: u32, transfer: u64, entries: Vec<FileEntry> },
     DragFile { name: String, id: usize, outcome: FileOutcome },
@@ -316,6 +347,8 @@ struct ClientHandle {
     follows_saver: bool,
     /// Fügt kopierte Dateien auf Abruf ein (`Control::PastesOnDemand`)
     pastes_on_demand: bool,
+    /// Meldet auf Nachfrage CPU und Arbeitsspeicher (`Control::ReportsUsage`)
+    reports_usage: bool,
     /// Verzögerung der Eingabekette; das Ergebnis geht jede Sekunde hinaus, solange er verbunden ist
     /// (an die Oberfläche und über den Control-Stream an ihn)
     latency: latency::Shared,
@@ -350,6 +383,7 @@ impl Server {
             cursor_finder: CursorFinderHandle(Arc::new(watch::channel(CursorFinder::OFF).0)),
             screen_saver: true,
             lock_clients: false,
+            usage: UsageHandle(Arc::new(watch::channel(None).0)),
         })
     }
 
@@ -381,6 +415,12 @@ impl Server {
     /// Griff, um den Cursor-Finder im Betrieb zu ändern
     pub fn cursor_finder(&self) -> CursorFinderHandle {
         self.cursor_finder.clone()
+    }
+
+    /// Griff, um CPU und Arbeitsspeicher eines Clients anzuzeigen: Solange er auf ihn zeigt, meldet der
+    /// Client sie (`ServerNotice::Usage`, nur mit [`Server::with_notices`]). Standard: niemandes.
+    pub fn usage(&self) -> UsageHandle {
+        self.usage.clone()
     }
 
     /// Bildschirmschoner abgleichen (Standard: an, ohne Sperren): Beginnt er hier, starten Clients
@@ -616,6 +656,9 @@ impl Server {
         let clip_synced: ClipSynced = Arc::new(Mutex::new(HashMap::new()));
         let mut rules = self.sharing.0.subscribe();
         state.set_sharing(rules.borrow_and_update().clone());
+        // Wessen CPU und Arbeitsspeicher die Oberfläche zeigt; nur der meldet sie.
+        let mut usage_watch = self.usage.0.subscribe();
+        let mut watched = usage_watch.borrow_and_update().clone();
         let mut screen_poll = tokio::time::interval(Duration::from_secs(2));
         // Zuletzt gemeldetes Festhalten und der Bildschirm dazu
         let mut hold = (Hold::Free, self.config.name.clone());
@@ -724,6 +767,7 @@ impl Server {
                                     control: control_tx,
                                     follows_saver: false,
                                     pastes_on_demand: false,
+                                    reports_usage: false,
                                     latency: latency.clone(),
                                     _latency_reports: latency_reports,
                                 };
@@ -849,6 +893,25 @@ impl Server {
                         debug!("„{name}“ fügt kopierte Dateien auf Abruf ein");
                         Vec::new()
                     }
+                    NetEvent::ReportsUsage { name, id } if is_current(&clients, &name, id) => {
+                        if let Some(client) = clients.get_mut(&name) {
+                            client.reports_usage = true;
+                            // Zeigt die Oberfläche schon auf ihn (etwa nach einer neuen Verbindung): gleich melden
+                            if watched.as_deref() == Some(name.as_str()) {
+                                let _ = client.control.send(Control::WatchUsage(true));
+                            }
+                        }
+                        debug!("„{name}“ meldet auf Nachfrage CPU und Arbeitsspeicher");
+                        self.notify(ServerNotice::ClientReportsUsage { name });
+                        Vec::new()
+                    }
+                    NetEvent::Usage { name, id, report } if is_current(&clients, &name, id) => {
+                        // Was nach dem Ende der Anzeige noch unterwegs war, braucht niemand mehr.
+                        if watched.as_deref() == Some(name.as_str()) {
+                            self.notify(ServerNotice::Usage { name, usage: report });
+                        }
+                        Vec::new()
+                    }
                     NetEvent::ClipboardFilesOnDemand { name, id, transfer, entries, data } if is_current(&clients, &name, id) => {
                         // Was vorab unterwegs war, ist überholt.
                         incoming.supersede();
@@ -905,6 +968,17 @@ impl Server {
                         }
                     }
                     state.set_sharing(rules);
+                    Vec::new()
+                }
+                Ok(()) = usage_watch.changed() => {
+                    let now = usage_watch.borrow_and_update().clone();
+                    for (name, client) in clients.iter().filter(|(_, client)| client.reports_usage) {
+                        let (before, after) = (watched.as_deref() == Some(name.as_str()), now.as_deref() == Some(name.as_str()));
+                        if before != after {
+                            let _ = client.control.send(Control::WatchUsage(after));
+                        }
+                    }
+                    watched = now;
                     Vec::new()
                 }
                 Ok(()) = local_saver.changed() => {
@@ -1481,6 +1555,12 @@ async fn handle_connection(
             }
             Ok(Some(Control::Latency(Latency::Report(report)))) => {
                 latency.lock().unwrap().report(&report, Instant::now());
+            }
+            Ok(Some(Control::ReportsUsage)) => {
+                let _ = tx.send(NetEvent::ReportsUsage { name: name.clone(), id });
+            }
+            Ok(Some(Control::Usage(report))) => {
+                let _ = tx.send(NetEvent::Usage { name: name.clone(), id, report });
             }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht"),
             Ok(None) | Err(_) => break,

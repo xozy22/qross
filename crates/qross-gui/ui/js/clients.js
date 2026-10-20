@@ -8,6 +8,7 @@ import { addScreenNamed, markSelected, monitorNote, multipleMonitors, removeScre
 import { qualityEntry, updateQuality } from "./quality.js";
 import { shareControls, sharingOf, sharingSummary, syncShareControls } from "./sharing.js";
 import { openSettings } from "./settings.js";
+import { USAGE_TEXT, syncUsage, usageValue } from "./usage.js";
 
 /** Reiter der Details eines Clients */
 export const INSPECTOR_TABS = [
@@ -182,6 +183,7 @@ function renderInspector() {
   if (!name) {
     inspectorKey = "";
     box.replaceChildren();
+    syncUsage();
     return;
   }
   const isServer = name === server.name;
@@ -206,6 +208,8 @@ function renderInspector() {
     if (list) list.replaceWith(infoList(name, client, isServer));
   }
   box.querySelector(".insp-sub").textContent = subtitle(name, client, isServer, running);
+  // CPU und Arbeitsspeicher nur messen, was hier gerade zu sehen ist
+  syncUsage();
 }
 
 function tabLabel(tab) {
@@ -315,6 +319,7 @@ function infoList(name, client, isServer) {
     rows.push(["Port", String(state.settings.server.port)]);
     // Die Adressen stehen darunter in der Seitenleiste.
     rows.push(["Fingerprint", fingerprintNode(state.fingerprint)]);
+    rows.push([USAGE_TEXT.here, usageValue()]);
   } else {
     rows.push(["Status", client ? (s.cursor_on === name ? "verbunden, Cursor ist hier" : "verbunden") : running ? "nicht verbunden" : "Server gestoppt"]);
     if (client) {

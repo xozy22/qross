@@ -19,7 +19,7 @@ use qross_proto::{
     decode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
     DragMessage, FileEntry, FrameError, GameState, Input, Latency, LatencySummary, MouseDelta, MouseMove, Platform, Rect,
     SampleId, ScreenInfo, Sharing, StreamKind, DEFAULT_PORT, GAME_MODE_SINCE, LATENCY_SINCE, LOCKS_SINCE, MONITORS_SINCE,
-    PASTE_ON_DEMAND_SINCE, PROTOCOL_VERSION, SCREEN_SAVER_SINCE, SHARING_SINCE, TEXT_SINCE,
+    PASTE_ON_DEMAND_SINCE, PROTOCOL_VERSION, SCREEN_SAVER_SINCE, SHARING_SINCE, TEXT_SINCE, USAGE_SINCE,
 };
 use quinn::{Connection, ConnectionError, Endpoint, RecvStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -39,6 +39,7 @@ use crate::screensaver;
 use crate::streams::{read_kind, send_drag_message};
 use crate::switch_trace::{ClientTrace, EarlyMoves};
 use crate::tls::{client_config, peer_fingerprint, SERVER_NAME};
+use crate::usage;
 use crate::wake::{self, Backoff, SystemEvent};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE};
 
@@ -181,6 +182,8 @@ enum FromServer {
     ScreenSaver { active: bool, lock: bool },
     /// Ergebnis der Messung der Eingabekette (ab `LATENCY_SINCE`)
     Latency(LatencySummary),
+    /// Der Server zeigt CPU und Arbeitsspeicher dieses Rechners an bzw. nicht mehr (seit Qross 0.14)
+    WatchUsage(bool),
 }
 
 /// Zwischenablage dieses Clients: Zugriff, ankommende kopierte Dateien, Meldungen dazu.
@@ -611,6 +614,17 @@ async fn session(
         info!("Kopierte Dateien vom Server kommen erst beim Einfügen");
         write_frame(&mut control, &Control::PastesOnDemand).await?;
     }
+    // CPU und Arbeitsspeicher auf Nachfrage: nur an Server, die danach fragen können (ältere trennen bei
+    // unbekannten Nachrichten). Gemessen wird nur, solange er sie anzeigt.
+    let report_usage = server_version >= USAGE_SINCE && qross_platform::usage::supported();
+    if report_usage {
+        write_frame(&mut control, &Control::ReportsUsage).await?;
+    }
+    let (usage_watch, watched) = watch::channel(false);
+    let (usage_tx, mut usage_rx) = mpsc::unbounded_channel();
+    if report_usage {
+        tokio::spawn(usage::report_while_watched(watched, usage_tx));
+    }
     // Die einzelnen Monitore nur an Server, die sie kennen: ältere trennen bei unbekannten Nachrichten.
     let report_monitors = server_version >= MONITORS_SINCE;
     let mut monitors = (screen.monitors)();
@@ -897,7 +911,20 @@ async fn session(
                         let _ = inject.send(ToInjector::ScreenSaver { active, lock });
                     }
                     FromServer::Latency(summary) => notify(notices, ClientNotice::Latency(summary)),
+                    FromServer::WatchUsage(on) => {
+                        if on != *usage_watch.borrow() {
+                            if on {
+                                debug!("Der Server zeigt CPU und Arbeitsspeicher dieses Rechners an – Meldung alle 2 s");
+                            } else {
+                                debug!("Der Server zeigt CPU und Arbeitsspeicher dieses Rechners nicht mehr an");
+                            }
+                        }
+                        usage_watch.send_replace(on);
+                    }
                 },
+                Some(report) = usage_rx.recv(), if report_usage => {
+                    write_frame(&mut control, &Control::Usage(report)).await?;
+                }
                 Some(measured) = measured_rx.recv(), if measure => {
                     if collector.add(measured) {
                         flush.as_mut().reset(tokio::time::Instant::now() + latency::REPORT_AFTER);
@@ -1110,6 +1137,9 @@ async fn receive_control(mut control: RecvStream, tx: mpsc::UnboundedSender<From
             }
             Ok(Some(Control::PastesOnDemand)) => {
                 let _ = tx.send(FromServer::PastesOnDemand);
+            }
+            Ok(Some(Control::WatchUsage(on))) => {
+                let _ = tx.send(FromServer::WatchUsage(on));
             }
             Ok(Some(other)) => debug!(?other, "unerwartete Control-Nachricht vom Server"),
             // Von einer neueren Version: überspringen, der Frame ist gelesen

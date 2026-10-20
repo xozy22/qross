@@ -18,11 +18,14 @@ use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::clipfiles::FilesNotice;
 use qross_net::progress::{Progress, Transfers};
 use qross_net::quality::Quality;
-use qross_net::server::{CursorFinderHandle, Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle, StopHandle};
+use qross_net::server::{
+    CursorFinderHandle, Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle, StopHandle, UsageHandle,
+};
+use qross_net::usage::SharedMeter;
 use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{LogInjector, MemoryClipboard};
 use qross_platform::{Capture, FinderOverlay, SecureInput};
-use qross_proto::{CursorFinder, GameState, LatencySummary, Platform, Rect, Sharing, DEFAULT_PORT};
+use qross_proto::{CursorFinder, GameState, LatencySummary, Platform, Rect, Sharing, UsageReport, DEFAULT_PORT};
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
 use tauri::{AppHandle, Emitter};
@@ -54,6 +57,8 @@ pub struct ClientInfo {
     pub monitors: Vec<Rect>,
     /// Kann Zeichen eingeben (Zeichenmodus); `false` bei Qross vor 0.7 und unter Wayland
     pub types_text: bool,
+    /// Meldet auf Nachfrage CPU und Arbeitsspeicher; `false` bei Qross vor 0.14
+    pub reports_usage: bool,
 }
 
 /// Bildschirm dieses Rechners, wenn er Server ist
@@ -173,6 +178,31 @@ pub struct LatencyEvent {
     pub summary: LatencySummary,
 }
 
+/// CPU und Arbeitsspeicher von Qross auf einem Rechner, samt Web-Oberfläche (Ereignis `usage` für einen
+/// Client, Befehl `local_usage` für diesen Rechner)
+#[derive(Serialize, Clone, Debug)]
+pub struct UsageEvent {
+    /// Server: Name des Clients; `None`: dieser Rechner
+    pub peer: Option<String>,
+    /// Rechenzeit seit der vorigen Messung in Prozent eines Kerns (`None`: noch keine)
+    pub cpu: Option<f64>,
+    /// Arbeitsspeicher in Bytes
+    pub memory: u64,
+    /// Zahl der Prozesse
+    pub processes: u32,
+}
+
+impl UsageEvent {
+    fn reported(peer: String, report: UsageReport) -> Self {
+        Self {
+            peer: Some(peer),
+            cpu: Some(f64::from(report.cpu_permille) / 10.0),
+            memory: report.memory_kib.saturating_mul(1024),
+            processes: u32::from(report.processes),
+        }
+    }
+}
+
 pub fn platform_name(platform: Platform) -> &'static str {
     match platform {
         Platform::Windows => "windows",
@@ -183,8 +213,16 @@ pub fn platform_name(platform: Platform) -> &'static str {
 }
 
 enum Running {
-    /// `sharing`, `cursor_finder`: Rechte je Rechner und Cursor-Finder, im Betrieb änderbar
-    Server { task: JoinHandle<()>, stop: StopHandle, name: String, sharing: SharingHandle, cursor_finder: CursorFinderHandle },
+    /// `sharing`, `cursor_finder`: Rechte je Rechner und Cursor-Finder, im Betrieb änderbar; `usage`: wessen
+    /// CPU und Arbeitsspeicher das Fenster zeigt
+    Server {
+        task: JoinHandle<()>,
+        stop: StopHandle,
+        name: String,
+        sharing: SharingHandle,
+        cursor_finder: CursorFinderHandle,
+        usage: UsageHandle,
+    },
     Client { task: JoinHandle<()> },
 }
 
@@ -220,6 +258,10 @@ pub struct Runtime {
     app_state: Mutex<AppState>,
     /// Cursor-Finder dieses Rechners, für Server und Client derselbe (beim ersten Gebrauch angelegt)
     finder: OnceLock<Option<Arc<dyn FinderOverlay>>>,
+    /// Misst CPU und Arbeitsspeicher dieses Rechners, solange das Fenster sie zeigt
+    usage_meter: SharedMeter,
+    /// Wessen CPU und Arbeitsspeicher das Fenster zeigt; gilt auch für einen später gestarteten Server
+    usage_watch: Mutex<Option<String>>,
 }
 
 fn now_ms() -> u64 {
@@ -243,6 +285,8 @@ impl Runtime {
             ongoing: Mutex::new(transfers::Ongoing::default()),
             app_state: Mutex::new(AppState::load(&data_dir)),
             finder: OnceLock::new(),
+            usage_meter: SharedMeter::default(),
+            usage_watch: Mutex::new(None),
             data_dir,
         }
     }
@@ -539,6 +583,9 @@ impl Runtime {
         #[cfg(target_os = "macos")]
         let server = server.with_secure_input(Box::new(qross_platform::secure_input));
         let (stop, sharing, cursor_finder) = (server.stop_handle(), server.sharing(), server.cursor_finder());
+        // Zeigt das Fenster schon die Werte eines Clients (etwa vor einem Neustart des Servers), weiter so
+        let usage = server.usage();
+        usage.watch(self.usage_watch.lock().unwrap().clone());
         *self.transfers.lock().unwrap() = Some(server.transfers());
         let platform = ServerPlatform {
             capture,
@@ -564,7 +611,7 @@ impl Runtime {
             let result = server.run(platform).await;
             rt.finished(generation, result);
         });
-        Ok(Running::Server { task, stop, name: s.name.clone(), sharing, cursor_finder })
+        Ok(Running::Server { task, stop, name: s.name.clone(), sharing, cursor_finder, usage })
     }
 
     /// Rechte je Rechner im laufenden Server ändern. Sie gelten sofort, ohne die Clients zu trennen.
@@ -579,6 +626,22 @@ impl Runtime {
         if let Some(Running::Server { cursor_finder, .. }) = self.running.lock().await.as_ref() {
             cursor_finder.set(finder);
         }
+    }
+
+    /// Wessen CPU und Arbeitsspeicher das Fenster zeigt (`None`: niemandes). Dieser Client meldet sie dann
+    /// etwa alle 2 s (Ereignis `usage`), auch nach einem Neustart des Servers oder einer neuen Verbindung.
+    pub async fn watch_usage(&self, name: Option<String>) {
+        *self.usage_watch.lock().unwrap() = name.clone();
+        if let Some(Running::Server { usage, .. }) = self.running.lock().await.as_ref() {
+            usage.watch(name);
+        }
+    }
+
+    /// CPU und Arbeitsspeicher von Qross auf diesem Rechner, samt Web-Oberfläche. Nach einer Pause misst
+    /// das kurz zweimal und dauert gut eine halbe Sekunde (siehe [`qross_net::usage::measure`]).
+    pub async fn local_usage(&self) -> UsageEvent {
+        let usage = qross_net::usage::measure(&self.usage_meter).await;
+        UsageEvent { peer: None, cpu: usage.cpu_percent, memory: usage.memory, processes: usage.processes }
     }
 
     fn on_server_notice(&self, notice: ServerNotice) {
@@ -600,6 +663,7 @@ impl Runtime {
                     height,
                     monitors: Vec::new(),
                     types_text: false,
+                    reports_usage: false,
                 });
                 s.clients.sort_by(|a, b| a.name.cmp(&b.name));
             }),
@@ -668,6 +732,15 @@ impl Runtime {
             ServerNotice::SecureInput { holder } => self.update(|s| s.secure_holder = holder),
             ServerNotice::SecureInputHold { from } => self.on_secure_input_hold(from),
             ServerNotice::Latency { name, summary, client_reports } => self.emit_latency(Some(name), client_reports, summary),
+            ServerNotice::ClientReportsUsage { name } => self.update(|s| {
+                if let Some(c) = s.clients.iter_mut().find(|c| c.name == name) {
+                    c.reports_usage = true;
+                }
+            }),
+            // Direkt ans Fenster wie die Verbindungsqualität (alle 2 s, solange es sie zeigt)
+            ServerNotice::Usage { name, usage } => {
+                let _ = self.app.emit("usage", UsageEvent::reported(name, usage));
+            }
         }
     }
 

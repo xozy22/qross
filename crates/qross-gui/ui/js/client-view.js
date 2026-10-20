@@ -6,6 +6,7 @@ import { renderClientSharing } from "./sharing.js";
 import { renderFinder } from "./discovery.js";
 import { renderClipLimit } from "./clipboard-files.js";
 import { qualityEntry, updateQuality } from "./quality.js";
+import { syncUsage } from "./usage.js";
 
 /** Phase beim letzten Aufbau: Die Serverwahl klappt nur beim Wechsel auf oder zu, sonst bleibt sie, wie man sie lässt. */
 let lastPhase = null;
@@ -80,6 +81,8 @@ export function renderClient() {
     lastPhase = phase;
   }
   renderFinder();
+  // Eigene CPU und Arbeitsspeicher stehen in der Verbindungskarte: nur messen, solange sie zu sehen ist
+  syncUsage();
 }
 
 /** Der eingestellte Server: Name und System, soweit bekannt (aus der Suche bzw. der Verbindung) */

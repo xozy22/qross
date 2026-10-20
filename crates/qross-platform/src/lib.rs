@@ -14,6 +14,7 @@ pub mod network;
 pub mod sysevents;
 pub mod secure_input;
 pub mod screensaver;
+pub mod usage;
 pub mod virtual_files;
 pub mod wayland_logic;
 

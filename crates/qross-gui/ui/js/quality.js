@@ -3,6 +3,7 @@
 import { state } from "./core.js";
 import { el, infoIcon } from "./util.js";
 import { chainBlock, updateLatency } from "./latency.js";
+import { showUsage, usageBlock } from "./usage.js";
 
 /** Länge des Verlaufs in Sekunden (ein Messpunkt pro Sekunde) */
 export const QUALITY_SECONDS = 60;
@@ -126,6 +127,9 @@ export function qualityEntry(key) {
   };
   entry.values.rate = el("span");
   entry.values.rateSub = el("span");
+  // Am Server: der Client dieser Verbindung; am Client: dieser Rechner
+  const peer = key.startsWith("client:") ? key.slice("client:".length) : null;
+  entry.usage = usageBlock(peer, () => state.status?.clients?.some((c) => c.name === peer && !c.reports_usage) ?? false);
   const rate = el(
     "div",
     { class: "qstat rate" },
@@ -146,7 +150,8 @@ export function qualityEntry(key) {
     ),
     el("div", {}, entry.chart, el("div", { class: "qaxis" }, el("span", { text: "Latenz der letzten 60 s" }), el("span", { text: "jetzt" }))),
     el("div", { class: "qstats" }, stat("rtt", "Latenz"), stat("jitter", "Jitter"), stat("loss", "Verlust"), rate),
-    chainBlock(entry, key.startsWith("client:") ? key.slice("client:".length) : null),
+    chainBlock(entry, peer),
+    entry.usage.node,
   );
   entry.pill = el("span", { class: "qpill" }, entry.pillBars, entry.pillText);
   qualities.set(key, entry);
@@ -184,6 +189,7 @@ export function updateQuality(entry) {
   v.rateSub.textContent = last ? formatRate(last.rx_bytes_per_s) : "–";
   drawQualityChart(entry);
   updateLatency(entry);
+  showUsage(entry.usage);
 }
 
 export function qualityY(entry, ms) {

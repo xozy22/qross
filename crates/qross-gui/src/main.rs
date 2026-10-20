@@ -23,7 +23,7 @@ use tauri_plugin_opener::OpenerExt;
 use tracing::{info, warn};
 
 use crate::logs::{LogBuffer, LogLine};
-use crate::runtime::{FoundServer, Runtime, ServerProbe, Status};
+use crate::runtime::{FoundServer, Runtime, ServerProbe, Status, UsageEvent};
 use crate::updates::{UpdateStatus, Updates};
 
 type Rt<'a> = State<'a, Arc<Runtime>>;
@@ -499,6 +499,21 @@ fn trust_server(rt: Rt<'_>, address: String, fingerprint: String) -> Result<(), 
     rt.trust_server(&address, &fingerprint).map_err(|e| format!("{e:#}"))
 }
 
+/// CPU und Arbeitsspeicher von Qross auf diesem Rechner, samt Web-Oberfläche. Das Fenster fragt alle 2 s,
+/// solange es die Werte zeigt; die erste Abfrage nach einer Pause dauert gut eine halbe Sekunde.
+#[tauri::command]
+async fn local_usage(rt: Rt<'_>) -> Result<UsageEvent, String> {
+    Ok(rt.local_usage().await)
+}
+
+/// Server: Wessen CPU und Arbeitsspeicher das Fenster zeigt (`None`: niemandes). Der Client meldet sie,
+/// solange, etwa alle 2 s (Ereignis `usage`).
+#[tauri::command]
+async fn watch_usage(rt: Rt<'_>, name: Option<String>) -> Result<(), String> {
+    rt.watch_usage(name).await;
+    Ok(())
+}
+
 /// Adresse der Netzwerkkarte mit der Standardroute. `connect` auf einem UDP-Socket sendet nichts.
 fn local_ip() -> Option<String> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -655,6 +670,8 @@ fn main() {
             portal_state,
             forget_portal_permissions,
             try_cursor_finder,
+            local_usage,
+            watch_usage,
         ])
         .setup(move |app| {
             logs.attach(app.handle().clone());

@@ -7,6 +7,7 @@
 //! cargo run -p qross-net --example scripted_server -- copy <Client-Name> <Datei>
 //! cargo run -p qross-net --example scripted_server -- receive <Client-Name>
 //! cargo run -p qross-net --example scripted_server -- finder <Client-Name> [Wechsel]
+//! cargo run -p qross-net --example scripted_server -- usage <Client-Name> [Sekunden]
 //! ```
 //!
 //! Lauscht nur auf `127.0.0.1:24990` und nimmt einen Client mit diesem Namen ohne Rückfrage an.
@@ -20,6 +21,8 @@
 //! - `finder`: Cursor-Finder mit Ring und Name an; der Cursor geht alle drei Sekunden zum Client (Standard:
 //!   fünfmal) und nach anderthalb Sekunden zurück. Ohne Testmodus, denn erst dann steht der Ring dort, wo
 //!   der Client den echten Mauszeiger hinsetzt (links am Rand, auf halber Höhe).
+//! - `usage`: zeigt CPU und Arbeitsspeicher von Qross auf dem Client an wie die Oberfläche (Standard: 20 s)
+//!   und gibt jede Meldung aus. Der Cursor bleibt hier.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -45,13 +48,15 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let switches: u32 = match args.as_slice() {
-        [mode, _, count] if mode == "finder" => count.parse().context("Zahl der Wechsel")?,
+    // Wechsel bei `finder`, Sekunden bei `usage`
+    let count: u32 = match args.as_slice() {
+        [mode, _, count] if mode == "finder" || mode == "usage" => count.parse().context("Zahl")?,
+        [mode, ..] if mode == "usage" => 20,
         _ => 5,
     };
     let (mode, client, file) = match args.as_slice() {
-        [mode, client] if mode == "receive" || mode == "finder" => (mode.as_str(), client.clone(), None),
-        [mode, client, _] if mode == "finder" => (mode.as_str(), client.clone(), None),
+        [mode, client] if mode == "receive" || mode == "finder" || mode == "usage" => (mode.as_str(), client.clone(), None),
+        [mode, client, _] if mode == "finder" || mode == "usage" => (mode.as_str(), client.clone(), None),
         [mode, client, file] if mode == "drag" || mode == "copy" => {
             let file = std::path::absolute(file)?;
             if !file.exists() {
@@ -60,8 +65,8 @@ async fn main() -> Result<()> {
             (mode.as_str(), client.clone(), Some(file))
         }
         _ => bail!(
-            "Aufruf: scripted_server drag|copy <Client-Name> <Datei>, scripted_server receive <Client-Name> oder \
-             scripted_server finder <Client-Name> [Wechsel]"
+            "Aufruf: scripted_server drag|copy <Client-Name> <Datei>, scripted_server receive <Client-Name>, \
+             scripted_server finder <Client-Name> [Wechsel] oder scripted_server usage <Client-Name> [Sekunden]"
         ),
     };
 
@@ -85,6 +90,7 @@ async fn main() -> Result<()> {
         let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         clipboard.write_files(std::slice::from_ref(file), &ClipboardData::from_text(name))?;
     }
+    let usage = server.usage();
     tokio::spawn(server.run(ServerPlatform {
         capture: Arc::new(capture.clone()),
         events: events_rx,
@@ -125,8 +131,24 @@ async fn main() -> Result<()> {
             hit_edge(&events, &capture, false).await?;
             watch(&mut notices, Direction::Sending).await?;
         }
+        ("usage", _) => {
+            // Wie die Oberfläche, solange sie die Werte des Clients zeigt
+            usage.watch(Some(client.clone()));
+            let until = tokio::time::Instant::now() + Duration::from_secs(count.into());
+            while let Ok(Some(notice)) = tokio::time::timeout_at(until, notices.recv()).await {
+                if let ServerNotice::Usage { name, usage } = notice {
+                    println!(
+                        "„{name}“: CPU {:.1} % eines Kerns, RAM {:.1} MB in {} Prozessen",
+                        f64::from(usage.cpu_permille) / 10.0,
+                        usage.memory_kib as f64 / 1024.0,
+                        usage.processes
+                    );
+                }
+            }
+            usage.watch(None);
+        }
         ("finder", _) => {
-            for i in 1..=switches {
+            for i in 1..=count {
                 capture.0.lock().unwrap().clear();
                 hit_edge(&events, &capture, false).await?;
                 println!("Wechsel {i}: Cursor auf „{client}“");

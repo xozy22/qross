@@ -4,7 +4,8 @@ Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischena
 Drag & Drop vom Client zum Server, seit Qross 0.5 um die einzelnen Monitore eines Clients, seit Qross 0.6
 um den Spielemodus, seit Qross 0.7 um Zeichen statt Tastenpositionen und Rechte je Rechner, seit Qross 0.8
 um den Abgleich von Feststelltaste, Num und Rollen, den Cursor-Finder, den Bildschirmschoner und die Messung
-der Eingabekette und seit Qross 0.13 um kopierte Dateien auf Abruf (siehe unten).
+der Eingabekette, seit Qross 0.13 um kopierte Dateien auf Abruf und seit Qross 0.14 um CPU und Arbeitsspeicher je
+Rechner (siehe unten).
 
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
@@ -31,7 +32,7 @@ Implementierung: `crates/qross-proto`.
 
 | Kanal | Richtung | Zuverlässig | Inhalt |
 |---|---|---|---|
-| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing`, `SyncsLocks`, `CursorFinder`, `FollowsScreenSaver`, `ScreenSaver`, `Latency`, `PastesOnDemand` |
+| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing`, `SyncsLocks`, `CursorFinder`, `FollowsScreenSaver`, `ScreenSaver`, `Latency`, `PastesOnDemand`, `ReportsUsage`, `WatchUsage`, `Usage` |
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel`, im Zeichenmodus `Text`, `Shortcut`, `Locks` |
 | Datagramm | Server → Client | **nein** | `MouseMove`, im Spielemodus `MouseDelta` |
@@ -100,6 +101,8 @@ Was bleibt: Füllt eine große Übertragung die Leitung, warten Eingaben in der 
    Ab Version 12 meldet der Client mit `PastesOnDemand` direkt nach dem `Welcome`, dass er kopierte Dateien auf
    Abruf einfügt; der Server schickt dasselbe nach dem `Welcome`, wenn er es selbst tut (siehe Kopierte Dateien
    auf Abruf).
+   Ab Version 13 meldet der Client mit `ReportsUsage` direkt nach dem `Welcome`, dass er auf Nachfrage CPU und
+   Arbeitsspeicher meldet (siehe CPU und Arbeitsspeicher).
 3. Der Server öffnet den Input-Stream.
 4. Erreicht der Cursor eine Kante mit einem verbundenen Nachbarn: `Enter { epoch, x, y }`, bei Clients mit
    `SyncsLocks` gleich gefolgt von `Locks`. Danach folgen `MouseMove`-Datagramme (im Spielemodus `MouseDelta`)
@@ -646,6 +649,49 @@ Ende mit 99. Perzentil und Maximum; mit `files` gehen dabei kopierte Dateien üb
 der Server nur Clients, die sich gemeldet haben; Clients aus 0.7 lesen den Control-Stream zwar, bekommen es aber
 nie. Für ältere Clients misst der Server nur seinen eigenen Anteil, die Oberfläche zeigt dann nur ihn. Ein neuer
 Client an einem älteren Server misst nichts, dort entfällt die Anzeige.
+
+## CPU und Arbeitsspeicher
+
+Seit Qross 0.14 (Welcome-Version 13). Die Oberfläche zeigt, wie viel Rechenzeit und Arbeitsspeicher Qross auf einem
+Rechner braucht, samt seiner Web-Oberfläche und aller Hilfsprozesse: am Server in den Details des ausgewählten
+Rechners (für einen Client im Reiter „Verbindung“, für den Server selbst als „Qross hier“), am Client in der Karte
+„Verbindung“. Implementierung: Messung in `crates/qross-platform/src/usage/`, Meldungen in
+`crates/qross-net/src/usage.rs`.
+
+**Gemessen** wird nur auf Abruf, nie im Hintergrund:
+
+| System | Prozesse | CPU | Arbeitsspeicher |
+|---|---|---|---|
+| Windows | dieser und alle Nachfahren (Toolhelp-Schnappschuss; WebView2 mit seinen Hilfsprozessen) | `GetProcessTimes` | privater Arbeitssatz (`PROCESS_MEMORY_COUNTERS_EX2`), wie im Task-Manager |
+| macOS | dieser, seine Nachfahren und die Dienste, für die er verantwortlich ist (die WebKit-Prozesse startet launchd) | `proc_pid_rusage`, Mach-Zeit in Nanosekunden umgerechnet | physischer Speicherbedarf (`ri_phys_footprint`), wie in der Aktivitätsanzeige |
+| Linux | dieser und alle Nachfahren (`/proc`; WebKitGTK, auch hinter bubblewrap) | `utime` + `stime` aus `/proc/<pid>/stat` | PSS aus `smaps_rollup` (geteilte Seiten anteilig), sonst der residente Teil |
+
+Ein Kind zählt nur, wenn es nach seinem Elternprozess gestartet ist; sonst trägt es nur eine neu vergebene
+Prozessnummer. Unter macOS zählen die Dienste nur, wenn die App für sich selbst verantwortlich ist (aus Finder,
+Dock oder als Anmeldeobjekt gestartet), denn aus dem Terminal heraus wäre es das Terminal. Die CPU ist die
+Rechenzeit aller dieser Prozesse seit der vorigen Messung in Prozent eines Kerns (100 % = ein Kern voll
+ausgelastet, mit mehreren Kernen auch mehr). Liegt die vorige Messung länger als 5 s zurück, misst Qross zweimal im
+Abstand von 0,5 s, damit der Wert für jetzt gilt. Eine Messung sieht alle Prozesse des Systems durch (einige
+Millisekunden) und läuft deshalb in einem eigenen Thread, nie in einer Ereignisschleife.
+
+**Ablauf** für die Werte eines Clients:
+
+1. Der Client schickt `ReportsUsage` direkt nach dem `Welcome`, nur ab Version 13 und wo er messen kann.
+2. Zeigt die Oberfläche des Servers seine Werte, schickt der Server ihm `WatchUsage(true)`, sobald sie nicht mehr zu
+   sehen sind (andere Auswahl, anderer Reiter, Fenster versteckt), `WatchUsage(false)`. Gezeigt wird höchstens ein
+   Client zugleich; verbindet er sich neu, bekommt er `WatchUsage(true)` gleich nach seinem `ReportsUsage`.
+3. Solange er beobachtet wird, schickt der Client etwa alle 2 s `Usage(UsageReport { cpu_permille, memory_kib,
+   processes })`, die erste rund 0,5 s nach Beginn; mit Längenfeld etwa 10 Bytes. Was nach dem Ende der Anzeige
+   noch ankommt, verwirft der Server.
+
+Die eigenen Werte fragt die Oberfläche selbst ab, ebenfalls alle 2 s und nur, solange sie zu sehen sind.
+
+Ansehen ohne zweiten Rechner: `cargo run -p qross-net --example scripted_server -- usage <Client-Name>` gibt die
+Meldungen eines Clients aus, etwa der App als Client im Testmodus mit der Adresse `127.0.0.1:24990`.
+
+**Kompatibilität:** Ein Server ab Qross 0.14 meldet im `Welcome` die Version 13. Nur dann schickt der Client
+`ReportsUsage` und `Usage`; ältere Server bekommen beides nie (sie trennten bei unbekannten Control-Nachrichten).
+`WatchUsage` bekommen nur Clients, die sich gemeldet haben; für ältere zeigt die Oberfläche „meldet das nicht“.
 
 ## Noch offen
 

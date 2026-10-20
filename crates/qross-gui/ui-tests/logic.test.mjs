@@ -9,6 +9,7 @@ import { sharingSummary } from "../ui/js/sharing.js";
 import { hotkeyId, hotkeyLabel } from "../ui/js/keys.js";
 import { chartMax, formatMs, formatPct, formatRate } from "../ui/js/quality.js";
 import { chainNumber } from "../ui/js/latency.js";
+import { USAGE_TEXT, formatCpu, formatMemory, usageLine } from "../ui/js/usage.js";
 import { updateStatusText } from "../ui/js/settings.js";
 import { selectedName } from "../ui/js/layout.js";
 import { clientPhase } from "../ui/js/client-view.js";
@@ -69,6 +70,21 @@ test("Zahlen: deutsch, mit geschütztem Leerzeichen vor der Einheit", () => {
   assert.equal(chainNumber(40), "0,04");
   assert.equal(chainNumber(2500), "2,5");
   assert.equal(chainNumber(12_400), "12");
+});
+
+test("Auslastung: Prozent eines Kerns, Arbeitsspeicher wie im Task-Manager", () => {
+  assert.equal(formatCpu(null), "–");
+  assert.equal(formatCpu(0), `0${NB}%`);
+  assert.equal(formatCpu(0.04), `<${NB}0,1${NB}%`);
+  assert.equal(formatCpu(2.34), `2,3${NB}%`);
+  assert.equal(formatCpu(137.4), `137${NB}%`, "mehrere Kerne zugleich");
+  assert.equal(formatMemory(7.5 * 1048576), `7,5${NB}MB`);
+  assert.equal(formatMemory(128 * 1048576 + 5000), `128${NB}MB`);
+  assert.equal(formatMemory(1.2 * 1073741824), `1,2${NB}GB`);
+  assert.equal(usageLine({ cpu: 0.4, memory: 128 * 1048576, processes: 6 }), `CPU 0,4${NB}% eines Kerns · RAM 128${NB}MB`);
+  assert.equal(usageLine(null), "Wird gemessen …");
+  assert.equal(USAGE_TEXT.processes(1), "in 1 Prozess");
+  assert.equal(USAGE_TEXT.processes(6), "in 6 Prozessen");
 });
 
 test("Diagramm: Skala mit etwas Luft über dem höchsten Wert", () => {

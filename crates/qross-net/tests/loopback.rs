@@ -13,7 +13,9 @@ use qross_core::sharing::{Share, Sharing, SharingRules};
 use qross_core::{CaptureEvent, Inject, Layout, LinkConfig};
 use qross_net::client::{self, ClientConfig, ClientNotice, ClientPlatform};
 use qross_net::progress::{Direction, Kind, Phase, Progress, Transfers};
-use qross_net::server::{CursorFinderHandle, Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle, StopHandle};
+use qross_net::server::{
+    CursorFinderHandle, Server, ServerConfig, ServerNotice, ServerPlatform, SharingHandle, StopHandle, UsageHandle,
+};
 use qross_net::{clipfiles, files};
 use qross_net::{Identity, TrustStore};
 use qross_platform::dryrun::{CaptureCall, FinderCall, RecordingCapture, RecordingFinder, RecordingInjector, SharedClipboard};
@@ -21,7 +23,8 @@ use qross_platform::{Clipboard, VirtualFiles};
 use qross_proto::{
     encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
     DragMessage, Edge, FileEntry, FrameError, GameState, Input, KeyCode, Latency, LatencySummary, LockState, MouseButton,
-    MouseMove, Platform, Rect, ScreenInfo, StreamKind, LATENCY_SINCE, PROTOCOL_VERSION, SERVER_VERSION,
+    MouseMove, Platform, Rect, ScreenInfo, StreamKind, LATENCY_SINCE, PASTE_ON_DEMAND_SINCE, PROTOCOL_VERSION,
+    SERVER_VERSION, USAGE_SINCE, UsageReport,
 };
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -66,6 +69,8 @@ struct Setup {
     cursor_finder: CursorFinderHandle,
     server_finder: RecordingFinder,
     client_finder: RecordingFinder,
+    /// Wessen CPU und Arbeitsspeicher der Server zeigt (Standard: niemandes)
+    usage: UsageHandle,
     /// Beendet den Server samt aller Verbindungen
     stop: StopHandle,
     server_task: JoinHandle<anyhow::Result<()>>,
@@ -146,7 +151,7 @@ fn start_full(
     let addr = server.local_addr().unwrap();
     let server_transfers = server.transfers();
     let sharing = server.sharing();
-    let (cursor_finder, stop) = (server.cursor_finder(), server.stop_handle());
+    let (cursor_finder, stop, usage) = (server.cursor_finder(), server.stop_handle(), server.usage());
     let (server_finder, client_finder) = (RecordingFinder::default(), RecordingFinder::default());
 
     let capture = RecordingCapture::default();
@@ -208,6 +213,7 @@ fn start_full(
         cursor_finder,
         server_finder,
         client_finder,
+        usage,
         stop,
         server_task,
         client_task,
@@ -1214,6 +1220,11 @@ async fn client_reports_with(welcome_version: u16, injector: RecordingInjector) 
     if welcome_version >= LATENCY_SINCE {
         frames.retain(|f| !is_latency_announcement(f));
     }
+    // Ab `USAGE_SINCE` sagt er, dass er CPU und Arbeitsspeicher melden kann; das prüft
+    // `the_client_offers_its_usage_only_to_servers_that_know_it`.
+    if welcome_version >= USAGE_SINCE {
+        frames.retain(|f| postcard::from_bytes::<Control>(f).ok() != Some(Control::ReportsUsage));
+    }
     frames
 }
 
@@ -1853,7 +1864,7 @@ fn start_typing(mode: KeyMode, injected: RecordingInjector) -> Setup {
     let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
     let server = Server::bind(config, &server_id, trust).unwrap().with_keys(keys).with_notices(notice_tx);
     let (addr, server_transfers, sharing) = (server.local_addr().unwrap(), server.transfers(), server.sharing());
-    let (cursor_finder, stop) = (server.cursor_finder(), server.stop_handle());
+    let (cursor_finder, stop, usage) = (server.cursor_finder(), server.stop_handle(), server.usage());
     let (server_finder, client_finder) = (RecordingFinder::default(), RecordingFinder::default());
 
     let capture = RecordingCapture::default();
@@ -1911,6 +1922,7 @@ fn start_typing(mode: KeyMode, injected: RecordingInjector) -> Setup {
         cursor_finder,
         server_finder,
         client_finder,
+        usage,
         stop,
         server_task,
         client_task,
@@ -3277,4 +3289,58 @@ async fn a_server_with_several_clients_takes_copied_files_ahead() {
     assert!(matches!(messages.first(), Some(Control::Welcome { .. })), "{messages:?}");
     assert!(!messages.contains(&Control::PastesOnDemand), "{messages:?}");
     server_task.abort();
+}
+
+// --- CPU und Arbeitsspeicher --------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_client_offers_its_usage_only_to_servers_that_know_it() {
+    // Ein Server aus 0.13 trennte bei `ReportsUsage`: Er bekommt es nicht.
+    for frame in client_sends(PASTE_ON_DEMAND_SINCE, RecordingInjector::default()).await {
+        assert_ne!(postcard::from_bytes::<Control>(&frame).ok(), Some(Control::ReportsUsage));
+    }
+    // Ein neuer Server erfährt es gleich nach dem `Welcome`; gemessen wird erst, wenn er hinsieht.
+    let frames = client_sends(SERVER_VERSION, RecordingInjector::default()).await;
+    let messages: Vec<Control> = frames.iter().filter_map(|f| postcard::from_bytes(f).ok()).collect();
+    assert_eq!(messages.iter().filter(|m| **m == Control::ReportsUsage).count(), 1, "{messages:?}");
+    assert!(!messages.iter().any(|m| matches!(m, Control::Usage(_))), "niemand sieht hin: {messages:?}");
+}
+
+/// Was der Server bisher über CPU und Arbeitsspeicher von „laptop“ gemeldet hat
+fn usage_reports(s: &Setup) -> Vec<UsageReport> {
+    let notices = s.notices.lock().unwrap();
+    notices
+        .iter()
+        .filter_map(|n| match n {
+            ServerNotice::Usage { name, usage } if name == "laptop" => Some(*usage),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_client_reports_its_usage_while_the_server_watches() {
+    let s = start(true, None);
+    let notices = s.notices.clone();
+    wait_for("Client meldet auf Nachfrage", || {
+        notices.lock().unwrap().iter().any(|n| matches!(n, ServerNotice::ClientReportsUsage { name } if name == "laptop"))
+    })
+    .await;
+    assert!(usage_reports(&s).is_empty(), "niemand sieht hin");
+
+    s.usage.watch(Some("laptop".into()));
+    wait_for("erste Meldung", || !usage_reports(&s).is_empty()).await;
+    // Gemessen wird dieser Testprozess: Server und Client laufen hier zusammen.
+    let first = usage_reports(&s)[0];
+    assert!(first.processes >= 1 && first.memory_kib > 0, "{first:?}");
+    wait_for("nächste Meldung", || usage_reports(&s).len() >= 2).await;
+
+    s.usage.watch(None);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let stopped = usage_reports(&s).len();
+    tokio::time::sleep(qross_net::usage::REPORT_EVERY + Duration::from_millis(500)).await;
+    assert_eq!(usage_reports(&s).len(), stopped, "niemand sieht mehr hin");
+
+    s.usage.watch(Some("laptop".into()));
+    wait_for("Meldung nach erneutem Hinsehen", || usage_reports(&s).len() > stopped).await;
 }

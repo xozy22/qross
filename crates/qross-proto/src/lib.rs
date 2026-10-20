@@ -47,7 +47,9 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// - 11: `Control::Latency`, Verzögerung der Eingabekette (seit Qross 0.8)
 /// - 12: `Control::PastesOnDemand`, `Clipboard::FilesOnDemand` und Streams vom Typ `Fetch`:
 ///   kopierte Dateien erst beim Einfügen übertragen (seit Qross 0.13)
-pub const SERVER_VERSION: u16 = 12;
+/// - 13: `Control::ReportsUsage`, `Control::WatchUsage` und `Control::Usage`: CPU und Arbeitsspeicher
+///   von Qross je Rechner (seit Qross 0.14)
+pub const SERVER_VERSION: u16 = 13;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
 /// die Verbindung bei unbekannten Control-Nachrichten.
 pub const MONITORS_SINCE: u16 = 4;
@@ -76,6 +78,9 @@ pub const LATENCY_SINCE: u16 = 11;
 /// ihm dann `Clipboard::FilesOnDemand` und beantwortet seine Abrufe (Streams vom Typ `Fetch`). Ob der
 /// Server selbst auf Abruf einfügt, sagt sein eigenes `Control::PastesOnDemand`.
 pub const PASTE_ON_DEMAND_SINCE: u16 = 12;
+/// Ab dieser `Welcome`-Version darf der Client `Control::ReportsUsage` senden; der Server schickt ihm dann
+/// `Control::WatchUsage`, und er meldet sich mit `Control::Usage`, solange jemand hinsieht.
+pub const USAGE_SINCE: u16 = 13;
 /// Höchstzahl Monitore, die der Server aus `Control::Monitors` übernimmt
 pub const MAX_MONITORS: usize = 16;
 /// ALPN-Kennung im TLS-Handshake
@@ -176,6 +181,29 @@ pub enum Control {
     /// Client → Server direkt nach dem `Welcome`, nur ab `PASTE_ON_DEMAND_SINCE`; Server → Client nach
     /// dem `Welcome` (Clients bis Qross 0.12 überspringen es oder lesen es nie).
     PastesOnDemand,
+    /// Client → Server (seit Qross 0.14, nur ab `USAGE_SINCE`): Der Client meldet auf Nachfrage, wie viel
+    /// CPU und Arbeitsspeicher Qross bei ihm braucht. Folgt direkt auf das `Welcome`.
+    ReportsUsage,
+    /// Server → Client (seit Qross 0.14, nur an Clients, die `ReportsUsage` gemeldet haben): Jemand sieht
+    /// sich die Werte dieses Clients an (`true`) bzw. nicht mehr. Solange meldet er sich mit `Usage`.
+    WatchUsage(bool),
+    /// Client → Server, solange der Server hinsieht (`WatchUsage`): CPU und Arbeitsspeicher von Qross auf
+    /// dem Client, etwa alle 2 s
+    Usage(UsageReport),
+}
+
+/// CPU und Arbeitsspeicher von Qross auf einem Rechner, über alle seine Prozesse samt Web-Oberfläche
+/// (`Control::Usage`)
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UsageReport {
+    /// Rechenzeit seit der vorigen Meldung in Promille eines Kerns (1000: ein ganzer Kern; mehr, wenn
+    /// mehrere Kerne zugleich rechnen)
+    pub cpu_permille: u32,
+    /// Belegter Arbeitsspeicher in KiB: unter Windows der private Arbeitssatz, unter macOS der physische
+    /// Speicherbedarf, unter Linux PSS
+    pub memory_kib: u64,
+    /// Zahl der Prozesse
+    pub processes: u16,
 }
 
 /// Cursor-Finder: Beim Wechsel blitzt auf dem Rechner, auf dem der Cursor ankommt, kurz ein Ring um
@@ -973,6 +1001,46 @@ mod tests {
         for reply in [FileReply::Data { size: 2_700_000_000 }, FileReply::Unavailable { reason: "überholt".into() }] {
             let bytes = postcard::to_stdvec(&reply).unwrap();
             assert_eq!(postcard::from_bytes::<FileReply>(&bytes).unwrap(), reply);
+        }
+    }
+
+    /// So sah `Control` in Qross 0.13 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ControlV013 {
+        Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+        Welcome { version: u16, server_name: String, platform: Platform },
+        Reject { reason: String },
+        ScreenChanged(ScreenInfo),
+        Monitors(Vec<Rect>),
+        Game(GameState),
+        TypesText,
+        Sharing(Sharing),
+        SyncsLocks,
+        CursorFinder(CursorFinder),
+        FollowsScreenSaver,
+        ScreenSaver { active: bool, lock: bool },
+        Latency(Latency),
+        PastesOnDemand,
+    }
+
+    #[test]
+    fn usage_reaches_only_peers_that_understand_it() {
+        // Ein Server aus 0.13 meldet Version 12: Der Client schickt ihm weder `ReportsUsage` noch `Usage`, die
+        // er nicht lesen könnte (er würde trennen). Ein Client aus 0.13 überspringt `WatchUsage`, bekommt es
+        // aber ohnehin nie, denn er meldet sich nicht dafür.
+        const { assert!(PASTE_ON_DEMAND_SINCE < USAGE_SINCE && USAGE_SINCE <= SERVER_VERSION) };
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV013>(&bytes).unwrap(), ControlV013::Welcome { version: SERVER_VERSION, .. }));
+        let bytes = postcard::to_stdvec(&Control::PastesOnDemand).unwrap();
+        assert_eq!(postcard::from_bytes::<ControlV013>(&bytes).unwrap(), ControlV013::PastesOnDemand);
+
+        let report = UsageReport { cpu_permille: 12_345, memory_kib: 131_072, processes: 7 };
+        for msg in [Control::ReportsUsage, Control::WatchUsage(true), Control::WatchUsage(false), Control::Usage(report)] {
+            let bytes = postcard::to_stdvec(&msg).unwrap();
+            assert!(postcard::from_bytes::<ControlV013>(&bytes).is_err(), "Qross 0.13 kann {msg:?} nicht lesen");
+            assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), msg);
+            assert!(bytes.len() <= 10, "{msg:?}: {} Bytes", bytes.len());
         }
     }
 }

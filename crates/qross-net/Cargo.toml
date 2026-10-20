@@ -26,4 +26,6 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# Angehaltene Uhr in Tests: Meldungen im Takt von Sekunden prüfen, ohne zu warten
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
