@@ -14,6 +14,7 @@ pub mod network;
 pub mod sysevents;
 pub mod secure_input;
 pub mod screensaver;
+pub mod virtual_files;
 pub mod wayland_logic;
 
 #[cfg(windows)]
@@ -61,6 +62,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 pub use secure_input::SecureInput;
 pub use finder::FinderOverlay;
+pub use virtual_files::{VirtualFile, VirtualFiles, VirtualSource};
 
 /// Steuerung der Eingabe-Erfassung auf dem Server.
 pub trait Capture: Send + Sync {
@@ -162,6 +164,21 @@ pub trait Clipboard: Send {
     fn write_files(&mut self, files: &[PathBuf], data: &ClipboardData) -> anyhow::Result<()> {
         let _ = (files, data);
         anyhow::bail!("Dateien in der Zwischenablage werden auf diesem System nicht unterstützt")
+    }
+
+    /// Kann dieses System kopierte Dateien einfügen, deren Inhalte erst beim Einfügen kommen
+    /// ([`Clipboard::write_virtual_files`])? Nur dann meldet Qross das der Gegenstelle, und die
+    /// überträgt kopierte Dateien nicht mehr vorab. Windows: ja (abschaltbar mit
+    /// `QROSS_PASTE_ON_DEMAND=0`); macOS und Linux: noch nicht.
+    fn pastes_on_demand(&self) -> bool {
+        false
+    }
+
+    /// Legt Dateien in die Zwischenablage, deren Inhalte `files.source` erst liefert, wenn ein Programm
+    /// sie einfügt (Windows: virtuelle Dateien), und dazu die Darstellungen aus `data`.
+    fn write_virtual_files(&mut self, files: VirtualFiles, data: &ClipboardData) -> anyhow::Result<()> {
+        let _ = (files, data);
+        anyhow::bail!("Dateien auf Abruf werden auf diesem System nicht unterstützt")
     }
 
     fn text(&mut self) -> Option<String> {
@@ -404,6 +421,14 @@ pub use mac::DragWatch;
 #[cfg(windows)]
 pub fn explorer_folder(hwnd: isize) -> Option<PathBuf> {
     win::folder_of_window(hwnd)
+}
+
+/// Nur für Tests und Diagnose: fügt die Zwischenablage in `folder` ein wie Strg+V im Explorer (über das
+/// Drop-Ziel des Ordners, im aufrufenden Thread) und kehrt zurück, wenn der Explorer fertig ist.
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn paste_clipboard_into(folder: &Path) -> anyhow::Result<()> {
+    win::paste_into(folder)
 }
 
 #[cfg(test)]

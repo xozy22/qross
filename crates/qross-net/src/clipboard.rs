@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use anyhow::{anyhow, Result};
-use qross_platform::Clipboard;
+use qross_platform::{Clipboard, VirtualFiles};
 use qross_proto::ClipboardData;
 use tokio::sync::oneshot;
 use tracing::info;
@@ -29,12 +29,15 @@ enum Job {
     /// Inhalt setzen; Antwort ist die neue Sequenznummer
     Write { data: ClipboardData, reply: oneshot::Sender<Result<u64>> },
     WriteFiles { files: Vec<PathBuf>, data: ClipboardData, reply: oneshot::Sender<Result<u64>> },
+    WriteVirtual { files: VirtualFiles, data: ClipboardData, reply: oneshot::Sender<Result<u64>> },
     Sequence { reply: oneshot::Sender<u64> },
 }
 
 #[derive(Clone)]
 pub struct ClipboardHub {
     jobs: mpsc::Sender<Job>,
+    /// Kopierte Dateien kommen hier erst beim Einfügen (siehe `Clipboard::pastes_on_demand`).
+    pastes_on_demand: bool,
 }
 
 impl ClipboardHub {
@@ -47,6 +50,7 @@ impl ClipboardHub {
         on_withheld: impl Fn() + Send + 'static,
     ) -> Self {
         let (jobs, rx) = mpsc::channel::<Job>();
+        let pastes_on_demand = clipboard.pastes_on_demand();
         let mut guard = Guard { share: share_concealed, withheld: None, on_withheld: Box::new(on_withheld) };
         std::thread::Builder::new()
             .name("qross-clipboard".into())
@@ -66,6 +70,10 @@ impl ClipboardHub {
                             let result = clipboard.write_files(&files, &data).map(|()| clipboard.sequence());
                             let _ = reply.send(result);
                         }
+                        Job::WriteVirtual { files, data, reply } => {
+                            let result = clipboard.write_virtual_files(files, &data).map(|()| clipboard.sequence());
+                            let _ = reply.send(result);
+                        }
                         Job::Sequence { reply } => {
                             let _ = reply.send(clipboard.sequence());
                         }
@@ -73,7 +81,12 @@ impl ClipboardHub {
                 }
             })
             .expect("Clipboard-Thread starten");
-        Self { jobs }
+        Self { jobs, pastes_on_demand }
+    }
+
+    /// Kopierte Dateien kommen hier erst beim Einfügen (siehe `Clipboard::pastes_on_demand`).
+    pub fn pastes_on_demand(&self) -> bool {
+        self.pastes_on_demand
     }
 
     pub async fn changed_since(&self, known: Option<u64>) -> (u64, Option<Content>) {
@@ -92,6 +105,13 @@ impl ClipboardHub {
     pub async fn write_files(&self, files: Vec<PathBuf>, data: ClipboardData) -> Result<u64> {
         let (reply, rx) = oneshot::channel();
         self.jobs.send(Job::WriteFiles { files, data, reply }).map_err(|_| anyhow!("Clipboard-Thread beendet"))?;
+        rx.await.map_err(|_| anyhow!("Clipboard-Thread beendet"))?
+    }
+
+    /// Legt Dateien auf Abruf (und `data`) in die Zwischenablage; Antwort ist die neue Sequenznummer.
+    pub async fn write_virtual_files(&self, files: VirtualFiles, data: ClipboardData) -> Result<u64> {
+        let (reply, rx) = oneshot::channel();
+        self.jobs.send(Job::WriteVirtual { files, data, reply }).map_err(|_| anyhow!("Clipboard-Thread beendet"))?;
         rx.await.map_err(|_| anyhow!("Clipboard-Thread beendet"))?
     }
 

@@ -10,6 +10,8 @@
 //! - **Clipboard** (je Übertragung ein eigener unidirektionaler Stream, beide Richtungen)
 //! - **Datei** (je Datei ein eigener unidirektionaler Stream, niedrige Priorität): Drag & Drop
 //!   (Server → Client) und kopierte Dateien aus der Zwischenablage (beide Richtungen)
+//! - **Abruf** (je Datei ein eigener bidirektionaler Stream, vom Empfänger geöffnet, niedrige
+//!   Priorität): kopierte Dateien auf Abruf, erst beim Einfügen (beide Richtungen)
 
 mod frame;
 mod geometry;
@@ -43,7 +45,9 @@ pub const PROTOCOL_VERSION: u16 = 3;
 /// - 10: `Control::FollowsScreenSaver` und `Control::ScreenSaver`, Bildschirmschoner abgleichen
 ///   (seit Qross 0.8)
 /// - 11: `Control::Latency`, Verzögerung der Eingabekette (seit Qross 0.8)
-pub const SERVER_VERSION: u16 = 11;
+/// - 12: `Control::PastesOnDemand`, `Clipboard::FilesOnDemand` und Streams vom Typ `Fetch`:
+///   kopierte Dateien erst beim Einfügen übertragen (seit Qross 0.13)
+pub const SERVER_VERSION: u16 = 12;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
 /// die Verbindung bei unbekannten Control-Nachrichten.
 pub const MONITORS_SINCE: u16 = 4;
@@ -68,6 +72,10 @@ pub const SCREEN_SAVER_SINCE: u16 = 10;
 /// Ab dieser `Welcome`-Version meldet der Client mit `Control::Latency` die Zeiten der Stichproben,
 /// und der Server schickt ihm dann das Ergebnis zurück.
 pub const LATENCY_SINCE: u16 = 11;
+/// Ab dieser `Welcome`-Version darf der Client `Control::PastesOnDemand` senden; der Server schickt
+/// ihm dann `Clipboard::FilesOnDemand` und beantwortet seine Abrufe (Streams vom Typ `Fetch`). Ob der
+/// Server selbst auf Abruf einfügt, sagt sein eigenes `Control::PastesOnDemand`.
+pub const PASTE_ON_DEMAND_SINCE: u16 = 12;
 /// Höchstzahl Monitore, die der Server aus `Control::Monitors` übernimmt
 pub const MAX_MONITORS: usize = 16;
 /// ALPN-Kennung im TLS-Handshake
@@ -162,6 +170,12 @@ pub enum Control {
     /// Zeiten der Stichproben, nur an Server ab dieser Version; Server → Client `Latency::Summary` mit
     /// dem Ergebnis, nur an Clients, die schon etwas gemeldet haben.
     Latency(Latency),
+    /// Dieser Rechner fügt kopierte Dateien auf Abruf ein (seit Qross 0.13): Er legt sie sofort in seine
+    /// Zwischenablage und holt ihre Inhalte erst, wenn ein Programm sie einfügt (Windows: virtuelle
+    /// Dateien). Wer das liest, schickt ihm `Clipboard::FilesOnDemand` statt `Clipboard::Files`.
+    /// Client → Server direkt nach dem `Welcome`, nur ab `PASTE_ON_DEMAND_SINCE`; Server → Client nach
+    /// dem `Welcome` (Clients bis Qross 0.12 überspringen es oder lesen es nie).
+    PastesOnDemand,
 }
 
 /// Cursor-Finder: Beim Wechsel blitzt auf dem Rechner, auf dem der Cursor ankommt, kurz ein Ring um
@@ -391,6 +405,29 @@ pub struct FileTrailer {
     pub sha256: [u8; 32],
 }
 
+/// Erste Nachricht auf einem Stream vom Typ `StreamKind::Fetch`: Datei `index` der Übertragung
+/// `transfer` ab Byte `offset` (seit Qross 0.13).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileRequest {
+    pub transfer: u64,
+    /// Index in `Clipboard::FilesOnDemand::entries`
+    pub index: u32,
+    pub offset: u64,
+    /// Einfügevorgang beim Empfänger: Abrufe mit derselben Nummer zeigen beide Seiten als eine
+    /// Übertragung an (Fortschritt, Abbrechen).
+    pub paste: u64,
+}
+
+/// Antwort des Senders auf eine `FileRequest`
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum FileReply {
+    /// Es folgen genau `size` Rohbytes ab dem gewünschten Offset und ein `FileTrailer` mit ihrem SHA-256.
+    Data { size: u64 },
+    /// Nicht lieferbar: Übertragung unbekannt oder überholt, Datei fehlt oder hat sich geändert, Teilen
+    /// nicht (mehr) erlaubt. Der Stream endet danach.
+    Unavailable { reason: String },
+}
+
 /// Absolute Mausposition in Client-Koordinaten.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MouseMove {
@@ -434,6 +471,11 @@ pub enum Clipboard {
     /// Zwischenablage erst, wenn alle Dateien geprüft angekommen sind – dann auf die Dateien und
     /// zusätzlich auf `data` (z. B. Dateinamen als Text), soweit sein System beides zulässt.
     Files { transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
+    /// Kopierte Dateien und Ordner auf Abruf (seit Qross 0.13, nur an Gegenstellen, die
+    /// `Control::PastesOnDemand` gemeldet haben). Es folgen keine Inhalte: Der Empfänger legt die
+    /// Einträge sofort in seine Zwischenablage, dazu `data`, und holt eine Datei erst, wenn ein Programm
+    /// sie einfügt (Stream vom Typ `StreamKind::Fetch`).
+    FilesOnDemand { transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
 }
 
 /// Inhalt der Zwischenablage. Oft liegen mehrere Darstellungen gleichzeitig vor (z. B. Text und
@@ -476,7 +518,7 @@ impl ClipboardData {
     }
 }
 
-/// Erstes Byte jedes unidirektionalen Streams.
+/// Erstes Byte jedes Streams außer dem Control-Stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum StreamKind {
@@ -489,6 +531,11 @@ pub enum StreamKind {
     ClipboardFile = 4,
     /// Drag & Drop vom Client zum Server: eine `DragMessage` (seit Qross 0.5)
     Drag = 5,
+    /// Abruf einer Datei aus `Clipboard::FilesOnDemand` (seit Qross 0.13): bidirektional, vom Empfänger
+    /// geöffnet. Er schickt eine `FileRequest`, die Antwort ist ein `FileReply`, bei `Data` gefolgt von den
+    /// Rohbytes und einem `FileTrailer`. Nur zwischen Gegenstellen, die beide `PASTE_ON_DEMAND_SINCE`
+    /// kennen; ältere nehmen solche Streams nie an.
+    Fetch = 6,
 }
 
 /// Nachricht auf einem Stream vom Typ `StreamKind::Drag`: Drag & Drop vom Client zum Server.
@@ -513,6 +560,7 @@ impl StreamKind {
             3 => Some(Self::File),
             4 => Some(Self::ClipboardFile),
             5 => Some(Self::Drag),
+            6 => Some(Self::Fetch),
             _ => None,
         }
     }
@@ -563,7 +611,7 @@ mod tests {
             assert_eq!(postcard::from_bytes::<DragMessage>(&bytes).unwrap(), msg);
         }
         assert_eq!(StreamKind::from_u8(5), Some(StreamKind::Drag));
-        assert_eq!(StreamKind::from_u8(6), None);
+        assert_eq!(StreamKind::from_u8(7), None);
     }
 
     /// So sah `Control` bis Qross 0.3 aus.
@@ -862,5 +910,69 @@ mod tests {
         let mv = Datagram::MouseMove(MouseMove { epoch: 1, seq: MOUSE_SAMPLE_EVERY * 1000, x: 2559, y: 1439 });
         assert!(is_sampled_move(MOUSE_SAMPLE_EVERY * 1000));
         assert!(crate::encode_datagram(&mv).len() <= 12);
+    }
+
+    /// So sah `Control` von Qross 0.8 bis 0.12 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ControlV08 {
+        Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+        Welcome { version: u16, server_name: String, platform: Platform },
+        Reject { reason: String },
+        ScreenChanged(ScreenInfo),
+        Monitors(Vec<Rect>),
+        Game(GameState),
+        TypesText,
+        Sharing(Sharing),
+        SyncsLocks,
+        CursorFinder(CursorFinder),
+        FollowsScreenSaver,
+        ScreenSaver { active: bool, lock: bool },
+        Latency(Latency),
+    }
+
+    /// So sah `Clipboard` von Qross 0.3 bis 0.12 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ClipboardV03 {
+        Data(ClipboardData),
+        Files { transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
+    }
+
+    #[test]
+    fn files_on_demand_reach_only_peers_that_understand_them() {
+        // Ein Server aus 0.12 meldet Version 11: Der Client schickt ihm kein `PastesOnDemand`, das er
+        // nicht lesen könnte (er würde trennen). Ein Client aus 0.12 überspringt das des Servers.
+        const { assert!(LATENCY_SINCE < PASTE_ON_DEMAND_SINCE && PASTE_ON_DEMAND_SINCE <= SERVER_VERSION) };
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV08>(&bytes).unwrap(), ControlV08::Welcome { version: SERVER_VERSION, .. }));
+        let bytes = postcard::to_stdvec(&Control::PastesOnDemand).unwrap();
+        assert!(postcard::from_bytes::<ControlV08>(&bytes).is_err(), "Qross 0.12 kann PastesOnDemand nicht lesen");
+        assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), Control::PastesOnDemand);
+        assert_eq!(bytes.len(), 1);
+
+        // Die Liste auf Abruf kann eine ältere Gegenstelle nicht lesen (sie verwürfe nur diesen Stream),
+        // bekommt sie aber nie; die bisherigen Nachrichten liest sie unverändert.
+        let entries = vec![
+            FileEntry { path: "Film".into(), size: 0, is_dir: true },
+            FileEntry { path: "Film/Urlaub.mov".into(), size: 4_700_000_000, is_dir: false },
+        ];
+        let files = Clipboard::Files { transfer: 9, entries: entries.clone(), data: ClipboardData::default() };
+        let bytes = postcard::to_stdvec(&files).unwrap();
+        assert!(matches!(postcard::from_bytes::<ClipboardV03>(&bytes).unwrap(), ClipboardV03::Files { transfer: 9, .. }));
+        let on_demand = Clipboard::FilesOnDemand { transfer: 9, entries, data: ClipboardData::from_text("Film") };
+        let bytes = postcard::to_stdvec(&on_demand).unwrap();
+        assert!(postcard::from_bytes::<ClipboardV03>(&bytes).is_err(), "Qross 0.12 kann FilesOnDemand nicht lesen");
+        assert_eq!(postcard::from_bytes::<Clipboard>(&bytes).unwrap(), on_demand);
+
+        // Ein Abruf: Anfrage und beide Antworten
+        assert_eq!(StreamKind::from_u8(StreamKind::Fetch as u8), Some(StreamKind::Fetch));
+        let request = FileRequest { transfer: u64::MAX - 3, index: 1, offset: 2_000_000_000, paste: 17 };
+        let bytes = postcard::to_stdvec(&request).unwrap();
+        assert_eq!(postcard::from_bytes::<FileRequest>(&bytes).unwrap(), request);
+        assert!(bytes.len() <= 24, "{} Bytes", bytes.len());
+        for reply in [FileReply::Data { size: 2_700_000_000 }, FileReply::Unavailable { reason: "überholt".into() }] {
+            let bytes = postcard::to_stdvec(&reply).unwrap();
+            assert_eq!(postcard::from_bytes::<FileReply>(&bytes).unwrap(), reply);
+        }
     }
 }

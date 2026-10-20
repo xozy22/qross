@@ -8,6 +8,7 @@ mod inject;
 mod layout;
 mod locks;
 mod shell;
+mod virtual_clipboard;
 mod watchdog;
 
 use std::ptr::{null, null_mut};
@@ -27,6 +28,7 @@ pub use clipboard::clipboard;
 pub use game::game_state;
 pub use inject::injector;
 pub use shell::folder_of_window;
+pub use virtual_clipboard::paste_into;
 
 /// Markiert von Qross eingespeiste Ereignisse, damit die eigenen Hooks sie ignorieren.
 pub(crate) const INJECT_MAGIC: usize = 0x5152_5353; // "QRSS"

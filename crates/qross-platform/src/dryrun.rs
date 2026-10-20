@@ -1,6 +1,7 @@
 //! Ersatz-Implementierungen ohne Betriebssystem-Zugriff: für `--dry-run` und Tests.
 
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -10,7 +11,7 @@ use qross_core::Inject;
 use qross_proto::{ClipboardData, CursorFinder, LockState};
 
 use crate::screensaver::Outcome;
-use crate::{Capture, Clipboard, FinderOverlay, Injector};
+use crate::{Capture, Clipboard, FinderOverlay, Injector, VirtualFiles};
 
 /// Protokolliert eingespeiste Ereignisse, statt sie auszuführen.
 pub struct LogInjector;
@@ -113,13 +114,27 @@ pub struct MemoryClipboard {
     seq: u64,
     /// Markierung eines Passwortmanagers zum aktuellen Inhalt
     concealed: Option<&'static str>,
+    /// Fügt kopierte Dateien auf Abruf ein (wie Windows)
+    on_demand: bool,
+    /// Dateien auf Abruf, wie sie unter Windows als virtuelle Dateien lägen
+    virtual_files: Option<VirtualFiles>,
 }
 
 impl MemoryClipboard {
+    /// Eine, die kopierte Dateien auf Abruf einfügt (wie Windows)
+    pub fn pasting_on_demand() -> Self {
+        Self { on_demand: true, ..Self::default() }
+    }
+
     /// Markiert den aktuellen Inhalt wie ein Passwortmanager (`marker` z. B. aus
     /// `concealed::WINDOWS`); der nächste `write` hebt das auf.
     pub fn conceal(&mut self, marker: &'static str) {
         self.concealed = Some(marker);
+    }
+
+    /// Dateien auf Abruf in der Zwischenablage (siehe [`paste`])
+    pub fn virtual_files(&self) -> Option<VirtualFiles> {
+        self.virtual_files.clone()
     }
 }
 
@@ -131,6 +146,7 @@ impl Clipboard for MemoryClipboard {
     fn write(&mut self, data: &ClipboardData) -> anyhow::Result<()> {
         self.data = (!data.is_empty()).then(|| data.clone());
         self.files.clear();
+        self.virtual_files = None;
         self.concealed = None;
         self.seq += 1;
         Ok(())
@@ -153,11 +169,68 @@ impl Clipboard for MemoryClipboard {
     fn concealed(&mut self) -> Option<&'static str> {
         self.concealed
     }
+
+    fn pastes_on_demand(&self) -> bool {
+        self.on_demand
+    }
+
+    fn write_virtual_files(&mut self, files: VirtualFiles, data: &ClipboardData) -> anyhow::Result<()> {
+        anyhow::ensure!(self.on_demand, "diese Zwischenablage fügt nicht auf Abruf ein");
+        self.write(data)?;
+        self.virtual_files = Some(files);
+        Ok(())
+    }
+}
+
+/// Fügt `files` in den Ordner `target` ein wie der Explorer: Ordner anlegen, jede Datei der Reihe nach
+/// ganz lesen. Liefert die obersten eingefügten Pfade. Wartet auf die Daten, also nicht in einer
+/// Async-Laufzeit aufrufen (z. B. `spawn_blocking`).
+pub fn paste(files: &VirtualFiles, target: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut tops: Vec<PathBuf> = Vec::new();
+    let mut buf = vec![0u8; 1 << 20];
+    for (index, entry) in files.entries.iter().enumerate() {
+        let path = target.join(&entry.path);
+        let top = target.join(entry.path.split('/').next().unwrap_or_default());
+        if !tops.contains(&top) {
+            tops.push(top);
+        }
+        if entry.is_dir {
+            std::fs::create_dir_all(&path)?;
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut out = std::fs::File::create(&path)?;
+        let mut file = files.source.open(index);
+        let mut offset = 0u64;
+        loop {
+            let n = file.read_at(offset, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n])?;
+            offset += n as u64;
+        }
+    }
+    Ok(tops)
 }
 
 /// Von außen veränderbares Clipboard (für Tests).
 #[derive(Clone, Default)]
 pub struct SharedClipboard(pub Arc<Mutex<MemoryClipboard>>);
+
+impl SharedClipboard {
+    /// Eine, die kopierte Dateien auf Abruf einfügt (wie Windows)
+    pub fn pasting_on_demand() -> Self {
+        Self(Arc::new(Mutex::new(MemoryClipboard::pasting_on_demand())))
+    }
+
+    /// Dateien auf Abruf in der Zwischenablage (siehe [`paste`])
+    pub fn virtual_files(&self) -> Option<VirtualFiles> {
+        self.0.lock().unwrap().virtual_files()
+    }
+}
 
 impl Clipboard for SharedClipboard {
     fn read(&mut self) -> Option<ClipboardData> {
@@ -182,6 +255,14 @@ impl Clipboard for SharedClipboard {
 
     fn concealed(&mut self) -> Option<&'static str> {
         self.0.lock().unwrap().concealed()
+    }
+
+    fn pastes_on_demand(&self) -> bool {
+        self.0.lock().unwrap().pastes_on_demand()
+    }
+
+    fn write_virtual_files(&mut self, files: VirtualFiles, data: &ClipboardData) -> anyhow::Result<()> {
+        self.0.lock().unwrap().write_virtual_files(files, data)
     }
 }
 

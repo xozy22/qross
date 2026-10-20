@@ -8,6 +8,19 @@ jedes GitHub-Release übernimmt den Abschnitt seiner Version.
 
 Rubriken: **Neu**, **Verbessert**, **Behoben**, **Wichtig** (z. B. inkompatible Änderungen).
 
+## [Unreleased]
+
+### Neu
+
+- **Kopierte Dateien kommen unter Windows erst beim Einfügen:** Kopierst du am Mac (oder einem anderen Rechner)
+  Dateien und fügst sie am Windows-Rechner ein, liegen sie sofort in der Zwischenablage, übertragen wird aber
+  erst, wenn der Explorer sie einfügt. Damit fällt die Grenze von 1 GB weg, auch ein Film mit mehreren Gigabyte
+  lässt sich einfach einfügen, und was nie eingefügt wird, geht nie über die Leitung. Der Explorer zeigt dabei
+  seinen eigenen Fortschritt, Qross wie gewohnt seinen; Abbrechen geht im Explorer und in Qross auf beiden
+  Seiten. Beide Rechner brauchen dafür diese Version, sonst kommen kopierte Dateien wie bisher vorab. Programme,
+  die nur echte Dateien annehmen, bekommen so nichts; `QROSS_PASTE_ON_DEMAND=0` schaltet es dann ab. Unter macOS
+  und Linux bleibt es vorerst beim Übertragen vorab.
+
 ## [0.12.2] - 2026-10-20
 
 ### Behoben

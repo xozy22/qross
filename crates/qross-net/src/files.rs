@@ -29,7 +29,7 @@ use crate::clipfiles::summary;
 use crate::progress::{self, Cancelled, Direction, Info, Kind, Outgoing, Phase, Transfers};
 use crate::streams::BULK_PRIORITY;
 
-const CHUNK: usize = 256 * 1024;
+pub(crate) const CHUNK: usize = 256 * 1024;
 
 /// Eine zu sendende Datei oder ein Ordner.
 #[derive(Debug, Clone)]
@@ -47,43 +47,66 @@ pub fn collect(roots: &[PathBuf]) -> Result<Vec<LocalEntry>> {
 /// Wie [`collect`], hört aber auf, sobald die Dateien zusammen größer als `max_bytes` sind
 /// (`None`). So dauert auch ein versehentlich kopiertes Laufwerk nicht ewig.
 pub fn collect_up_to(roots: &[PathBuf], max_bytes: u64) -> Result<Option<Vec<LocalEntry>>> {
-    let mut out = Vec::new();
-    let mut total = 0;
+    collect_within(roots, max_bytes, usize::MAX)
+}
+
+/// Wie [`collect_up_to`], hört zusätzlich nach `max_entries` Dateien und Ordnern auf (`None`).
+pub fn collect_within(roots: &[PathBuf], max_bytes: u64, max_entries: usize) -> Result<Option<Vec<LocalEntry>>> {
+    let mut walk = Walk { out: Vec::new(), total: 0, max_bytes, max_entries };
     for root in roots {
         let name = root
             .file_name()
             .with_context(|| format!("{} hat keinen Dateinamen", root.display()))?
             .to_string_lossy()
             .into_owned();
-        if !walk(root, name, &mut out, &mut total, max_bytes)? {
+        if !walk.visit(root, name)? {
             return Ok(None);
         }
     }
-    Ok(Some(out))
+    Ok(Some(walk.out))
 }
 
-/// `false`, sobald `max_bytes` überschritten ist.
-fn walk(path: &Path, rel: String, out: &mut Vec<LocalEntry>, total: &mut u64, max_bytes: u64) -> Result<bool> {
-    let meta = fs::symlink_metadata(path).with_context(|| format!("{} lesen", path.display()))?;
-    if meta.is_dir() {
-        out.push(LocalEntry { source: path.to_owned(), entry: FileEntry { path: rel.clone(), size: 0, is_dir: true } });
-        let mut children: Vec<_> = fs::read_dir(path)?.collect::<Result<_, _>>()?;
-        children.sort_by_key(|c| c.file_name());
-        for child in children {
-            if !walk(&child.path(), format!("{rel}/{}", child.file_name().to_string_lossy()), out, total, max_bytes)? {
+struct Walk {
+    out: Vec<LocalEntry>,
+    total: u64,
+    max_bytes: u64,
+    max_entries: usize,
+}
+
+impl Walk {
+    /// `false`, sobald eine Grenze überschritten ist.
+    fn visit(&mut self, path: &Path, rel: String) -> Result<bool> {
+        let meta = fs::symlink_metadata(path).with_context(|| format!("{} lesen", path.display()))?;
+        if meta.is_dir() {
+            if !self.push(LocalEntry { source: path.to_owned(), entry: FileEntry { path: rel.clone(), size: 0, is_dir: true } }) {
                 return Ok(false);
             }
+            let mut children: Vec<_> = fs::read_dir(path)?.collect::<Result<_, _>>()?;
+            children.sort_by_key(|c| c.file_name());
+            for child in children {
+                if !self.visit(&child.path(), format!("{rel}/{}", child.file_name().to_string_lossy()))? {
+                    return Ok(false);
+                }
+            }
+        } else if meta.is_file() {
+            self.total = self.total.saturating_add(meta.len());
+            if self.total > self.max_bytes {
+                return Ok(false);
+            }
+            return Ok(self.push(LocalEntry { source: path.to_owned(), entry: FileEntry { path: rel, size: meta.len(), is_dir: false } }));
+        } else {
+            debug!("überspringe {} (kein normaler Eintrag)", path.display());
         }
-    } else if meta.is_file() {
-        *total = total.saturating_add(meta.len());
-        if *total > max_bytes {
-            return Ok(false);
-        }
-        out.push(LocalEntry { source: path.to_owned(), entry: FileEntry { path: rel, size: meta.len(), is_dir: false } });
-    } else {
-        debug!("überspringe {} (kein normaler Eintrag)", path.display());
+        Ok(true)
     }
-    Ok(true)
+
+    fn push(&mut self, entry: LocalEntry) -> bool {
+        if self.out.len() >= self.max_entries {
+            return false;
+        }
+        self.out.push(entry);
+        true
+    }
 }
 
 /// Höchstens so viele fertig geschriebene Datei-Streams warten auf die Bestätigung der Gegenstelle;
@@ -215,14 +238,14 @@ pub async fn send_tracked(
 }
 
 /// Hält der Empfänger den Stream an (`STOP_SENDING`), hat er die Übertragung abgebrochen oder verworfen.
-fn write_error(e: WriteError) -> anyhow::Error {
+pub(crate) fn write_error(e: WriteError) -> anyhow::Error {
     match e {
         WriteError::Stopped(_) => Cancelled { by_peer: true }.into(),
         e => e.into(),
     }
 }
 
-fn frame_write_error(e: FrameError) -> anyhow::Error {
+pub(crate) fn frame_write_error(e: FrameError) -> anyhow::Error {
     if let FrameError::Io(io) = &e {
         if let Some(WriteError::Stopped(_)) = io.get_ref().and_then(|inner| inner.downcast_ref::<WriteError>()) {
             return Cancelled { by_peer: true }.into();
@@ -232,14 +255,14 @@ fn frame_write_error(e: FrameError) -> anyhow::Error {
 }
 
 /// Setzt der Sender den Stream zurück (`RESET_STREAM`), hat er die Übertragung abgebrochen.
-fn read_error(e: ReadExactError) -> anyhow::Error {
+pub(crate) fn read_error(e: ReadExactError) -> anyhow::Error {
     match e {
         ReadExactError::ReadError(ReadError::Reset(_)) => Cancelled { by_peer: true }.into(),
         e => e.into(),
     }
 }
 
-fn frame_read_error(e: FrameError) -> anyhow::Error {
+pub(crate) fn frame_read_error(e: FrameError) -> anyhow::Error {
     if let FrameError::Io(io) = &e {
         if let Some(ReadError::Reset(_)) = io.get_ref().and_then(|inner| inner.downcast_ref::<ReadError>()) {
             return Cancelled { by_peer: true }.into();
@@ -713,6 +736,8 @@ mod tests {
         let roots = [base.join("Ordner")];
         assert_eq!(collect_up_to(&roots, 1200).unwrap().map(|e| e.len()), Some(3));
         assert!(collect_up_to(&roots, 1199).unwrap().is_none());
+        assert_eq!(collect_within(&roots, u64::MAX, 3).unwrap().map(|e| e.len()), Some(3), "Ordner zählt mit");
+        assert!(collect_within(&roots, u64::MAX, 2).unwrap().is_none());
         let _ = fs::remove_dir_all(&base);
     }
 

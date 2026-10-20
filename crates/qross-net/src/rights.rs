@@ -33,7 +33,8 @@ pub(crate) fn content(content: Content, allowed: Allowed) -> Option<Content> {
 }
 
 /// Was von einer angekommenen Nachricht übernommen werden darf (`None`: nichts). Kopierte
-/// Dateien ohne Recht darauf werden zu ihrem Text; ihre Streams lehnt der Empfänger ab.
+/// Dateien ohne Recht darauf werden zu ihrem Text; ihre Streams lehnt der Empfänger ab, Dateien auf
+/// Abruf holt er nicht.
 pub(crate) fn message(message: Clipboard, allowed: Allowed) -> Option<Clipboard> {
     match message {
         Clipboard::Data(data) => allowed.clipboard.then_some(Clipboard::Data(data)),
@@ -43,6 +44,12 @@ pub(crate) fn message(message: Clipboard, allowed: Allowed) -> Option<Clipboard>
             data: if allowed.clipboard { data } else { ClipboardData::default() },
         }),
         Clipboard::Files { data, .. } => (allowed.clipboard && !data.is_empty()).then_some(Clipboard::Data(data)),
+        Clipboard::FilesOnDemand { transfer, entries, data } if allowed.files => Some(Clipboard::FilesOnDemand {
+            transfer,
+            entries,
+            data: if allowed.clipboard { data } else { ClipboardData::default() },
+        }),
+        Clipboard::FilesOnDemand { data, .. } => (allowed.clipboard && !data.is_empty()).then_some(Clipboard::Data(data)),
     }
 }
 
@@ -92,5 +99,15 @@ mod tests {
             Some(Clipboard::Files { transfer: 3, entries, data: ClipboardData::default() })
         );
         assert_eq!(message(files, NOTHING), None);
+
+        let entries = vec![FileEntry { path: "Film.mov".into(), size: 4_000_000_000, is_dir: false }];
+        let on_demand = Clipboard::FilesOnDemand { transfer: 4, entries: entries.clone(), data: ClipboardData::from_text("Film.mov") };
+        assert_eq!(message(on_demand.clone(), ALL), Some(on_demand.clone()));
+        assert_eq!(message(on_demand.clone(), TEXT), Some(Clipboard::Data(ClipboardData::from_text("Film.mov"))), "nur der Name");
+        assert_eq!(
+            message(on_demand.clone(), FILES),
+            Some(Clipboard::FilesOnDemand { transfer: 4, entries, data: ClipboardData::default() })
+        );
+        assert_eq!(message(on_demand, NOTHING), None);
     }
 }
