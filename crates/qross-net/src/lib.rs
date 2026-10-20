@@ -20,6 +20,7 @@ pub mod quality;
 pub mod secure_input;
 pub mod screensaver;
 pub mod server;
+mod settle;
 mod switch_trace;
 mod rights;
 mod streams;

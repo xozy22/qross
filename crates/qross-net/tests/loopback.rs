@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use qross_core::chars::{KeyChars, Produces};
 use qross_core::finder::{DragIcon, DragPreview};
@@ -433,6 +433,63 @@ async fn images_and_html_travel_through_the_clipboard() {
     s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
     let server_clip = s.server_clip.clone();
     wait_for("Bild beim Server", || server_clip.clone().read().as_ref() == Some(&from_client)).await;
+}
+
+/// Ein Bild, das größer ist als das, was beim Wechsel sofort mitgeht (64 KB)
+fn large_image() -> ClipboardData {
+    let image = ClipboardData { png: Some(screenshot_png(800, 450)), ..ClipboardData::default() };
+    assert!(image.png.as_ref().unwrap().len() > 64 * 1024);
+    image
+}
+
+/// Drüben die Maus bewegen, bis `until` gilt oder `limit` um ist; `true`, wenn `until` galt
+async fn keep_moving(s: &Setup, limit: Duration, mut until: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < limit {
+        if until() {
+            return true;
+        }
+        s.events.send(CaptureEvent::MouseDelta { dx: 1, dy: 0 }).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    until()
+}
+
+#[tokio::test]
+async fn large_clipboard_content_waits_until_the_mouse_rests() {
+    let mut s = start(true, None);
+    let image = large_image();
+    s.server_clip.write(&image).unwrap();
+    enter_laptop(&s).await;
+    // Solange sich die Maus drüben bewegt, hat sie die Leitung für sich.
+    let client_clip = s.client_clip.clone();
+    let arrived = keep_moving(&s, Duration::from_millis(500), || client_clip.clone().read().is_some()).await;
+    assert!(!arrived, "das Bild kam, während sich die Maus bewegte");
+    wait_for("Bild beim Client, sobald die Maus ruht", || client_clip.clone().read().as_ref() == Some(&image)).await;
+
+    // Text geht dagegen sofort mit.
+    leave_laptop(&s).await;
+    s.server_clip.set_text("Gruß").unwrap();
+    reenter_laptop(&s).await;
+    let arrived = keep_moving(&s, Duration::from_millis(500), || client_clip.clone().text().as_deref() == Some("Gruß")).await;
+    assert!(arrived, "Text muss nicht warten, bis die Maus ruht");
+}
+
+#[tokio::test]
+async fn a_waiting_image_never_overwrites_newer_content() {
+    let mut s = start(true, None);
+    s.server_clip.write(&large_image()).unwrap();
+    enter_laptop(&s).await;
+    // Während das Bild noch wartet, wird auf dem Laptop kopiert, und der Cursor geht zurück.
+    s.client_clip.set_text("Neu vom Laptop").unwrap();
+    s.events.send(CaptureEvent::MouseDelta { dx: -500, dy: 0 }).unwrap();
+    let server_clip = s.server_clip.clone();
+    let arrived =
+        keep_moving(&s, Duration::from_secs(5), || server_clip.clone().text().as_deref() == Some("Neu vom Laptop")).await;
+    assert!(arrived, "Text vom Laptop beim Server");
+    // Länger, als ein großer Inhalt höchstens wartet
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(s.client_clip.read(), Some(ClipboardData::from_text("Neu vom Laptop")), "das ältere Bild bleibt beim Server");
 }
 
 /// Kopiert wie ein Passwortmanager: Inhalt plus Markierung

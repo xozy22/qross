@@ -33,6 +33,7 @@ use crate::quality::{self, Quality};
 use crate::rights::{self, Allowed};
 use crate::screensaver;
 use crate::secure_input;
+use crate::settle::{self, MouseActivity};
 use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
 use crate::switch_trace::{EdgeHits, ServerTrace};
@@ -517,6 +518,8 @@ impl Server {
                 }
             })
         };
+        // Große Inhalte der Zwischenablage warten nach einem Wechsel, bis die Maus ruht.
+        let mouse = MouseActivity::default();
         let mut local_screen = screen();
         let mut local_monitors = monitors();
         let mut state = ServerState::new(self.config.name.clone(), self.config.layout.clone(), local_screen);
@@ -597,8 +600,11 @@ impl Server {
                                 }
                             }
                         }
-                        if let (Some(trace), Some(at)) = (&mut switching, captured) {
-                            trace.on_move(at, dx, dy);
+                        if let Some(at) = captured {
+                            mouse.moved(at);
+                            if let Some(trace) = &mut switching {
+                                trace.on_move(at, dx, dy);
+                            }
                         }
                         let mut actions = state.handle(ServerEvent::Capture(CaptureEvent::MouseDelta { dx, dy }));
                         if let Some(event) = next {
@@ -889,7 +895,8 @@ impl Server {
                     Action::DropIncoming { .. } | Action::CancelIncoming { .. } => drag_view.hide(),
                     _ => {}
                 }
-                let files = FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers };
+                let files =
+                    FileSide { limit: self.clipboard_file_limit, notify: &files_notify, transfers: &transfers, mouse: &mouse };
                 let (step, started) = (platform_step(&action), Instant::now());
                 apply(action, &*capture, &clipboard, &clients, &clip_synced, files, &mut drops, captured);
                 let took = started.elapsed();
@@ -1050,11 +1057,13 @@ fn describe_monitors(monitors: &[Rect]) -> String {
 /// Je Client die zuletzt übertragene Clipboard-Sequenznummer
 type ClipSynced = Arc<Mutex<HashMap<String, u64>>>;
 
-/// Für ausgehende Dateien: Grenze für kopierte Dateien (0 = nie), Meldungen, Fortschritt
+/// Für die ausgehende Zwischenablage und Dateien: Grenze für kopierte Dateien (0 = nie), Meldungen,
+/// Fortschritt und wann sich die Maus zuletzt bewegt hat
 struct FileSide<'a> {
     limit: u64,
     notify: &'a Notify,
     transfers: &'a Transfers,
+    mouse: &'a MouseActivity,
 }
 
 /// Fertig übertragene Dateien eines Clients in die Zwischenablage legen.
@@ -1142,16 +1151,26 @@ fn apply(
             }
             let (clipboard, synced, conn) = (clipboard.clone(), clip_synced.clone(), client.conn.clone());
             let (limit, notify, transfers) = (files.limit, files.notify.clone(), files.transfers.clone());
+            let (mouse, since) = (files.mouse.clone(), Instant::now());
             // Lesen und PNG-Kodierung im Clipboard-Thread; die Ereignisschleife läuft weiter.
             tokio::spawn(async move {
                 let known = synced.lock().unwrap().get(&to).copied();
                 let (seq, content) = clipboard.changed_since(known).await;
                 synced.lock().unwrap().insert(to.clone(), seq);
                 let Some(content) = content else { return };
-                match rights::content(content, allowed) {
-                    Some(content) => clipfiles::send(conn, content, limit, to, notify, transfers).await,
-                    None => debug!("Zwischenablage nicht an „{to}“: nicht erlaubt"),
+                let Some(content) = rights::content(content, allowed) else {
+                    return debug!("Zwischenablage nicht an „{to}“: nicht erlaubt");
+                };
+                // Bilder und Dateien erst, wenn die Maus drüben zur Ruhe kommt (siehe `settle`)
+                if settle::is_bulky(&content, limit) {
+                    settle::settled(&mouse, since).await;
+                    // Inzwischen kam Neueres an ihn oder von ihm: das Ältere nicht hinterherschicken
+                    if synced.lock().unwrap().get(&to) != Some(&seq) || conn.close_reason().is_some() {
+                        return debug!("Zwischenablage an „{to}“ entfällt: überholt oder getrennt, bevor die Maus ruhte");
+                    }
+                    debug!("Zwischenablage an „{to}“ geht {} ms nach dem Wechsel hinaus", since.elapsed().as_millis());
                 }
+                clipfiles::send(conn, content, limit, to, notify, transfers).await
             });
         }
         Action::ProbeDrag { x, y } => capture.probe_drag(x, y),
