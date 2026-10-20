@@ -41,7 +41,7 @@ mod tests {
         let line = "4242 (Web Content (1)) S 4100 4242 4100 0 -1 4194560 9001 0 12 0 1500 250 0 0 20 0 31 0 \
                     987654 2147483648 30000 18446744073709551615 0 0 0 0 0 4096 0 0 0 0 17 3 0 0 0 0 0\n";
         assert_eq!(parse_stat(line), Some(Stat { parent: 4100, cpu_ticks: 1750, started: 987_654 }));
-        assert_eq!(parse_stat("4242 (kaputt) S 1"), None, "zu wenige Felder");
+        assert_eq!(parse_stat("4242 (kaputt) S 1"), None, "too few fields");
         assert_eq!(parse_stat("ohne Klammern"), None);
     }
 

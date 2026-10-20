@@ -91,7 +91,7 @@ mod tests {
     fn reports_carry_permille_and_kib() {
         let usage = Usage { cpu_percent: Some(12.34), memory: 128 * 1024 * 1024 + 300, processes: 6 };
         assert_eq!(report(&usage), Some(UsageReport { cpu_permille: 123, memory_kib: 131_072, processes: 6 }));
-        assert_eq!(report(&Usage { cpu_percent: None, ..usage }), None, "ohne Rechenzeit keine Meldung");
+        assert_eq!(report(&Usage { cpu_percent: None, ..usage }), None, "no report without CPU time");
         let busy = Usage { cpu_percent: Some(812.0), memory: 0, processes: 70_000 };
         assert_eq!(report(&busy), Some(UsageReport { cpu_permille: 8120, memory_kib: 0, processes: u16::MAX }));
     }
@@ -103,7 +103,7 @@ mod tests {
         let task = tokio::spawn(report_while_watched(watched, tx));
 
         tokio::time::sleep(Duration::from_secs(10)).await;
-        assert!(reports.try_recv().is_err(), "niemand sieht hin");
+        assert!(reports.try_recv().is_err(), "nobody is watching");
 
         watch_tx.send_replace(true);
         // Die erste kommt nach der Grundmessung, dann alle 2 s
@@ -116,9 +116,9 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         while reports.try_recv().is_ok() {}
         tokio::time::sleep(Duration::from_secs(10)).await;
-        assert!(reports.try_recv().is_err(), "nicht mehr beobachtet");
+        assert!(reports.try_recv().is_err(), "no longer watched");
 
         drop(watch_tx);
-        tokio::time::timeout(Duration::from_secs(1), task).await.expect("endet mit der Sitzung").unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task).await.expect("ends with the session").unwrap();
     }
 }

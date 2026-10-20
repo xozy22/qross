@@ -901,7 +901,7 @@ impl Server {
                                 let _ = client.control.send(Control::WatchUsage(true));
                             }
                         }
-                        debug!("„{name}“ meldet auf Nachfrage CPU und Arbeitsspeicher");
+                        debug!("\"{name}\" reports its CPU and memory usage on request");
                         self.notify(ServerNotice::ClientReportsUsage { name });
                         Vec::new()
                     }

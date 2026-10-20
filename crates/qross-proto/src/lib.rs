@@ -1038,9 +1038,9 @@ mod tests {
         let report = UsageReport { cpu_permille: 12_345, memory_kib: 131_072, processes: 7 };
         for msg in [Control::ReportsUsage, Control::WatchUsage(true), Control::WatchUsage(false), Control::Usage(report)] {
             let bytes = postcard::to_stdvec(&msg).unwrap();
-            assert!(postcard::from_bytes::<ControlV013>(&bytes).is_err(), "Qross 0.13 kann {msg:?} nicht lesen");
+            assert!(postcard::from_bytes::<ControlV013>(&bytes).is_err(), "Qross 0.13 cannot read {msg:?}");
             assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), msg);
-            assert!(bytes.len() <= 10, "{msg:?}: {} Bytes", bytes.len());
+            assert!(bytes.len() <= 10, "{msg:?}: {} bytes", bytes.len());
         }
     }
 }

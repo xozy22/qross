@@ -3303,7 +3303,7 @@ async fn the_client_offers_its_usage_only_to_servers_that_know_it() {
     let frames = client_sends(SERVER_VERSION, RecordingInjector::default()).await;
     let messages: Vec<Control> = frames.iter().filter_map(|f| postcard::from_bytes(f).ok()).collect();
     assert_eq!(messages.iter().filter(|m| **m == Control::ReportsUsage).count(), 1, "{messages:?}");
-    assert!(!messages.iter().any(|m| matches!(m, Control::Usage(_))), "niemand sieht hin: {messages:?}");
+    assert!(!messages.iter().any(|m| matches!(m, Control::Usage(_))), "nobody is watching: {messages:?}");
 }
 
 /// Was der Server bisher über CPU und Arbeitsspeicher von „laptop“ gemeldet hat
@@ -3322,25 +3322,25 @@ fn usage_reports(s: &Setup) -> Vec<UsageReport> {
 async fn the_client_reports_its_usage_while_the_server_watches() {
     let s = start(true, None);
     let notices = s.notices.clone();
-    wait_for("Client meldet auf Nachfrage", || {
+    wait_for("client reports on request", || {
         notices.lock().unwrap().iter().any(|n| matches!(n, ServerNotice::ClientReportsUsage { name } if name == "laptop"))
     })
     .await;
-    assert!(usage_reports(&s).is_empty(), "niemand sieht hin");
+    assert!(usage_reports(&s).is_empty(), "nobody is watching");
 
     s.usage.watch(Some("laptop".into()));
-    wait_for("erste Meldung", || !usage_reports(&s).is_empty()).await;
+    wait_for("first report", || !usage_reports(&s).is_empty()).await;
     // Gemessen wird dieser Testprozess: Server und Client laufen hier zusammen.
     let first = usage_reports(&s)[0];
     assert!(first.processes >= 1 && first.memory_kib > 0, "{first:?}");
-    wait_for("nächste Meldung", || usage_reports(&s).len() >= 2).await;
+    wait_for("next report", || usage_reports(&s).len() >= 2).await;
 
     s.usage.watch(None);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let stopped = usage_reports(&s).len();
     tokio::time::sleep(qross_net::usage::REPORT_EVERY + Duration::from_millis(500)).await;
-    assert_eq!(usage_reports(&s).len(), stopped, "niemand sieht mehr hin");
+    assert_eq!(usage_reports(&s).len(), stopped, "nobody is watching any more");
 
     s.usage.watch(Some("laptop".into()));
-    wait_for("Meldung nach erneutem Hinsehen", || usage_reports(&s).len() > stopped).await;
+    wait_for("report after watching again", || usage_reports(&s).len() > stopped).await;
 }

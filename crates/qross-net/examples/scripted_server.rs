@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Wechsel bei `finder`, Sekunden bei `usage`
     let count: u32 = match args.as_slice() {
-        [mode, _, count] if mode == "finder" || mode == "usage" => count.parse().context("Zahl")?,
+        [mode, _, count] if mode == "finder" || mode == "usage" => count.parse().context("count must be a whole number")?,
         [mode, ..] if mode == "usage" => 20,
         _ => 5,
     };
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
             while let Ok(Some(notice)) = tokio::time::timeout_at(until, notices.recv()).await {
                 if let ServerNotice::Usage { name, usage } = notice {
                     println!(
-                        "„{name}“: CPU {:.1} % eines Kerns, RAM {:.1} MB in {} Prozessen",
+                        "\"{name}\": CPU {:.1} % of one core, RAM {:.1} MB in {} processes",
                         f64::from(usage.cpu_permille) / 10.0,
                         usage.memory_kib as f64 / 1024.0,
                         usage.processes

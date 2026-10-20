@@ -130,7 +130,7 @@ mod tests {
         let mut meter = UsageMeter::new();
         let start = Instant::now();
         let first = meter.update(start, &[process(10, 1, 900, 7 * MB), process(11, 2, 5_000, 120 * MB)]);
-        assert_eq!(first, Usage { cpu_percent: None, memory: 127 * MB, processes: 2 }, "die erste Messung kennt keine Rechenzeit");
+        assert_eq!(first, Usage { cpu_percent: None, memory: 127 * MB, processes: 2 }, "the first sample has no CPU time");
 
         // 2 s später: 300 ms im eigenen Prozess, 100 ms in der Web-Oberfläche
         let second = meter.update(start + Duration::from_secs(2), &[process(10, 1, 1_200, 8 * MB), process(11, 2, 5_100, 120 * MB)]);
@@ -157,7 +157,7 @@ mod tests {
         let start = Instant::now();
         meter.update(start, &[process(10, 1, 0, MB)]);
         let soon = meter.update(start + Duration::from_millis(50), &[process(10, 1, 40, 2 * MB)]);
-        assert_eq!(soon, Usage { cpu_percent: None, memory: 2 * MB, processes: 1 }, "zu kurz für einen ruhigen Wert");
+        assert_eq!(soon, Usage { cpu_percent: None, memory: 2 * MB, processes: 1 }, "too short for a steady value");
         // Gemessen wird dann ab der ersten Messung: 250 ms in 500 ms
         let later = meter.update(start + Duration::from_millis(500), &[process(10, 1, 250, 2 * MB)]);
         assert_eq!(later.cpu_percent, Some(50.0));
@@ -185,14 +185,14 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
 
-        let cpu = second.cpu_percent.expect("zweite Messung mit Rechenzeit");
+        let cpu = second.cpu_percent.expect("the second sample has CPU time");
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
         // 400 ms Rechnen in etwa 400 ms; auch ein ausgelasteter Testrechner lässt davon mehr als ein Zehntel
         // übrig. Nach oben begrenzt die Zahl der Kerne (ein falscher Zeitmaßstab fiele hier auf).
         assert!(cpu > 10.0 && cpu <= 100.0 * cores + 50.0, "{second:?}");
-        assert!(second.processes >= 2, "das Kind zählt mit: {second:?}");
-        assert!(found.iter().any(|p| p.id.0 == child.id()), "Kind {} fehlt in {found:?}", child.id());
-        assert!(found.iter().any(|p| p.id.0 == std::process::id()), "dieser Prozess fehlt in {found:?}");
+        assert!(second.processes >= 2, "the child counts too: {second:?}");
+        assert!(found.iter().any(|p| p.id.0 == child.id()), "child {} missing in {found:?}", child.id());
+        assert!(found.iter().any(|p| p.id.0 == std::process::id()), "this process missing in {found:?}");
     }
 
     /// Ein Kindprozess, der ein paar Sekunden schläft
@@ -210,6 +210,6 @@ mod tests {
             command.arg("3");
             command
         };
-        command.stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("Kindprozess starten")
+        command.stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("start a child process")
     }
 }

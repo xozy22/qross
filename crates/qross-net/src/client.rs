@@ -914,9 +914,9 @@ async fn session(
                     FromServer::WatchUsage(on) => {
                         if on != *usage_watch.borrow() {
                             if on {
-                                debug!("Der Server zeigt CPU und Arbeitsspeicher dieses Rechners an – Meldung alle 2 s");
+                                debug!("The server shows this computer's CPU and memory usage – reporting every 2 s");
                             } else {
-                                debug!("Der Server zeigt CPU und Arbeitsspeicher dieses Rechners nicht mehr an");
+                                debug!("The server no longer shows this computer's CPU and memory usage");
                             }
                         }
                         usage_watch.send_replace(on);
