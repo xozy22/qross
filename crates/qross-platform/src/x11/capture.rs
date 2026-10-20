@@ -415,7 +415,7 @@ fn run(s: &Shared) -> Result<()> {
                 hotkey.sync_modifiers(modifiers_in(e.state));
             }
             let options = s.keys.lock().unwrap_or_else(|e| e.into_inner());
-            if let HotkeyEvent::Triggered { event, .. } = hotkey.on_key(key, down, &options) {
+            if let HotkeyEvent::Triggered { event, .. } | HotkeyEvent::Tapped { event } = hotkey.on_key(key, down, &options) {
                 let _ = s.events.send(event);
             }
             continue;
@@ -457,6 +457,11 @@ fn run(s: &Shared) -> Result<()> {
                     match hotkey.on_key(key, down, &options) {
                         HotkeyEvent::Triggered { event, .. } => Some(event),
                         HotkeyEvent::Consumed { .. } => None,
+                        // Zusatztaste allein getippt: melden; ihr Loslassen geht weiter wie ihr Drücken
+                        HotkeyEvent::Tapped { event } => {
+                            let _ = s.events.send(event);
+                            Some(CaptureEvent::Key { key, down })
+                        }
                         HotkeyEvent::None => Some(match keymap.as_ref().filter(|_| down && is_typing_key(key)) {
                             Some(keymap) => CaptureEvent::Typed { key, chars: keymap.chars(e.detail, u16::from(e.state)) },
                             None => CaptureEvent::Key { key, down },

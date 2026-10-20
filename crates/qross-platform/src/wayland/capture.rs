@@ -607,6 +607,11 @@ impl State {
         match self.hotkey.on_key(key, down, keys) {
             HotkeyEvent::Triggered { event, .. } => self.send(event),
             HotkeyEvent::Consumed { .. } => {}
+            // Zusatztaste allein getippt: melden; ihr Loslassen geht weiter wie ihr Drücken
+            HotkeyEvent::Tapped { event } => {
+                self.send(event);
+                self.send(CaptureEvent::Key { key, down });
+            }
             HotkeyEvent::None => self.send(CaptureEvent::Key { key, down }),
         }
         None

@@ -126,6 +126,12 @@ impl Hotkey {
         self.key == KeyCode(0x29) && self.mods.ctrl && self.mods.alt && self.mods.shift
     }
 
+    /// Eine Zusatztaste allein, z. B. „Strg rechts“: Sie zählt erst beim Loslassen und nur, wenn
+    /// dazwischen keine andere Taste kam. Sonst gehörte schon Strg+C dazu.
+    pub fn is_tap(&self) -> bool {
+        self.mods.is_empty() && Mods::slot(self.key).is_some()
+    }
+
     /// Für die Oberfläche, z. B. „Strg+Alt+L“
     pub fn label(&self, mac: bool) -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -254,13 +260,16 @@ pub enum HotkeyEvent {
     Triggered { event: CaptureEvent, swallow_locally: bool },
     /// Wiederholung oder Loslassen der Taste eines ausgelösten Kürzels – ebenso behandeln wie das Auslösen
     Consumed { swallow_locally: bool },
+    /// Eine Zusatztaste allein als Kürzel wurde getippt (siehe [`Hotkey::is_tap`]): `event` melden
+    /// und das Loslassen selbst normal behandeln, wie schon das Drücken.
+    Tapped { event: CaptureEvent },
 }
 
 impl HotkeyEvent {
     /// Soll die Erfassung die Taste verschlucken? `remote`: Der Cursor ist auf einem anderen Rechner.
     pub fn swallow(&self, remote: bool) -> bool {
         match self {
-            Self::None => false,
+            Self::None | Self::Tapped { .. } => false,
             Self::Triggered { swallow_locally, .. } | Self::Consumed { swallow_locally } => remote || *swallow_locally,
         }
     }
@@ -274,18 +283,35 @@ pub struct HotkeyTracker {
     /// Gedrückte Tasten, die zu einem Kürzel gehören, und – falls ihr Drücken ausgelöst hat –
     /// ob sie auch lokal verschluckt werden
     held: Vec<(KeyCode, Option<bool>)>,
+    /// Allein gedrückte Zusatztaste, die beim Loslassen ein Kürzel auslöst, wenn bis dahin keine
+    /// andere Taste kommt
+    tap: Option<KeyCode>,
 }
 
 impl HotkeyTracker {
     /// Für `const`-Initialisierung in Hook-Threads
     pub const fn new() -> Self {
-        Self { mod_keys: [false; 8], held: Vec::new() }
+        Self { mod_keys: [false; 8], held: Vec::new(), tap: None }
     }
 
     pub fn on_key(&mut self, key: KeyCode, down: bool, options: &KeyOptions) -> HotkeyEvent {
         let slot = Mods::slot(key);
+        let alone = !self.mod_keys.iter().enumerate().any(|(i, &on)| on && Some(i) != slot);
         if let Some(slot) = slot {
             self.mod_keys[slot] = down;
+        }
+        // Zusatztaste allein als Kürzel: erst beim Loslassen, und jede andere Taste dazwischen
+        // macht eine Kombination daraus (Strg+C bleibt Strg+C)
+        if down {
+            if self.tap != Some(key) {
+                self.tap = (alone && options.tapped(key).is_some()).then_some(key);
+            }
+        } else if self.tap == Some(key) {
+            self.tap = None;
+            if let Some(event) = options.tapped(key) {
+                self.held.retain(|(k, _)| *k != key);
+                return HotkeyEvent::Tapped { event };
+            }
         }
         let consumed = |fired: Option<bool>| {
             fired.map_or(HotkeyEvent::None, |swallow_locally| HotkeyEvent::Consumed { swallow_locally })
@@ -364,14 +390,25 @@ impl KeyOptions {
 
     /// Kürzel mit dieser Taste und genau diesen Zusatztasten: das zu meldende Ereignis und ob die
     /// Taste auch lokal verschluckt wird. Wechsel-Kürzel erreichen nie ein Programm, denn ihr
-    /// Loslassen geschieht schon auf dem anderen Rechner.
+    /// Loslassen geschieht schon auf dem anderen Rechner. Zusatztasten allein zählen hier nicht
+    /// (siehe [`Self::tapped`]).
     fn find(&self, key: KeyCode, mods: Mods) -> Option<(CaptureEvent, bool)> {
-        let hit = |h: &Hotkey| h.key == key && h.mods == mods && !h.is_emergency_exit();
+        let hit = |h: &Hotkey| h.key == key && h.mods == mods && !h.is_emergency_exit() && !h.is_tap();
         if let Some(lock) = self.lock.as_ref().filter(|h| hit(h)) {
             return Some((CaptureEvent::ToggleLock, lock.swallow_locally()));
         }
         let (_, target) = self.switch.iter().find(|(h, _)| hit(h))?;
         Some((CaptureEvent::SwitchTo(target.clone()), true))
+    }
+
+    /// Kürzel aus dieser Zusatztaste allein: das zu meldende Ereignis, die Fang-Taste zuerst
+    fn tapped(&self, key: KeyCode) -> Option<CaptureEvent> {
+        let hit = |h: &Hotkey| h.is_tap() && h.key == key;
+        if self.lock.as_ref().is_some_and(hit) {
+            return Some(CaptureEvent::ToggleLock);
+        }
+        let (_, target) = self.switch.iter().find(|(h, _)| hit(h))?;
+        Some(CaptureEvent::SwitchTo(target.clone()))
     }
 
     /// Doppelt belegte oder reservierte Kürzel, je eine Meldung
@@ -527,15 +564,43 @@ mod tests {
     }
 
     #[test]
-    fn a_modifier_alone_can_be_the_hotkey() {
+    fn a_modifier_alone_counts_when_tapped() {
         let options = lock_only("ControlRight");
+        let tapped = HotkeyEvent::Tapped { event: CaptureEvent::ToggleLock };
         let mut t = HotkeyTracker::default();
-        assert_eq!(t.on_key(RCTRL, true, &options), toggled(false), "einzelne Taste: lokal durchlassen");
-        assert_eq!(t.on_key(RCTRL, false, &options), HotkeyEvent::Consumed { swallow_locally: false });
+        assert_eq!(t.on_key(RCTRL, true, &options), HotkeyEvent::None, "Drücken geht normal durch");
+        assert_eq!(t.on_key(RCTRL, true, &options), HotkeyEvent::None, "Auto-Repeat ebenso");
+        assert_eq!(t.on_key(RCTRL, false, &options), tapped, "erst das Loslassen löst aus");
+        assert!(!tapped.swallow(true), "auch das Loslassen geht normal weiter, wohin das Drücken ging");
+
+        // Zweimal hintereinander: jedes Tippen zählt
+        t.on_key(RCTRL, true, &options);
+        assert_eq!(t.on_key(RCTRL, false, &options), tapped);
+
         t.on_key(CTRL, true, &options);
-        assert_eq!(t.on_key(RCTRL, true, &options), HotkeyEvent::None, "mit linkem Strg ist es Strg+Strg");
+        t.on_key(RCTRL, true, &options);
+        assert_eq!(t.on_key(RCTRL, false, &options), HotkeyEvent::None, "mit linkem Strg ist es Strg+Strg");
+        t.on_key(CTRL, false, &options);
         let off = KeyOptions { lock: None, ..KeyOptions::default() };
         assert_eq!(t.on_key(L, true, &off), HotkeyEvent::None);
+    }
+
+    #[test]
+    fn ctrl_c_stays_ctrl_c_with_ctrl_alone_as_hotkey() {
+        // So stand es beim Nutzer: Strg allein wechselte zum Mac, und Strg+C wechselte schon beim
+        // Drücken von Strg, statt zu kopieren
+        const C: KeyCode = KeyCode(0x06);
+        let entries = HashMap::from([("ControlLeft".to_owned(), "macbook".to_owned())]);
+        let options = KeyOptions { switch: parse_switch_keys(&entries).unwrap(), ..KeyOptions::default() };
+        let mut t = HotkeyTracker::new();
+        assert_eq!(t.on_key(CTRL, true, &options), HotkeyEvent::None);
+        assert_eq!(t.on_key(C, true, &options), HotkeyEvent::None, "C geht an das Programm");
+        assert_eq!(t.on_key(C, false, &options), HotkeyEvent::None);
+        assert_eq!(t.on_key(CTRL, false, &options), HotkeyEvent::None, "kein Wechsel nach Strg+C");
+
+        t.on_key(CTRL, true, &options);
+        let switched = HotkeyEvent::Tapped { event: CaptureEvent::SwitchTo(SwitchTarget::Screen("macbook".into())) };
+        assert_eq!(t.on_key(CTRL, false, &options), switched, "Strg allein getippt wechselt");
     }
 
     fn switching() -> KeyOptions {

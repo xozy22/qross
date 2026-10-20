@@ -203,7 +203,10 @@ fn handle(s: &Shared, state: &RefCell<TapState>, kind: CGEventType, event: &CGEv
                 // Caps Lock meldet nur das Drücken
                 st.hotkey.on_key(key, false, &options);
             }
-            if hotkey != HotkeyEvent::None {
+            if let HotkeyEvent::Tapped { event } = hotkey {
+                // Zusatztaste allein getippt: melden; ihr Loslassen geht weiter, wohin ihr Drücken ging
+                send(event);
+            } else if hotkey != HotkeyEvent::None {
                 let swallow = hotkey.swallow(remote);
                 if let HotkeyEvent::Triggered { event, .. } = hotkey {
                     send(event);

@@ -192,7 +192,7 @@ export function renderSwitchKeys() {
   const focused = document.activeElement?.closest?.(".switch-list li")?.dataset.target;
   $("#switchHint").textContent = "Springt zum Nachbarn oder in die Mitte eines Rechners. Wirkt auf jedem Rechner.";
   const info =
-    "Beim Nachbarn kommt der Cursor an der gegenüberliegenden Kante an. Die Kürzel erreichen keine Programme. Hält die Fang-Taste den Cursor fest, wechselt er nicht." +
+    "Beim Nachbarn kommt der Cursor an der gegenüberliegenden Kante an. Die Kürzel erreichen keine Programme. Eine Zusatztaste allein, etwa Strg rechts, wirkt erst beim Loslassen und nur allein getippt: Strg+C bleibt Strg+C. Hält die Fang-Taste den Cursor fest, wechselt er nicht." +
     (state.platform === "linux" ? " Belegt die Arbeitsfläche ein Kürzel schon (z. B. Strg+Alt+Pfeil), wirkt es unter X11 nur, solange der Cursor auf einem anderen Rechner ist." : "");
   $("#switchInfo").title = info;
   $("#switchInfo").setAttribute("aria-label", info);

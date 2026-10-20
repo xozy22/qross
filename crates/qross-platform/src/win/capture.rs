@@ -635,7 +635,15 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
         if let Some(key) = key {
             // Fang-Taste (Standard: Rollen) und Wechsel-Kürzel
             let hotkey = st.hotkey.on_key(key, !up, &options);
-            if hotkey != HotkeyEvent::None {
+            if let HotkeyEvent::Tapped { event } = hotkey {
+                // Zusatztaste allein getippt: melden; ihr Loslassen geht weiter, wohin ihr Drücken
+                // ging. Lokal ohne Menüleiste bzw. Startmenü, die das Loslassen von Alt bzw. der
+                // Windows-Taste allein sonst öffnet.
+                if !remote && [VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN].contains(&(vk as u16)) {
+                    inject::tap_menu_mask();
+                }
+                emit(event);
+            } else if hotkey != HotkeyEvent::None {
                 let swallow = hotkey.swallow(remote);
                 if let HotkeyEvent::Triggered { event, .. } = hotkey {
                     if swallow && st.menu_modifiers() {

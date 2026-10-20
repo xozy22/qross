@@ -294,6 +294,10 @@ fn press(s: &Setup, tracker: &mut HotkeyTracker, keys: &[KeyCode]) {
         let event = match tracker.on_key(key, down, &options) {
             HotkeyEvent::Triggered { event, .. } => event,
             HotkeyEvent::Consumed { .. } => continue,
+            HotkeyEvent::Tapped { event } => {
+                s.events.send(event).unwrap();
+                CaptureEvent::Key { key, down }
+            }
             HotkeyEvent::None => CaptureEvent::Key { key, down },
         };
         s.events.send(event).unwrap();
