@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use qross_gui::i18n::{self, Lang};
 use qross_gui::lifecycle::{self, AppState};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -172,7 +173,7 @@ fn notice(app: &AppHandle, tone: &'static str, text: String, action: Option<&'st
 /// Startet den Planer (nur wenn automatisch geprüft wird).
 pub fn spawn_scheduler(app: AppHandle) {
     if !automatic() {
-        info!("Automatische Update-Prüfung nur in installierten Versionen (Release-Build)");
+        info!("automatic update checks only in installed versions (release build)");
         return;
     }
     tauri::async_runtime::spawn(async move {
@@ -196,17 +197,49 @@ fn build_updater(app: &AppHandle) -> Result<Updater> {
     Ok(builder.build()?)
 }
 
-/// Fehler in Worten für die Statuszeile
-fn describe_error(e: &anyhow::Error) -> String {
+/// Fehler in Worten für die Statuszeile (in `lang`; Unbekanntes bleibt der englische Fehlertext)
+fn describe_error(e: &anyhow::Error, lang: Lang) -> String {
     let text = format!("{e:#}");
-    if text.contains("minisign") || text.contains("signature") {
-        "Signatur ungültig, Update verworfen".into()
+    let known = if text.contains("minisign") || text.contains("signature") {
+        Some(("Signatur ungültig, Update verworfen", "Invalid signature, update discarded"))
     } else if text.contains("valid release JSON") {
-        "Keine Update-Informationen gefunden".into()
+        Some(("Keine Update-Informationen gefunden", "No update information found"))
     } else if text.contains("error sending request") || text.contains("dns") || text.contains("connect") {
-        "Update-Server nicht erreichbar".into()
+        Some(("Update-Server nicht erreichbar", "Update server unreachable"))
     } else {
-        text
+        None
+    };
+    match (known, lang) {
+        (Some((de, _)), Lang::De) => de.to_owned(),
+        (Some((_, en)), Lang::En) => en.to_owned(),
+        (None, _) => text,
+    }
+}
+
+/// Was beim Update scheiterte
+#[derive(Clone, Copy)]
+enum Step {
+    Download,
+    Install,
+}
+
+impl Step {
+    /// Fürs Log
+    fn log(self) -> &'static str {
+        match self {
+            Self::Download => "failed to download update",
+            Self::Install => "failed to install update",
+        }
+    }
+
+    /// Für die Statuszeile
+    fn text(self, lang: Lang) -> &'static str {
+        match (self, lang) {
+            (Self::Download, Lang::De) => "Update nicht geladen",
+            (Self::Download, Lang::En) => "Couldn't download the update",
+            (Self::Install, Lang::De) => "Update nicht installiert",
+            (Self::Install, Lang::En) => "Couldn't install the update",
+        }
     }
 }
 
@@ -228,8 +261,8 @@ pub async fn check(app: &AppHandle) {
             update
         }
         Err(e) => {
-            warn!("Update-Prüfung fehlgeschlagen: {e:#}");
-            let message = describe_error(&e);
+            warn!("update check failed: {e:#}");
+            let message = describe_error(&e, i18n::lang());
             updates.set(app, |s| {
                 s.phase = Phase::Error;
                 s.message = Some(message);
@@ -238,14 +271,14 @@ pub async fn check(app: &AppHandle) {
         }
     };
     let Some(update) = update else {
-        info!("Qross {} ist aktuell", env!("CARGO_PKG_VERSION"));
+        info!("Qross {} is up to date", env!("CARGO_PKG_VERSION"));
         updates.set(app, |s| {
             s.phase = Phase::Current;
             s.version = None;
         });
         return;
     };
-    info!("Update {} gefunden", update.version);
+    info!("found update {}", update.version);
     let automatic = runtime(app).settings.lock().unwrap().auto_update;
     if automatic && lifecycle::silent_install_possible(bundle_name().as_deref()) {
         install_when_quiet(app, update).await;
@@ -268,7 +301,11 @@ fn offer(app: &AppHandle, update: Update) {
     let mut announced = updates.announced.lock().unwrap();
     if announced.as_deref() != Some(version.as_str()) {
         *announced = Some(version.clone());
-        notice(app, "info", format!("Update {version} verfügbar"), Some("install-update"));
+        let text = match i18n::lang() {
+            Lang::De => format!("Update {version} verfügbar"),
+            Lang::En => format!("Update {version} available"),
+        };
+        notice(app, "info", text, Some("install-update"));
     }
 }
 
@@ -305,13 +342,13 @@ async fn download(app: &AppHandle, update: &Update) -> Result<Vec<u8>> {
 async fn install_when_quiet(app: &AppHandle, update: Update) {
     let bytes = match download(app, &update).await {
         Ok(bytes) => bytes,
-        Err(e) => return failed(app, "Update nicht geladen", e),
+        Err(e) => return failed(app, Step::Download, e),
     };
     updates(app).set(app, |s| {
         s.phase = Phase::Waiting;
         s.progress = None;
     });
-    info!("Update {} geladen – wird in einem ruhigen Moment installiert", update.version);
+    info!("downloaded update {}; installing at a quiet moment", update.version);
     loop {
         let rt = runtime(app);
         if !rt.settings.lock().unwrap().auto_update {
@@ -338,7 +375,7 @@ pub async fn install_now(app: &AppHandle) {
         Err(e) => {
             let version = update.version.clone();
             *updates.pending.lock().unwrap() = Some(update);
-            failed(app, "Update nicht geladen", e);
+            failed(app, Step::Download, e);
             updates.set(app, |s| s.version = Some(version));
         }
     }
@@ -352,15 +389,18 @@ async fn install(app: &AppHandle, update: Update, bytes: Vec<u8>) {
         s.version = Some(version.clone());
         s.progress = None;
     });
-    let text = format!("Qross wird auf {version} aktualisiert und startet neu");
-    info!("{text}");
+    info!("updating Qross to {version} and restarting");
+    let (title, text) = match i18n::lang() {
+        Lang::De => ("Qross wird aktualisiert", format!("Qross wird auf {version} aktualisiert und startet neu")),
+        Lang::En => ("Qross is updating", format!("Qross is updating to {version} and will restart")),
+    };
     notice(app, "info", text.clone(), None);
-    crate::notify(app, "Qross wird aktualisiert", &text);
+    crate::notify(app, title, &text);
     tokio::time::sleep(NOTICE_LEAD).await;
     runtime(app).stop_for_exit().await;
     // Windows: install() startet den Installer und beendet die App; der Installer startet sie neu.
     if let Err(e) = update.install(&bytes) {
-        failed(app, "Update nicht installiert", e.into());
+        failed(app, Step::Install, e.into());
         // Die Rolle war schon angehalten: wieder aufnehmen
         crate::resume(app);
         return;
@@ -368,9 +408,10 @@ async fn install(app: &AppHandle, update: Update, bytes: Vec<u8>) {
     app.restart();
 }
 
-fn failed(app: &AppHandle, what: &str, e: anyhow::Error) {
-    warn!("{what}: {e:#}");
-    let message = format!("{what}: {}", describe_error(&e));
+fn failed(app: &AppHandle, step: Step, e: anyhow::Error) {
+    warn!("{}: {e:#}", step.log());
+    let lang = i18n::lang();
+    let message = format!("{}: {}", step.text(lang), describe_error(&e, lang));
     updates(app).set(app, |s| {
         s.phase = Phase::Error;
         s.progress = None;

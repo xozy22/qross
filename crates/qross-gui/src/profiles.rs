@@ -14,14 +14,21 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Lang;
 use crate::{Role, ScreenPos, Settings};
 
 /// Alle Profile, im Datenverzeichnis neben `gui.json`
 pub const PROFILES_FILE: &str = "profiles.json";
-/// In dieses Profil wandern die bestehenden Einstellungen beim ersten Start mit Profilen.
-pub const FIRST_PROFILE: &str = "Standard";
 /// Längster erlaubter Profilname (Tray-Menü, Kopfzeile)
 pub const MAX_NAME: usize = 40;
+
+/// In dieses Profil wandern die bestehenden Einstellungen beim ersten Start mit Profilen.
+pub fn first_profile(lang: Lang) -> &'static str {
+    match lang {
+        Lang::De => "Standard",
+        Lang::En => "Default",
+    }
+}
 
 /// Was je Ort gilt: alles, was im Hauptfenster eingestellt wird. Alles unter „Einstellungen“
 /// (Autostart, Updates, Tastatur, Spielemodus, Zwischenablage) gilt für alle Profile.
@@ -271,6 +278,14 @@ pub enum ProfileEdit {
     RemoveNetwork { id: String, index: usize },
 }
 
+/// Meldung, wenn das Profil inzwischen gelöscht ist
+fn gone(lang: Lang) -> String {
+    match lang {
+        Lang::De => "Dieses Profil gibt es nicht mehr.".into(),
+        Lang::En => "This profile no longer exists.".into(),
+    }
+}
+
 impl Profiles {
     /// Lädt `profiles.json`; `None`, wenn es die Datei noch nicht gibt.
     pub fn load(dir: &Path) -> Result<Option<Self>> {
@@ -278,15 +293,15 @@ impl Profiles {
         if !path.exists() {
             return Ok(None);
         }
-        let text = fs::read_to_string(&path).with_context(|| format!("{} lesen", path.display()))?;
-        let profiles = serde_json::from_str(&text).with_context(|| format!("{} ist ungültig", path.display()))?;
+        let text = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        let profiles = serde_json::from_str(&text).with_context(|| format!("{} is invalid", path.display()))?;
         Ok(Some(profiles))
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
-        fs::create_dir_all(dir).with_context(|| format!("{} anlegen", dir.display()))?;
+        fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
         let path = dir.join(PROFILES_FILE);
-        fs::write(&path, serde_json::to_string_pretty(self)?).with_context(|| format!("{} schreiben", path.display()))
+        fs::write(&path, serde_json::to_string_pretty(self)?).with_context(|| format!("failed to write {}", path.display()))
     }
 
     pub fn get(&self, id: &str) -> Option<&Profile> {
@@ -305,12 +320,13 @@ impl Profiles {
     /// dieser Version) wandern die Einstellungen verlustfrei in „Standard“. Sonst gehören die Werte
     /// aus `gui.json` zu `Settings::profile`; fehlt das (eine ältere Version hat gespeichert), zum
     /// zuletzt aktiven Profil. Liefert `true`, wenn sich etwas geändert hat und gespeichert werden sollte.
-    pub fn attach(&mut self, settings: &mut Settings) -> bool {
+    /// `lang`: Sprache der Namen, die Qross dabei selbst vergibt.
+    pub fn attach(&mut self, settings: &mut Settings, lang: Lang) -> bool {
         let before = (self.clone(), settings.profile.clone());
-        self.repair();
+        self.repair(lang);
         if self.list.is_empty() {
             let id = self.new_id();
-            let name = FIRST_PROFILE.to_owned();
+            let name = first_profile(lang).to_owned();
             self.list.push(Profile { id: id.clone(), name, place: Place::capture(settings), ..Profile::default() });
             // In Netzwerken ohne eigenes Profil gilt das bisherige.
             self.fallback = id.clone();
@@ -337,16 +353,20 @@ impl Profiles {
     }
 
     /// Kennungen eindeutig und nicht leer, Namen nicht leer, Verweise gültig (z. B. von Hand bearbeitet).
-    fn repair(&mut self) {
+    fn repair(&mut self, lang: Lang) {
         let mut seen = HashSet::new();
         let duplicate: Vec<usize> =
             (0..self.list.len()).filter(|&i| self.list[i].id.is_empty() || !seen.insert(self.list[i].id.clone())).collect();
         for i in duplicate {
             self.list[i].id = self.new_id();
         }
+        let base = match lang {
+            Lang::De => "Profil",
+            Lang::En => "Profile",
+        };
         for i in 0..self.list.len() {
             if self.list[i].name.trim().is_empty() {
-                let name = (1..).map(|n| if n == 1 { "Profil".to_owned() } else { format!("Profil {n}") });
+                let name = (1..).map(|n| if n == 1 { base.to_owned() } else { format!("{base} {n}") });
                 self.list[i].name = self.free_name(name);
             }
         }
@@ -356,7 +376,7 @@ impl Profiles {
     }
 
     fn new_id(&self) -> String {
-        (1..).map(|n| format!("p{n}")).find(|id| self.get(id).is_none()).expect("freie Kennung")
+        (1..).map(|n| format!("p{n}")).find(|id| self.get(id).is_none()).expect("there is always a free id")
     }
 
     fn taken(&self, name: &str, except: Option<&str>) -> bool {
@@ -365,34 +385,48 @@ impl Profiles {
 
     /// Der erste noch nicht vergebene Name
     fn free_name(&self, mut candidates: impl Iterator<Item = String>) -> String {
-        candidates.find(|name| !self.taken(name, None)).expect("freier Name")
+        candidates.find(|name| !self.taken(name, None)).expect("there is always a free name")
     }
 
     /// „Büro (Kopie)“, „Büro (Kopie 2)“ …, gekürzt auf die erlaubte Länge
-    fn copy_name(&self, name: &str) -> String {
+    fn copy_name(&self, name: &str, lang: Lang) -> String {
         self.free_name((1..).map(|n| {
-            let suffix = if n == 1 { " (Kopie)".to_owned() } else { format!(" (Kopie {n})") };
+            let suffix = match (lang, n) {
+                (Lang::De, 1) => " (Kopie)".to_owned(),
+                (Lang::De, n) => format!(" (Kopie {n})"),
+                (Lang::En, 1) => " (copy)".to_owned(),
+                (Lang::En, n) => format!(" (copy {n})"),
+            };
             let base: String = name.chars().take(MAX_NAME.saturating_sub(suffix.chars().count())).collect();
             format!("{}{suffix}", base.trim_end())
         }))
     }
 
-    fn checked_name(&self, name: &str, except: Option<&str>) -> Result<String, String> {
+    fn checked_name(&self, name: &str, except: Option<&str>, lang: Lang) -> Result<String, String> {
         let name = name.trim();
         if name.is_empty() {
-            return Err("Das Profil braucht einen Namen.".into());
+            return Err(match lang {
+                Lang::De => "Das Profil braucht einen Namen.".into(),
+                Lang::En => "The profile needs a name.".into(),
+            });
         }
         if name.chars().count() > MAX_NAME {
-            return Err(format!("Der Name ist zu lang (höchstens {MAX_NAME} Zeichen)."));
+            return Err(match lang {
+                Lang::De => format!("Der Name ist zu lang (höchstens {MAX_NAME} Zeichen)."),
+                Lang::En => format!("The name is too long (at most {MAX_NAME} characters)."),
+            });
         }
         if self.taken(name, except) {
-            return Err(format!("Ein Profil „{name}“ gibt es schon."));
+            return Err(match lang {
+                Lang::De => format!("Ein Profil „{name}“ gibt es schon."),
+                Lang::En => format!("There's already a profile named “{name}”."),
+            });
         }
         Ok(name.to_owned())
     }
 
-    fn require(&self, id: &str) -> Result<&Profile, String> {
-        self.get(id).ok_or_else(|| "Dieses Profil gibt es nicht mehr.".to_owned())
+    fn require(&self, id: &str, lang: Lang) -> Result<&Profile, String> {
+        self.get(id).ok_or_else(|| gone(lang))
     }
 
     /// Übernimmt die Werte je Ort aus den Einstellungen ins aktive Profil; `true` bei einer Änderung.
@@ -411,8 +445,9 @@ impl Profiles {
     }
 
     /// Wechselt das Profil: Werte des bisherigen sichern, die des neuen in die Einstellungen setzen.
-    pub fn activate(&mut self, id: &str, settings: &mut Settings) -> Result<(), String> {
-        let place = self.require(id)?.place.clone();
+    /// Fehler in `lang`.
+    pub fn activate(&mut self, id: &str, settings: &mut Settings, lang: Lang) -> Result<(), String> {
+        let place = self.require(id, lang)?.place.clone();
         self.sync(settings);
         place.apply(settings);
         settings.profile = id.to_owned();
@@ -451,7 +486,7 @@ impl Profiles {
         if self.active_profile().and_then(|p| Self::strength(p, current)) == Some(best) {
             return Choice::Keep;
         }
-        let profile = self.list.iter().find(|p| Self::strength(p, current) == Some(best)).expect("bestes Profil");
+        let profile = self.list.iter().find(|p| Self::strength(p, current) == Some(best)).expect("the best match has a profile");
         Choice::Network(profile.id.clone())
     }
 
@@ -464,29 +499,33 @@ impl Profiles {
 
     /// Führt eine Änderung aus den Einstellungen aus. `current` liefert die Werte je Ort des aktiven
     /// Profils (für „Neu“ und „Duplizieren“). `Ok(Some(text))`: Hinweis für die Oberfläche.
-    pub fn edit(&mut self, edit: ProfileEdit, current: &Settings) -> Result<Option<String>, String> {
+    /// Hinweise, Fehler und vergebene Namen in `lang`.
+    pub fn edit(&mut self, edit: ProfileEdit, current: &Settings, lang: Lang) -> Result<Option<String>, String> {
         self.sync(current);
         match edit {
             ProfileEdit::Create { name } => {
-                let name = self.checked_name(&name, None)?;
+                let name = self.checked_name(&name, None, lang)?;
                 let id = self.new_id();
                 self.list.push(Profile { id, name, place: Place::fresh(current), ..Profile::default() });
             }
             ProfileEdit::Duplicate { id } => {
-                let source = self.require(&id)?.clone();
-                let name = self.copy_name(&source.name);
+                let source = self.require(&id, lang)?.clone();
+                let name = self.copy_name(&source.name, lang);
                 let copy = Profile { id: self.new_id(), name, auto: source.auto, networks: Vec::new(), place: source.place };
                 self.list.push(copy);
             }
             ProfileEdit::Rename { id, name } => {
-                let name = self.checked_name(&name, Some(&id))?;
-                self.require(&id)?;
-                self.get_mut(&id).expect("geprüft").name = name;
+                let name = self.checked_name(&name, Some(&id), lang)?;
+                self.require(&id, lang)?;
+                self.get_mut(&id).expect("checked above").name = name;
             }
             ProfileEdit::Remove { id } => {
-                self.require(&id)?;
+                self.require(&id, lang)?;
                 if id == self.active {
-                    return Err("Das aktive Profil lässt sich nicht löschen. Wechsle vorher zu einem anderen.".into());
+                    return Err(match lang {
+                        Lang::De => "Das aktive Profil lässt sich nicht löschen. Wechsle vorher zu einem anderen.".into(),
+                        Lang::En => "The active profile can't be deleted. Switch to another one first.".into(),
+                    });
                 }
                 self.list.retain(|p| p.id != id);
                 if self.fallback == id {
@@ -494,20 +533,23 @@ impl Profiles {
                 }
             }
             ProfileEdit::SetAuto { id, auto } => {
-                self.require(&id)?;
-                self.get_mut(&id).expect("geprüft").auto = auto;
+                self.require(&id, lang)?;
+                self.get_mut(&id).expect("checked above").auto = auto;
             }
             ProfileEdit::SetAutomatic { enabled } => self.auto = enabled,
             ProfileEdit::SetFallback { id } => {
                 if !id.is_empty() {
-                    self.require(&id)?;
+                    self.require(&id, lang)?;
                 }
                 self.fallback = id;
             }
             ProfileEdit::AddNetwork { id, network } => {
-                self.require(&id)?;
+                self.require(&id, lang)?;
                 if network.gateway.is_empty() {
-                    return Err("Kein Netzwerk erkannt.".into());
+                    return Err(match lang {
+                        Lang::De => "Kein Netzwerk erkannt.".into(),
+                        Lang::En => "No network detected.".into(),
+                    });
                 }
                 let mut moved = None;
                 for profile in &mut self.list {
@@ -518,15 +560,21 @@ impl Profiles {
                     }
                 }
                 let label = network.label.clone();
-                self.get_mut(&id).expect("geprüft").networks.push(network);
+                self.get_mut(&id).expect("checked above").networks.push(network);
                 if let Some(other) = moved {
-                    return Ok(Some(format!("„{label}“ gehörte bisher zum Profil „{other}“.")));
+                    return Ok(Some(match lang {
+                        Lang::De => format!("„{label}“ gehörte bisher zum Profil „{other}“."),
+                        Lang::En => format!("“{label}” previously belonged to the profile “{other}”."),
+                    }));
                 }
             }
             ProfileEdit::RemoveNetwork { id, index } => {
-                let profile = self.get_mut(&id).ok_or("Dieses Profil gibt es nicht mehr.")?;
+                let profile = self.get_mut(&id).ok_or_else(|| gone(lang))?;
                 if index >= profile.networks.len() {
-                    return Err("Dieses Netzwerk ist nicht mehr zugeordnet.".into());
+                    return Err(match lang {
+                        Lang::De => "Dieses Netzwerk ist nicht mehr zugeordnet.".into(),
+                        Lang::En => "This network is no longer assigned.".into(),
+                    });
                 }
                 profile.networks.remove(index);
             }
@@ -567,10 +615,10 @@ mod tests {
     fn setup() -> (Profiles, Settings) {
         let mut settings = Settings::for_host("pc");
         let mut profiles = Profiles::default();
-        profiles.attach(&mut settings);
-        profiles.edit(ProfileEdit::Create { name: "Büro".into() }, &settings).unwrap();
+        profiles.attach(&mut settings, Lang::De);
+        profiles.edit(ProfileEdit::Create { name: "Büro".into() }, &settings, Lang::De).unwrap();
         let office_id = profiles.list[1].id.clone();
-        profiles.activate(&office_id, &mut settings).unwrap();
+        profiles.activate(&office_id, &mut settings, Lang::De).unwrap();
         settings.role = Role::Client;
         settings.client.address = "10.1.2.3".into();
         profiles.sync(&settings);
@@ -592,10 +640,10 @@ mod tests {
         let before = settings.clone();
 
         let mut profiles = Profiles::default();
-        assert!(profiles.attach(&mut settings), "Migration soll gespeichert werden");
+        assert!(profiles.attach(&mut settings, Lang::De), "Migration soll gespeichert werden");
         assert_eq!(profiles.list.len(), 1);
         let first = &profiles.list[0];
-        assert_eq!(first.name, FIRST_PROFILE);
+        assert_eq!(first.name, first_profile(Lang::De));
         assert_eq!(first.place, Place::capture(&before));
         assert_eq!((profiles.active.as_str(), profiles.fallback.as_str()), (first.id.as_str(), first.id.as_str()));
         assert_eq!(settings.profile, first.id);
@@ -605,7 +653,7 @@ mod tests {
         // Zweiter Start: nichts mehr zu tun
         let mut settings = before.clone();
         settings.profile = profiles.active.clone();
-        assert!(!profiles.clone().attach(&mut settings));
+        assert!(!profiles.clone().attach(&mut settings, Lang::De));
     }
 
     #[test]
@@ -615,7 +663,7 @@ mod tests {
         // Eine ältere Version hat gui.json ohne `profile` gespeichert und dabei die Adresse geändert.
         settings.profile.clear();
         settings.client.address = "10.9.9.9".into();
-        assert!(profiles.attach(&mut settings));
+        assert!(profiles.attach(&mut settings, Lang::De));
         assert_eq!(settings.profile, office, "gehört zum zuletzt aktiven Profil");
         assert_eq!(profiles.get(&office).unwrap().place.client.address, "10.9.9.9");
         assert_eq!(profiles.list.len(), 2, "die übrigen Profile bleiben erhalten");
@@ -630,7 +678,7 @@ mod tests {
         let office_place = profiles.active_profile().unwrap().place.clone();
         profiles.get(&standard).unwrap().place.apply(&mut settings);
         settings.profile = standard.clone();
-        profiles.attach(&mut settings);
+        profiles.attach(&mut settings, Lang::De);
         assert_eq!(profiles.active, standard);
         assert_eq!(profiles.get(&id_of(&profiles, "Büro")).unwrap().place, office_place);
     }
@@ -642,7 +690,7 @@ mod tests {
         fresh.game_mode = false;
         let mut loaded = profiles.clone();
         loaded.restore(&mut fresh);
-        assert!(!loaded.attach(&mut fresh), "nichts überschrieben");
+        assert!(!loaded.attach(&mut fresh, Lang::De), "nichts überschrieben");
         assert_eq!(Place::capture(&fresh), Place::capture(&settings));
         assert_eq!((fresh.role, fresh.client.address.as_str()), (Role::Client, "10.1.2.3"));
         assert!(!fresh.game_mode, "Rechnerweites bleibt, wie es geladen wurde");
@@ -655,7 +703,7 @@ mod tests {
         )
         .unwrap();
         let mut settings = Settings::for_host("pc");
-        profiles.attach(&mut settings);
+        profiles.attach(&mut settings, Lang::De);
         let ids: HashSet<&str> = profiles.list.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids.len(), 3, "eindeutige Kennungen: {:?}", profiles.list);
         assert!(profiles.list.iter().all(|p| !p.name.trim().is_empty()));
@@ -670,22 +718,22 @@ mod tests {
         let standard = id_of(&profiles, "Standard");
         let office = id_of(&profiles, "Büro");
         settings.game_mode = false; // gilt für alle Profile
-        profiles.activate(&standard, &mut settings).unwrap();
+        profiles.activate(&standard, &mut settings, Lang::De).unwrap();
         assert_eq!((settings.role, settings.profile.as_str()), (Role::Server, standard.as_str()));
         assert!(!settings.game_mode, "Rechnerweites bleibt");
         settings.server.add_screen("laptop");
-        profiles.activate(&office, &mut settings).unwrap();
+        profiles.activate(&office, &mut settings, Lang::De).unwrap();
         assert_eq!((settings.role, settings.client.address.as_str()), (Role::Client, "10.1.2.3"));
         assert_eq!(settings.server.screens.len(), 1, "Anordnung von „Büro“");
         assert_eq!(profiles.get(&standard).unwrap().place.server.screens.len(), 2, "„laptop“ in „Standard“ gesichert");
-        assert!(profiles.activate("gibt-es-nicht", &mut settings).is_err());
+        assert!(profiles.activate("gibt-es-nicht", &mut settings, Lang::De).is_err());
     }
 
     #[test]
     fn keys_stay_global_while_layouts_differ() {
         let (mut profiles, mut settings) = setup();
         settings.server.keys.lock = "Ctrl+Alt+KeyL".into();
-        profiles.activate(&id_of(&profiles, "Standard"), &mut settings).unwrap();
+        profiles.activate(&id_of(&profiles, "Standard"), &mut settings, Lang::De).unwrap();
         assert_eq!(settings.server.keys.lock, "Ctrl+Alt+KeyL");
     }
 
@@ -693,7 +741,7 @@ mod tests {
     fn delayed_saves_do_not_leak_into_another_profile() {
         let (mut profiles, mut settings) = setup();
         let stale = settings.clone(); // Fenster bearbeitet noch „Büro“
-        profiles.activate(&id_of(&profiles, "Standard"), &mut settings).unwrap();
+        profiles.activate(&id_of(&profiles, "Standard"), &mut settings, Lang::De).unwrap();
         let mut edited = stale;
         edited.client.address = "10.7.7.7".into();
         edited.clipboard_files_mb = 5;
@@ -758,7 +806,7 @@ mod tests {
         assert_eq!(profiles.choose(&[office_net()]), Choice::Keep);
 
         let settings = Settings::for_host("pc");
-        profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: office_net() }, &settings).unwrap();
+        profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: office_net() }, &settings, Lang::De).unwrap();
         assert!(profiles.automatic());
         profiles.active = standard.clone();
         assert_eq!(profiles.choose(&[office_net()]), Choice::Network(office.clone()));
@@ -768,18 +816,18 @@ mod tests {
         // Kein Treffer: Profil für unbekannte Netzwerke (nach der Migration „Standard“)
         profiles.active = office.clone();
         assert_eq!(profiles.choose(&[home_net()]), Choice::Fallback(standard.clone()));
-        profiles.edit(ProfileEdit::SetFallback { id: String::new() }, &settings).unwrap();
+        profiles.edit(ProfileEdit::SetFallback { id: String::new() }, &settings, Lang::De).unwrap();
         assert_eq!(profiles.choose(&[home_net()]), Choice::Keep, "aktuelles behalten");
         profiles.active = standard.clone();
-        profiles.edit(ProfileEdit::SetFallback { id: standard.clone() }, &settings).unwrap();
+        profiles.edit(ProfileEdit::SetFallback { id: standard.clone() }, &settings, Lang::De).unwrap();
         assert_eq!(profiles.choose(&[home_net()]), Choice::Keep, "schon aktiv");
 
         // Automatik je Profil und insgesamt abschaltbar
-        profiles.edit(ProfileEdit::SetAuto { id: office.clone(), auto: false }, &settings).unwrap();
+        profiles.edit(ProfileEdit::SetAuto { id: office.clone(), auto: false }, &settings, Lang::De).unwrap();
         assert!(!profiles.automatic());
         assert_eq!(profiles.choose(&[office_net()]), Choice::Keep);
-        profiles.edit(ProfileEdit::SetAuto { id: office.clone(), auto: true }, &settings).unwrap();
-        profiles.edit(ProfileEdit::SetAutomatic { enabled: false }, &settings).unwrap();
+        profiles.edit(ProfileEdit::SetAuto { id: office.clone(), auto: true }, &settings, Lang::De).unwrap();
+        profiles.edit(ProfileEdit::SetAutomatic { enabled: false }, &settings, Lang::De).unwrap();
         assert_eq!(profiles.choose(&[office_net()]), Choice::Keep);
     }
 
@@ -809,20 +857,20 @@ mod tests {
         let (mut profiles, settings) = setup();
         let standard = id_of(&profiles, "Standard");
         let office = id_of(&profiles, "Büro");
-        profiles.edit(ProfileEdit::AddNetwork { id: standard.clone(), network: office_net() }, &settings).unwrap();
+        profiles.edit(ProfileEdit::AddNetwork { id: standard.clone(), network: office_net() }, &settings, Lang::De).unwrap();
         let mut renamed = office_net();
         renamed.label = "Firma".into();
-        let note = profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: renamed }, &settings).unwrap();
+        let note = profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: renamed }, &settings, Lang::De).unwrap();
         assert!(note.unwrap().contains("Standard"));
         assert!(profiles.get(&standard).unwrap().networks.is_empty());
         assert_eq!(profiles.get(&office).unwrap().networks.len(), 1);
         // Erneut übernehmen ersetzt den Eintrag (z. B. jetzt mit MAC)
-        profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: office_net() }, &settings).unwrap();
+        profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: office_net() }, &settings, Lang::De).unwrap();
         assert_eq!(profiles.get(&office).unwrap().networks, vec![office_net()]);
-        profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: home_net() }, &settings).unwrap();
-        profiles.edit(ProfileEdit::RemoveNetwork { id: office.clone(), index: 0 }, &settings).unwrap();
+        profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: home_net() }, &settings, Lang::De).unwrap();
+        profiles.edit(ProfileEdit::RemoveNetwork { id: office.clone(), index: 0 }, &settings, Lang::De).unwrap();
         assert_eq!(profiles.get(&office).unwrap().networks, vec![home_net()]);
-        assert!(profiles.edit(ProfileEdit::RemoveNetwork { id: office, index: 5 }, &settings).is_err());
+        assert!(profiles.edit(ProfileEdit::RemoveNetwork { id: office, index: 5 }, &settings, Lang::De).is_err());
     }
 
     #[test]
@@ -830,19 +878,19 @@ mod tests {
         let (mut profiles, settings) = setup();
         let office = id_of(&profiles, "Büro");
         let standard = id_of(&profiles, "Standard");
-        assert!(profiles.edit(ProfileEdit::Create { name: " büro ".into() }, &settings).is_err(), "Name schon vergeben");
-        assert!(profiles.edit(ProfileEdit::Create { name: "  ".into() }, &settings).is_err());
-        assert!(profiles.edit(ProfileEdit::Create { name: "x".repeat(MAX_NAME + 1) }, &settings).is_err());
+        assert!(profiles.edit(ProfileEdit::Create { name: " büro ".into() }, &settings, Lang::De).is_err(), "Name schon vergeben");
+        assert!(profiles.edit(ProfileEdit::Create { name: "  ".into() }, &settings, Lang::De).is_err());
+        assert!(profiles.edit(ProfileEdit::Create { name: "x".repeat(MAX_NAME + 1) }, &settings, Lang::De).is_err());
 
-        profiles.edit(ProfileEdit::Create { name: "Zuhause".into() }, &settings).unwrap();
+        profiles.edit(ProfileEdit::Create { name: "Zuhause".into() }, &settings, Lang::De).unwrap();
         let home_profile = profiles.list.last().unwrap();
         assert_eq!(home_profile.place.role, Role::Server, "neu: dieser Rechner allein als Server");
         assert_eq!(home_profile.place.server.screens.len(), 1);
         assert_eq!(home_profile.place.server.name, settings.server.name);
 
-        profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: office_net() }, &settings).unwrap();
-        profiles.edit(ProfileEdit::Duplicate { id: office.clone() }, &settings).unwrap();
-        profiles.edit(ProfileEdit::Duplicate { id: office.clone() }, &settings).unwrap();
+        profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: office_net() }, &settings, Lang::De).unwrap();
+        profiles.edit(ProfileEdit::Duplicate { id: office.clone() }, &settings, Lang::De).unwrap();
+        profiles.edit(ProfileEdit::Duplicate { id: office.clone() }, &settings, Lang::De).unwrap();
         let names: Vec<&str> = profiles.list.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["Standard", "Büro", "Zuhause", "Büro (Kopie)", "Büro (Kopie 2)"]);
         let copy = &profiles.list[3];
@@ -850,22 +898,89 @@ mod tests {
         assert!(copy.networks.is_empty(), "Netzwerke gehören nur einem Profil");
 
         let copy = copy.id.clone();
-        profiles.edit(ProfileEdit::Rename { id: copy.clone(), name: "Kunde".into() }, &settings).unwrap();
-        assert!(profiles.edit(ProfileEdit::Rename { id: copy.clone(), name: "Zuhause".into() }, &settings).is_err());
-        profiles.edit(ProfileEdit::Rename { id: copy.clone(), name: "kunde".into() }, &settings).unwrap();
+        profiles.edit(ProfileEdit::Rename { id: copy.clone(), name: "Kunde".into() }, &settings, Lang::De).unwrap();
+        assert!(profiles.edit(ProfileEdit::Rename { id: copy.clone(), name: "Zuhause".into() }, &settings, Lang::De).is_err());
+        profiles.edit(ProfileEdit::Rename { id: copy.clone(), name: "kunde".into() }, &settings, Lang::De).unwrap();
         assert_eq!(profiles.get(&copy).unwrap().name, "kunde", "eigener Name in anderer Schreibweise");
 
-        assert!(profiles.edit(ProfileEdit::Remove { id: office.clone() }, &settings).is_err(), "aktiv");
-        profiles.edit(ProfileEdit::Remove { id: standard.clone() }, &settings).unwrap();
+        assert!(profiles.edit(ProfileEdit::Remove { id: office.clone() }, &settings, Lang::De).is_err(), "aktiv");
+        profiles.edit(ProfileEdit::Remove { id: standard.clone() }, &settings, Lang::De).unwrap();
         assert_eq!(profiles.fallback, "", "Profil für unbekannte Netzwerke gelöscht");
-        assert!(profiles.edit(ProfileEdit::Remove { id: standard }, &settings).is_err());
+        assert!(profiles.edit(ProfileEdit::Remove { id: standard }, &settings, Lang::De).is_err());
 
         let long = "y".repeat(MAX_NAME);
-        profiles.edit(ProfileEdit::Rename { id: copy.clone(), name: long.clone() }, &settings).unwrap();
-        profiles.edit(ProfileEdit::Duplicate { id: copy }, &settings).unwrap();
+        profiles.edit(ProfileEdit::Rename { id: copy.clone(), name: long.clone() }, &settings, Lang::De).unwrap();
+        profiles.edit(ProfileEdit::Duplicate { id: copy }, &settings, Lang::De).unwrap();
         let name = &profiles.list.last().unwrap().name;
         assert_eq!(name.chars().count(), MAX_NAME);
         assert!(name.ends_with(" (Kopie)"));
+    }
+
+    /// Fehlermeldung einer Änderung auf Deutsch und Englisch
+    fn refused(profiles: &Profiles, edit: ProfileEdit, settings: &Settings) -> (String, String) {
+        let message = |lang| profiles.clone().edit(edit.clone(), settings, lang).unwrap_err();
+        (message(Lang::De), message(Lang::En))
+    }
+
+    #[test]
+    fn messages_and_names_in_both_languages() {
+        let (mut profiles, settings) = setup();
+        let office = id_of(&profiles, "Büro");
+        assert_eq!(
+            refused(&profiles, ProfileEdit::Create { name: " ".into() }, &settings),
+            ("Das Profil braucht einen Namen.".into(), "The profile needs a name.".into())
+        );
+        assert_eq!(
+            refused(&profiles, ProfileEdit::Create { name: "x".repeat(MAX_NAME + 1) }, &settings),
+            ("Der Name ist zu lang (höchstens 40 Zeichen).".into(), "The name is too long (at most 40 characters).".into())
+        );
+        assert_eq!(
+            refused(&profiles, ProfileEdit::Rename { id: office.clone(), name: "standard".into() }, &settings),
+            ("Ein Profil „standard“ gibt es schon.".into(), "There's already a profile named “standard”.".into())
+        );
+        assert_eq!(
+            refused(&profiles, ProfileEdit::Remove { id: office.clone() }, &settings),
+            (
+                "Das aktive Profil lässt sich nicht löschen. Wechsle vorher zu einem anderen.".into(),
+                "The active profile can't be deleted. Switch to another one first.".into()
+            )
+        );
+        assert_eq!(
+            refused(&profiles, ProfileEdit::SetAuto { id: "weg".into(), auto: true }, &settings),
+            ("Dieses Profil gibt es nicht mehr.".into(), "This profile no longer exists.".into())
+        );
+        assert_eq!(
+            refused(&profiles, ProfileEdit::AddNetwork { id: office.clone(), network: NetworkMark::default() }, &settings),
+            ("Kein Netzwerk erkannt.".into(), "No network detected.".into())
+        );
+        assert_eq!(
+            refused(&profiles, ProfileEdit::RemoveNetwork { id: office.clone(), index: 0 }, &settings),
+            ("Dieses Netzwerk ist nicht mehr zugeordnet.".into(), "This network is no longer assigned.".into())
+        );
+        let activated = profiles.clone().activate("weg", &mut settings.clone(), Lang::En);
+        assert_eq!(activated, Err("This profile no longer exists.".into()));
+
+        // Hinweis, wenn ein Netzwerk das Profil wechselt
+        let standard = id_of(&profiles, "Standard");
+        profiles.edit(ProfileEdit::AddNetwork { id: standard, network: office_net() }, &settings, Lang::En).unwrap();
+        let note = profiles.edit(ProfileEdit::AddNetwork { id: office.clone(), network: office_net() }, &settings, Lang::En);
+        assert_eq!(note.unwrap().as_deref(), Some("“192.168.178.0/24” previously belonged to the profile “Standard”."));
+
+        // Namen, die Qross selbst vergibt
+        profiles.edit(ProfileEdit::Duplicate { id: office.clone() }, &settings, Lang::En).unwrap();
+        profiles.edit(ProfileEdit::Duplicate { id: office }, &settings, Lang::En).unwrap();
+        let names: Vec<&str> = profiles.list.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Standard", "Büro", "Büro (copy)", "Büro (copy 2)"]);
+        let mut first = Profiles::default();
+        first.attach(&mut Settings::for_host("pc"), Lang::En);
+        assert_eq!(first.list[0].name, "Default");
+        let mut unnamed: Profiles = serde_json::from_str(r#"{"list":[{"id":"p1","name":""},{"id":"p2","name":" "}]}"#).unwrap();
+        unnamed.attach(&mut Settings::for_host("pc"), Lang::En);
+        let names: Vec<&str> = unnamed.list.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Profile", "Profile 2"]);
+        unnamed.list.iter_mut().for_each(|p| p.name.clear());
+        unnamed.attach(&mut Settings::for_host("pc"), Lang::De);
+        assert_eq!(unnamed.list[1].name, "Profil 2");
     }
 
     #[test]
@@ -883,7 +998,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("qross-profiles-test-{}", std::process::id()));
         assert!(Profiles::load(&dir).unwrap().is_none());
         let (mut profiles, settings) = setup();
-        profiles.edit(ProfileEdit::AddNetwork { id: profiles.active.clone(), network: office_net() }, &settings).unwrap();
+        profiles.edit(ProfileEdit::AddNetwork { id: profiles.active.clone(), network: office_net() }, &settings, Lang::De).unwrap();
         profiles.save(&dir).unwrap();
         assert_eq!(Profiles::load(&dir).unwrap(), Some(profiles));
         let _ = fs::remove_dir_all(&dir);

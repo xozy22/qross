@@ -6,6 +6,7 @@
 pub mod autostart;
 pub mod changelog;
 pub mod clipboard_files;
+pub mod i18n;
 pub mod keys;
 pub mod lifecycle;
 pub mod profiles;
@@ -22,10 +23,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use qross_core::server::SwitchOptions;
 use qross_core::sharing::{Share, Sharing, SharingRules};
-use qross_core::{Layout, LinkConfig};
+use qross_core::{Layout, LayoutError, LinkConfig};
 use qross_proto::{CursorFinder, Edge, DEFAULT_PORT};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Lang;
 use crate::keys::KeySettings;
 
 /// Einstellungen der Oberfläche, im Datenverzeichnis von Qross.
@@ -75,6 +77,9 @@ pub struct Settings {
     /// Profil, zu dem Rolle, Server- und Client-Werte gehören (siehe [`profiles`]); leer bei
     /// Einstellungen aus einer Version ohne Profile
     pub profile: String,
+    /// Sprache der Oberfläche, des Tray-Menüs und der Systembenachrichtigungen: `"auto"` (wie das
+    /// System), `"de"` oder `"en"` (siehe [`i18n::resolve`]). Gilt für alle Profile.
+    pub language: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -159,6 +164,7 @@ impl Settings {
             screensaver_sync: true,
             screensaver_lock_clients: false,
             profile: String::new(),
+            language: "auto".to_owned(),
         }
     }
 
@@ -185,18 +191,18 @@ impl Settings {
         if !path.exists() {
             return Ok(None);
         }
-        let text = fs::read_to_string(&path).with_context(|| format!("{} lesen", path.display()))?;
+        let text = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
         let mut settings: Self =
-            serde_json::from_str(&text).with_context(|| format!("{} ist ungültig", path.display()))?;
+            serde_json::from_str(&text).with_context(|| format!("{} is invalid", path.display()))?;
         settings.server.fit_grid();
         settings.server.complete_sharing();
         Ok(Some(settings))
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
-        fs::create_dir_all(dir).with_context(|| format!("{} anlegen", dir.display()))?;
+        fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
         let path = dir.join(SETTINGS_FILE);
-        fs::write(&path, serde_json::to_string_pretty(self)?).with_context(|| format!("{} schreiben", path.display()))
+        fs::write(&path, serde_json::to_string_pretty(self)?).with_context(|| format!("failed to write {}", path.display()))
     }
 }
 
@@ -264,28 +270,44 @@ impl ServerSettings {
         links
     }
 
-    /// Prüft Namen und Positionen und baut daraus das Layout für den Server.
-    pub fn validate(&self) -> Result<Layout, String> {
+    /// Prüft Namen und Positionen und baut daraus das Layout für den Server. Die Meldung steht im
+    /// Fenster, deshalb in `lang`.
+    pub fn validate(&self, lang: Lang) -> Result<Layout, String> {
         if self.name.trim().is_empty() {
-            return Err("Der Server braucht einen Namen.".into());
+            return Err(match lang {
+                Lang::De => "Der Server braucht einen Namen.".into(),
+                Lang::En => "The server needs a name.".into(),
+            });
         }
         if !self.contains(&self.name) {
-            return Err(format!("Der Server „{}“ fehlt im Layout.", self.name));
+            return Err(match lang {
+                Lang::De => format!("Der Server „{}“ fehlt im Layout.", self.name),
+                Lang::En => format!("The server “{}” is missing from the layout.", self.name),
+            });
         }
         let mut names = HashSet::new();
         let mut cells = HashSet::new();
         for screen in &self.screens {
             if screen.name.trim().is_empty() {
-                return Err("Ein Bildschirm hat keinen Namen.".into());
+                return Err(match lang {
+                    Lang::De => "Ein Bildschirm hat keinen Namen.".into(),
+                    Lang::En => "A screen has no name.".into(),
+                });
             }
             if !names.insert(screen.name.as_str()) {
-                return Err(format!("Der Name „{}“ kommt mehrfach vor.", screen.name));
+                return Err(match lang {
+                    Lang::De => format!("Der Name „{}“ kommt mehrfach vor.", screen.name),
+                    Lang::En => format!("The name “{}” is used more than once.", screen.name),
+                });
             }
             if !cells.insert((screen.col, screen.row)) {
-                return Err(format!("„{}“ liegt auf einem belegten Feld.", screen.name));
+                return Err(match lang {
+                    Lang::De => format!("„{}“ liegt auf einem belegten Feld.", screen.name),
+                    Lang::En => format!("“{}” is on a cell that's already taken.", screen.name),
+                });
             }
         }
-        let layout = Layout::from_links(&self.links()).map_err(|e| e.to_string())?;
+        let layout = Layout::from_links(&self.links()).map_err(|e| layout_error(&e, lang))?;
         Ok(layout)
     }
 
@@ -338,7 +360,7 @@ impl ServerSettings {
 
     /// Inhalt einer `qross.toml` für `qross server --config` (siehe auch [`Settings::server_toml`]).
     pub fn to_toml(&self, clipboard_files_mb: u64, share_concealed: bool) -> String {
-        let mut out = String::from("# Erzeugt von der Qross-Oberfläche\n");
+        let mut out = String::from("# Generated by the Qross GUI\n");
         out += &format!("name = {}\n", quote(&self.name));
         out += &format!("listen = \"{}\"\n", self.listen());
         out += &format!("discovery = {}\n", self.discovery);
@@ -355,6 +377,20 @@ impl ServerSettings {
             );
         }
         out
+    }
+}
+
+/// Fehler im Layout in Worten für das Fenster (der Text aus `qross_core` ist englisch fürs Log)
+fn layout_error(error: &LayoutError, lang: Lang) -> String {
+    match (error, lang) {
+        (LayoutError::SelfLink(name), Lang::De) => format!("„{name}“ kann nicht sein eigener Nachbar sein"),
+        (LayoutError::SelfLink(name), Lang::En) => format!("“{name}” can't be its own neighbor"),
+        (LayoutError::Conflict { screen, edge, first, second }, Lang::De) => {
+            format!("Kante {edge:?} von „{screen}“ ist doppelt belegt („{first}“ und „{second}“)")
+        }
+        (LayoutError::Conflict { screen, edge, first, second }, Lang::En) => {
+            format!("Edge {edge:?} of “{screen}” has two neighbors (“{first}” and “{second}”)")
+        }
     }
 }
 
@@ -425,7 +461,7 @@ mod tests {
         // tablet
         // pc  laptop
         let s = server(&[("pc", 2, 1), ("laptop", 3, 1), ("tablet", 2, 0)]);
-        let layout = s.validate().unwrap();
+        let layout = s.validate(Lang::En).unwrap();
         assert_eq!(layout.neighbor("pc", Edge::Right), Some("laptop"));
         assert_eq!(layout.neighbor("laptop", Edge::Left), Some("pc"));
         assert_eq!(layout.neighbor("pc", Edge::Top), Some("tablet"));
@@ -443,11 +479,42 @@ mod tests {
 
     #[test]
     fn invalid_layouts_are_rejected() {
-        assert!(server(&[("pc", 3, 2), ("pc", 4, 2)]).validate().is_err());
-        assert!(server(&[("pc", 3, 2), ("laptop", 3, 2)]).validate().is_err());
+        assert!(server(&[("pc", 3, 2), ("pc", 4, 2)]).validate(Lang::De).is_err());
+        assert!(server(&[("pc", 3, 2), ("laptop", 3, 2)]).validate(Lang::De).is_err());
         let mut missing = server(&[("pc", 3, 2)]);
         missing.name = "anders".into();
-        assert!(missing.validate().is_err());
+        assert!(missing.validate(Lang::De).is_err());
+    }
+
+    #[test]
+    fn layout_errors_in_both_languages() {
+        let error = |s: &ServerSettings| (s.validate(Lang::De).unwrap_err(), s.validate(Lang::En).unwrap_err());
+        assert_eq!(
+            error(&server(&[("pc", 3, 2), ("pc", 4, 2)])),
+            ("Der Name „pc“ kommt mehrfach vor.".into(), "The name “pc” is used more than once.".into())
+        );
+        assert_eq!(
+            error(&server(&[("pc", 3, 2), ("laptop", 3, 2)])),
+            ("„laptop“ liegt auf einem belegten Feld.".into(), "“laptop” is on a cell that's already taken.".into())
+        );
+        let mut missing = server(&[("pc", 3, 2)]);
+        missing.name = "anders".into();
+        assert_eq!(
+            error(&missing),
+            ("Der Server „anders“ fehlt im Layout.".into(), "The server “anders” is missing from the layout.".into())
+        );
+        missing.name = " ".into();
+        assert_eq!(error(&missing), ("Der Server braucht einen Namen.".into(), "The server needs a name.".into()));
+        let unnamed = server(&[("pc", 3, 2), ("", 4, 2)]);
+        assert_eq!(error(&unnamed), ("Ein Bildschirm hat keinen Namen.".into(), "A screen has no name.".into()));
+
+        // Aus dem Raster entstehen sie nicht, das Fenster zeigt sie aber, falls doch
+        let own = LayoutError::SelfLink("pc".into());
+        assert_eq!(layout_error(&own, Lang::De), "„pc“ kann nicht sein eigener Nachbar sein");
+        assert_eq!(layout_error(&own, Lang::En), "“pc” can't be its own neighbor");
+        let twice = LayoutError::Conflict { screen: "pc".into(), edge: Edge::Right, first: "a".into(), second: "b".into() };
+        assert_eq!(layout_error(&twice, Lang::De), "Kante Right von „pc“ ist doppelt belegt („a“ und „b“)");
+        assert_eq!(layout_error(&twice, Lang::En), "Edge Right of “pc” has two neighbors (“a” and “b”)");
     }
 
     #[test]
@@ -458,7 +525,7 @@ mod tests {
         switch.screens.insert("laptop".into(), "Ctrl+Alt+Digit2".into());
         switch.screens.insert("entfernt".into(), "Ctrl+Alt+Digit3".into());
         let targets: Vec<String> =
-            s.effective_keys().config().unwrap().options.switch.iter().map(|(_, t)| t.to_string()).collect();
+            s.effective_keys().config(Lang::En).unwrap().options.switch.iter().map(|(_, t)| t.to_string()).collect();
         assert_eq!(targets, ["right", "laptop"], "Rechner, die nicht mehr im Layout stehen, fallen weg");
 
         let file: toml::Table = toml::from_str(&s.to_toml(0, false)).unwrap();
@@ -634,7 +701,7 @@ mod tests {
         assert!(s.add_screen("laptop"));
         assert!(!s.add_screen("laptop"));
         assert!(s.add_screen("tablet"));
-        let layout = s.validate().unwrap();
+        let layout = s.validate(Lang::En).unwrap();
         assert_eq!(layout.neighbor("pc", Edge::Right), Some("laptop"));
         assert_eq!(layout.neighbor("pc", Edge::Left), Some("tablet"));
     }
@@ -676,10 +743,14 @@ mod tests {
         assert!(old.screensaver_sync && !old.screensaver_lock_clients);
         // … und die Tasten-Standards des Servers (Rollen, Medientasten an den aktiven Rechner)
         assert_eq!(old.server.keys, crate::keys::KeySettings::default());
-        assert_eq!(old.server.keys.config().unwrap(), qross_core::keys::KeyConfig::default());
+        assert_eq!(old.server.keys.config(Lang::En).unwrap(), qross_core::keys::KeyConfig::default());
         assert_eq!(old.clipboard_file_limit(), qross_net::clipfiles::DEFAULT_LIMIT);
         // … und gehört noch zu keinem Profil (das legt `profiles::Profiles::attach` an)
         assert_eq!(old.profile, "");
+        // … und spricht die Sprache des Systems
+        assert_eq!(old.language, "auto");
+        let german: Settings = serde_json::from_str(r#"{"language":"de"}"#).unwrap();
+        assert_eq!(german.language, "de");
 
         // Ältere Versionen lesen gui.json mit Feldern, die sie nicht kennen (z. B. `profile`), ohne
         // Fehler; dasselbe gilt hier für Felder späterer Versionen.

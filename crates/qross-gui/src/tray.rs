@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use qross_gui::i18n::{self, Lang};
 use qross_gui::profiles::{ProfileEdit, Profiles};
 use qross_gui::transfers::{shorten, Overall};
 use qross_gui::tray_icon::{bar_fill, draw_bar, draw_dot};
@@ -23,12 +24,62 @@ use crate::runtime::{Phase, Runtime, Status};
 
 const TRAY_ID: &str = "main";
 
-static TOGGLE: OnceLock<MenuItem<Wry>> = OnceLock::new();
-static PROFILES: OnceLock<Submenu<Wry>> = OnceLock::new();
+/// Einträge des Menüs, deren Text sich ändert (Starten/Stoppen, Sprache)
+struct Items {
+    show: MenuItem<Wry>,
+    news: MenuItem<Wry>,
+    settings: MenuItem<Wry>,
+    toggle: MenuItem<Wry>,
+    quit: MenuItem<Wry>,
+    profiles: Submenu<Wry>,
+}
+
+static ITEMS: OnceLock<Items> = OnceLock::new();
 /// Name des aktiven Profils für den Tooltip, sofern es mehrere Profile gibt
 static PROFILE_NAME: Mutex<Option<String>> = Mutex::new(None);
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 const PROFILE_PREFIX: &str = "profile:";
+
+/// Texte des Menüs in einer Sprache
+struct MenuTexts {
+    show: &'static str,
+    news: &'static str,
+    settings: &'static str,
+    start: &'static str,
+    stop: &'static str,
+    quit: &'static str,
+    /// Untermenü „Profil: Büro“
+    profile: &'static str,
+    auto: &'static str,
+    manage: &'static str,
+}
+
+fn menu_texts(lang: Lang) -> MenuTexts {
+    match lang {
+        Lang::De => MenuTexts {
+            show: "Qross öffnen",
+            news: "Neuigkeiten",
+            settings: "Einstellungen",
+            start: "Starten",
+            stop: "Stoppen",
+            quit: "Beenden",
+            profile: "Profil",
+            auto: "Automatisch nach Netzwerk",
+            manage: "Profile verwalten …",
+        },
+        Lang::En => MenuTexts {
+            show: "Open Qross",
+            news: "What's new",
+            settings: "Settings",
+            start: "Start",
+            stop: "Stop",
+            quit: "Quit",
+            profile: "Profile",
+            auto: "Switch automatically by network",
+            manage: "Manage profiles …",
+        },
+    }
+}
 
 /// Ist ein Tray-Icon sichtbar, über das sich das versteckte Fenster zurückholen lässt?
 pub fn available() -> bool {
@@ -38,14 +89,14 @@ pub fn available() -> bool {
 /// Legt das Tray-Icon an, sofern das System eines anzeigen kann. Fehler beenden die App nicht.
 pub fn init(app: &AppHandle) {
     if !host_present() {
-        info!("Kein Tray verfügbar – Schließen beendet Qross");
+        info!("no tray available; closing the window quits Qross");
         return;
     }
     // Unter Linux wird libappindicator erst jetzt geladen und kann dabei mit einem Panic scheitern.
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create(app))) {
         Ok(Ok(())) => AVAILABLE.store(true, Ordering::Relaxed),
-        Ok(Err(e)) => warn!("Tray-Icon nicht verfügbar ({e}) – Schließen beendet Qross"),
-        Err(_) => warn!("Tray-Icon nicht verfügbar – Schließen beendet Qross"),
+        Ok(Err(e)) => warn!("tray icon unavailable ({e}); closing the window quits Qross"),
+        Err(_) => warn!("tray icon unavailable; closing the window quits Qross"),
     }
 }
 
@@ -105,23 +156,24 @@ fn platform_host_present() -> bool {
 }
 
 fn create(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Qross öffnen", true, None::<&str>)?;
-    let news = MenuItem::with_id(app, "news", "Neuigkeiten", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "Einstellungen", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, "toggle", "Starten", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Beenden", true, None::<&str>)?;
-    let profiles = Submenu::with_id(app, "profiles", "Profil", true)?;
+    let lang = i18n::lang();
+    let texts = menu_texts(lang);
+    let show = MenuItem::with_id(app, "show", texts.show, true, None::<&str>)?;
+    let news = MenuItem::with_id(app, "news", texts.news, true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", texts.settings, true, None::<&str>)?;
+    let toggle = MenuItem::with_id(app, "toggle", texts.start, true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", texts.quit, true, None::<&str>)?;
+    let profiles = Submenu::with_id(app, "profiles", texts.profile, true)?;
     let current = app.state::<Arc<Runtime>>().profiles();
-    fill_profiles(app, &profiles, &current)?;
+    fill_profiles(app, &profiles, &current, lang)?;
     set_profile_name(&current);
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&show, &news, &settings, &profiles, &toggle, &separator, &quit])?;
-    let _ = TOGGLE.set(toggle);
-    let _ = PROFILES.set(profiles);
+    let _ = ITEMS.set(Items { show, news, settings, toggle, quit, profiles });
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon(None, None))
-        .tooltip("Qross – gestoppt")
+        .tooltip(tooltip(&Status::default(), None, None, lang))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -156,7 +208,7 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
                 let rt = app.state::<Arc<Runtime>>().inner().clone();
                 let enabled = !rt.profiles().auto;
                 if let Err(e) = rt.edit_profiles(ProfileEdit::SetAutomatic { enabled }) {
-                    warn!("Automatik nicht umgeschaltet: {e}");
+                    warn!("failed to toggle automatic profile selection: {e}");
                 } else if enabled {
                     tauri::async_runtime::spawn(async move { crate::netwatch::check_now(&rt).await });
                 }
@@ -207,7 +259,8 @@ fn changes_running_role(rt: &Runtime, id: &str) -> bool {
 }
 
 /// Profile als Häkchen-Einträge, dazu die Automatik und der Weg in die Einstellungen
-fn fill_profiles(app: &AppHandle, menu: &Submenu<Wry>, profiles: &Profiles) -> tauri::Result<()> {
+fn fill_profiles(app: &AppHandle, menu: &Submenu<Wry>, profiles: &Profiles, lang: Lang) -> tauri::Result<()> {
+    let texts = menu_texts(lang);
     while menu.remove_at(0)?.is_some() {}
     // „&“ markiert sonst ein Tastenkürzel im Menü
     let text = |name: &str| name.replace('&', "&&");
@@ -217,10 +270,10 @@ fn fill_profiles(app: &AppHandle, menu: &Submenu<Wry>, profiles: &Profiles) -> t
         menu.append(&CheckMenuItem::with_id(app, id, text(&profile.name), true, active, None::<&str>)?)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&CheckMenuItem::with_id(app, "profiles-auto", "Automatisch nach Netzwerk", true, profiles.auto, None::<&str>)?)?;
-    menu.append(&MenuItem::with_id(app, "profiles-manage", "Profile verwalten …", true, None::<&str>)?)?;
+    menu.append(&CheckMenuItem::with_id(app, "profiles-auto", texts.auto, true, profiles.auto, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "profiles-manage", texts.manage, true, None::<&str>)?)?;
     let active = profiles.active_profile().map(|p| p.name.as_str()).unwrap_or("–");
-    menu.set_text(format!("Profil: {}", text(active)))
+    menu.set_text(format!("{}: {}", texts.profile, text(active)))
 }
 
 fn set_profile_name(profiles: &Profiles) {
@@ -231,12 +284,33 @@ fn set_profile_name(profiles: &Profiles) {
 /// Profile haben sich geändert (anderes aktiv, umbenannt, Automatik …)
 pub fn update_profiles(app: &AppHandle, profiles: &Profiles) {
     set_profile_name(profiles);
-    if let Some(menu) = PROFILES.get() {
-        if let Err(e) = fill_profiles(app, menu, profiles) {
-            warn!("Profile im Tray-Menü nicht aktualisiert: {e}");
+    if let Some(items) = ITEMS.get() {
+        if let Err(e) = fill_profiles(app, &items.profiles, profiles, i18n::lang()) {
+            warn!("failed to update profiles in the tray menu: {e}");
         }
     }
     update(app);
+}
+
+/// Die Sprache hat sich geändert: Menü und Tooltip neu beschriften
+pub fn language_changed(app: &AppHandle) {
+    let Some(items) = ITEMS.get() else { return };
+    if let Err(e) = relabel(app, items, i18n::lang()) {
+        warn!("failed to relabel the tray menu: {e}");
+    }
+    // Beim nächsten Zeigen alles neu setzen, auch Tooltip und „Starten“/„Stoppen“
+    *SHOWN.lock().unwrap() = None;
+    update(app);
+}
+
+fn relabel(app: &AppHandle, items: &Items, lang: Lang) -> tauri::Result<()> {
+    let texts = menu_texts(lang);
+    items.show.set_text(texts.show)?;
+    items.news.set_text(texts.news)?;
+    items.settings.set_text(texts.settings)?;
+    items.quit.set_text(texts.quit)?;
+    let profiles = app.state::<Arc<Runtime>>().profiles();
+    fill_profiles(app, &items.profiles, &profiles, lang)
 }
 
 /// Was der Tray gerade zeigt. Der Status ändert sich bei jedem Wechsel des Cursors, Punkt, Tooltip
@@ -288,10 +362,11 @@ fn show(app: &AppHandle) {
     let Some(rt) = app.try_state::<Arc<Runtime>>() else { return };
     let status = rt.status();
     let profile = PROFILE_NAME.lock().unwrap().clone();
+    let lang = i18n::lang();
     let next = Shown {
         dot: dot(&status),
         bar: transfer.as_ref().map(|t| bar_fill(t.percent)),
-        tooltip: tooltip(&status, profile.as_deref(), transfer.as_ref().map(|t| t.text.as_str())),
+        tooltip: tooltip(&status, profile.as_deref(), transfer.as_ref().map(|t| t.text.as_str()), lang),
         running: status.running(),
     };
     let mut shown = SHOWN.lock().unwrap();
@@ -303,8 +378,9 @@ fn show(app: &AppHandle) {
         let _ = tray.set_tooltip(Some(&next.tooltip));
     }
     if before.is_none_or(|s| s.running != next.running) {
-        if let Some(toggle) = TOGGLE.get() {
-            let _ = toggle.set_text(if next.running { "Stoppen" } else { "Starten" });
+        if let Some(items) = ITEMS.get() {
+            let texts = menu_texts(lang);
+            let _ = items.toggle.set_text(if next.running { texts.stop } else { texts.start });
         }
     }
     *shown = Some(next);
@@ -323,7 +399,7 @@ fn show_taskbar(app: &AppHandle, percent: Option<u8>) {
         None => ProgressBarState { status: Some(ProgressBarStatus::None), progress: None },
     };
     if let Err(e) = window.set_progress_bar(state) {
-        debug!("Fortschritt in der Taskleiste nicht gesetzt: {e}");
+        debug!("failed to set taskbar progress: {e}");
     }
     *shown = Some(percent);
 }
@@ -332,36 +408,57 @@ fn show_taskbar(app: &AppHandle, percent: Option<u8>) {
 const TOOLTIP_CHARS: usize = 120;
 
 /// `transfer`: Gesamtstand laufender Übertragungen, steht dann statt der Verbindung
-fn tooltip(status: &Status, profile: Option<&str>, transfer: Option<&str>) -> String {
+fn tooltip(status: &Status, profile: Option<&str>, transfer: Option<&str>, lang: Lang) -> String {
     let profile = profile.map(|name| format!(" ({name})")).unwrap_or_default();
     let role = match status.role {
         Some(Role::Server) => "Server",
         Some(Role::Client) => "Client",
-        None => return format!("Qross{profile} – {}", if status.phase == Phase::Error { "Fehler" } else { "gestoppt" }),
+        None => {
+            let state = match (status.phase, lang) {
+                (Phase::Error, Lang::De) => "Fehler",
+                (Phase::Error, Lang::En) => "error",
+                (_, Lang::De) => "gestoppt",
+                (_, Lang::En) => "stopped",
+            };
+            return format!("Qross{profile} – {state}");
+        }
     };
-    let detail = match (transfer, status.role, status.phase) {
+    let server = status.server_name.as_deref();
+    let retrying = status.retry_reason.is_some();
+    let detail = match (transfer, status.role, status.phase, lang) {
         (Some(transfer), ..) => transfer.to_owned(),
-        (_, Some(Role::Server), Phase::Listening) => match status.clients.len() {
-            0 => "wartet auf Clients".to_owned(),
-            1 => "1 Client verbunden".to_owned(),
-            n => format!("{n} Clients verbunden"),
-        },
-        (_, _, Phase::Connected) => format!("verbunden mit {}", status.server_name.as_deref().unwrap_or("Server")),
-        (_, _, Phase::Connecting) if status.retry_reason.is_some() => "Server nicht erreichbar, versucht es weiter".to_owned(),
-        (_, _, Phase::Connecting) => "verbindet …".to_owned(),
-        (_, _, Phase::Starting) => "startet …".to_owned(),
+        (_, Some(Role::Server), Phase::Listening, _) => clients_text(status.clients.len(), lang),
+        (_, _, Phase::Connected, Lang::De) => format!("verbunden mit {}", server.unwrap_or("Server")),
+        (_, _, Phase::Connected, Lang::En) => format!("connected to {}", server.unwrap_or("the server")),
+        (_, _, Phase::Connecting, Lang::De) if retrying => "Server nicht erreichbar, versucht es weiter".to_owned(),
+        (_, _, Phase::Connecting, Lang::En) if retrying => "server unreachable, still trying".to_owned(),
+        (_, _, Phase::Connecting, Lang::De) => "verbindet …".to_owned(),
+        (_, _, Phase::Connecting, Lang::En) => "connecting …".to_owned(),
+        (_, _, Phase::Starting, Lang::De) => "startet …".to_owned(),
+        (_, _, Phase::Starting, Lang::En) => "starting …".to_owned(),
         _ => status.message.clone(),
     };
-    let lock = if let Some(hint) = &status.secure_input {
-        qross_gui::secure_input::tray_note(hint)
-    } else if status.locked {
-        " · Cursor gesperrt".to_owned()
-    } else if status.game_hold.is_some() {
-        " · Spielemodus hält den Cursor".to_owned()
-    } else {
-        String::new()
+    let lock = match (&status.secure_input, status.locked, status.game_hold.is_some(), lang) {
+        (Some(hint), ..) => qross_gui::secure_input::tray_note(hint, lang),
+        (None, true, _, Lang::De) => " · Cursor gesperrt".to_owned(),
+        (None, true, _, Lang::En) => " · cursor locked".to_owned(),
+        (None, false, true, Lang::De) => " · Spielemodus hält den Cursor".to_owned(),
+        (None, false, true, Lang::En) => " · game mode is holding the cursor".to_owned(),
+        (None, false, false, _) => String::new(),
     };
     shorten(&format!("Qross {role}{profile} – {detail}{lock}"), TOOLTIP_CHARS)
+}
+
+/// „wartet auf Clients“, „1 Client verbunden“, „3 Clients verbunden“
+fn clients_text(count: usize, lang: Lang) -> String {
+    match (count, lang) {
+        (0, Lang::De) => "wartet auf Clients".to_owned(),
+        (0, Lang::En) => "waiting for clients".to_owned(),
+        (1, Lang::De) => "1 Client verbunden".to_owned(),
+        (1, Lang::En) => "1 client connected".to_owned(),
+        (n, Lang::De) => format!("{n} Clients verbunden"),
+        (n, Lang::En) => format!("{n} clients connected"),
+    }
 }
 
 /// Farbe des Statuspunkts; gestoppt ohne Punkt
@@ -379,7 +476,7 @@ fn dot(status: &Status) -> Option<[u8; 3]> {
 
 /// Basis-Icon mit Statuspunkt unten links; laufen Übertragungen, stattdessen mit ihrem Balken.
 fn icon(dot: Option<[u8; 3]>, bar: Option<u8>) -> Image<'static> {
-    let base = Image::from_bytes(include_bytes!("../icons/32x32.png")).expect("eingebettetes Icon");
+    let base = Image::from_bytes(include_bytes!("../icons/32x32.png")).expect("embedded icon is a valid PNG");
     let (w, h) = (base.width(), base.height());
     let mut rgba = base.rgba().to_vec();
     match (bar, dot) {
