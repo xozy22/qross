@@ -214,6 +214,8 @@ pub struct Runtime {
     receiving_since: Mutex<HashMap<String, Instant>>,
     /// Dateiübertragungen der laufenden Instanz (zum Abbrechen)
     transfers: Mutex<Option<Transfers>>,
+    /// Ihr letzter Stand, für den Gesamtfortschritt in Tray und Taskleiste
+    ongoing: Mutex<transfers::Ongoing>,
     /// Was über einen Programmlauf hinaus gilt (laufende Rolle, letzte Update-Prüfung …)
     app_state: Mutex<AppState>,
     /// Cursor-Finder dieses Rechners, für Server und Client derselbe (beim ersten Gebrauch angelegt)
@@ -238,6 +240,7 @@ impl Runtime {
             dismissed: Mutex::new(Vec::new()),
             receiving_since: Mutex::new(HashMap::new()),
             transfers: Mutex::new(None),
+            ongoing: Mutex::new(transfers::Ongoing::default()),
             app_state: Mutex::new(AppState::load(&data_dir)),
             finder: OnceLock::new(),
             data_dir,
@@ -363,6 +366,8 @@ impl Runtime {
 
     async fn shutdown(&self, running: Running) {
         *self.transfers.lock().unwrap() = None;
+        self.ongoing.lock().unwrap().clear();
+        crate::tray::set_transfers(&self.app, None);
         match running {
             Running::Server { task, stop, name, .. } => {
                 let _ = tokio::time::timeout(Duration::from_secs(2), stop.stop()).await;
@@ -872,15 +877,21 @@ impl Runtime {
         let _ = self.app.emit("latency", LatencyEvent { peer, client_reports, summary });
     }
 
-    /// Stand einer Dateiübertragung direkt ans Fenster (etwa 4×/s, deshalb nicht über den Status).
-    /// Am Ende einer längeren Übertragung zusätzlich eine Systembenachrichtigung, wenn das Fenster
-    /// im Hintergrund ist.
+    /// Stand einer Dateiübertragung direkt ans Fenster (etwa 4×/s, deshalb nicht über den Status),
+    /// zusammen mit allen anderen laufenden an Tray und Taskleiste. Am Ende einer längeren
+    /// Übertragung zusätzlich eine Systembenachrichtigung, wenn das Fenster im Hintergrund ist.
     pub fn on_transfer(&self, progress: Progress) {
         if let Some((title, body)) = transfers::end_notice(&progress) {
             if !crate::window_in_front(&self.app) {
                 crate::notify(&self.app, &title, &body);
             }
         }
+        let overall = {
+            let mut ongoing = self.ongoing.lock().unwrap();
+            ongoing.update(&progress);
+            ongoing.overall()
+        };
+        crate::tray::set_transfers(&self.app, overall);
         let _ = self.app.emit("transfer", transfers::view(&progress));
     }
 
@@ -941,6 +952,8 @@ impl Runtime {
         };
         // Die Instanz läuft nicht mehr; ein erneuter Start räumt `running` auf.
         *self.responsive.lock().unwrap() = None;
+        self.ongoing.lock().unwrap().clear();
+        crate::tray::set_transfers(&self.app, None);
         self.update(|s| *s = Status { phase, message, ..Status::default() });
     }
 }

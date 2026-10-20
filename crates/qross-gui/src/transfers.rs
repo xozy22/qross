@@ -1,6 +1,8 @@
 //! Fortschrittsanzeige laufender Dateiübertragungen (Drag & Drop in beide Richtungen, kopierte
-//! Dateien): Texte für das Fenster und die Systembenachrichtigung am Ende.
+//! Dateien): Texte für das Fenster, den Gesamtstand für Tray und Taskleiste und die
+//! Systembenachrichtigung am Ende.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use qross_core::text::size_text;
@@ -165,6 +167,77 @@ pub fn end_notice(p: &Progress) -> Option<(String, String)> {
     }
 }
 
+/// Erst ab dieser Laufzeit zeigen Tray und Taskleiste eine Übertragung; kurze blitzten sonst nur auf.
+pub const SHOW_OUTSIDE_AFTER: Duration = Duration::from_secs(1);
+/// Längster Dateiname im Tooltip (Windows nimmt dort höchstens 127 Zeichen)
+const TOOLTIP_NAME_CHARS: usize = 32;
+
+/// Gesamtstand aller laufenden Übertragungen, für Tray und Taskleiste
+#[derive(Debug, Clone, PartialEq)]
+pub struct Overall {
+    /// 0 bis 100, nach Bytes über alle Übertragungen
+    pub percent: u8,
+    /// Zeile für den Tooltip: „Film.mkv an „laptop“: 42 % · noch 21 s“, bei mehreren
+    /// „3 Übertragungen: 42 %“
+    pub text: String,
+}
+
+/// Laufende Übertragungen mit ihrem letzten Stand
+#[derive(Default)]
+pub struct Ongoing(HashMap<(Direction, u64), Progress>);
+
+impl Ongoing {
+    /// Übernimmt einen Stand. Zu Ende (fertig, abgebrochen, fehlgeschlagen) fällt die Übertragung heraus.
+    pub fn update(&mut self, p: &Progress) {
+        let key = (p.direction, p.transfer);
+        if p.phase.is_running() {
+            self.0.insert(key, p.clone());
+        } else {
+            self.0.remove(&key);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// `None`, solange keine Übertragung lange genug läuft
+    pub fn overall(&self) -> Option<Overall> {
+        let shown: Vec<&Progress> = self.0.values().filter(|p| p.elapsed >= SHOW_OUTSIDE_AFTER).collect();
+        let (bytes, total) = shown.iter().fold((0u64, 0u64), |(b, t), p| (b + p.bytes.min(p.total), t + p.total));
+        // Nur leere Ordner: gleich fertig
+        let percent = (bytes * 100).checked_div(total).map_or(100, |p| p as u8);
+        let text = match shown.as_slice() {
+            [] => return None,
+            [p] => {
+                let route = match p.direction {
+                    Direction::Sending => format!("an „{}“", p.peer),
+                    Direction::Receiving => format!("von „{}“", p.peer),
+                };
+                let left = p.remaining.map(|left| format!(" · {}", remaining_text(left))).unwrap_or_default();
+                format!("{} {route}: {percent} %{left}", shorten(&names_text(&p.names), TOOLTIP_NAME_CHARS))
+            }
+            many => {
+                // Die Restzeit der langsamsten, sofern alle eine Schätzung haben
+                let left = many.iter().map(|p| p.remaining).collect::<Option<Vec<_>>>().and_then(|all| all.into_iter().max());
+                let left = left.map(|left| format!(" · {}", remaining_text(left))).unwrap_or_default();
+                format!("{} Übertragungen: {percent} %{left}", many.len())
+            }
+        };
+        Some(Overall { percent, text })
+    }
+}
+
+/// Kürzt auf höchstens `max` Zeichen, mit „…“ am Ende
+pub fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut short: String = text.chars().take(max - 1).collect();
+    short.push('…');
+    short
+}
+
 /// Zurück aus der `id` einer [`TransferView`]: Richtung und Nummer
 pub fn parse_id(id: &str) -> Option<(Direction, u64)> {
     let (prefix, number) = id.split_once('-')?;
@@ -260,6 +333,54 @@ mod tests {
         assert_eq!(end_notice(&copied), None, "dafür meldet sich „Kopierte Dateien sind bereit“");
         let dropped = progress(Direction::Receiving, Phase::Done);
         assert_eq!(end_notice(&dropped).map(|n| n.1), Some("Film.mkv von „laptop“ ist da (3 GB)".into()));
+    }
+
+    #[test]
+    fn tray_and_taskbar_show_all_running_transfers_together() {
+        let mut ongoing = Ongoing::default();
+        assert_eq!(ongoing.overall(), None);
+
+        // Eben erst gestartet: noch nichts, kurze Übertragungen blitzten sonst nur auf
+        let fresh = Progress { elapsed: Duration::from_millis(400), ..progress(Direction::Sending, Phase::Running) };
+        ongoing.update(&fresh);
+        assert_eq!(ongoing.overall(), None);
+
+        ongoing.update(&progress(Direction::Sending, Phase::Running));
+        let one = ongoing.overall().unwrap();
+        assert_eq!(one.percent, 42);
+        assert_eq!(one.text, "Film.mkv an „laptop“: 42 % · noch 21 s");
+
+        // Eine zweite (Empfang, gleiche Nummer ist eine andere Übertragung): zusammen nach Bytes
+        let incoming = Progress {
+            total: 1_000_000_000,
+            bytes: 940_000_000,
+            remaining: Some(Duration::from_secs(2)),
+            ..progress(Direction::Receiving, Phase::Running)
+        };
+        ongoing.update(&incoming);
+        let both = ongoing.overall().unwrap();
+        assert_eq!(both.percent, 55, "(1,26 + 0,94) / (3 + 1) GB");
+        assert_eq!(both.text, "2 Übertragungen: 55 % · noch 21 s");
+
+        // Ohne Schätzung bei einer davon keine Restzeit
+        ongoing.update(&Progress { remaining: None, ..incoming.clone() });
+        assert_eq!(ongoing.overall().unwrap().text, "2 Übertragungen: 55 %");
+
+        // Zu Ende: fällt heraus, egal wie sie endete
+        ongoing.update(&Progress { phase: Phase::Done, ..incoming });
+        assert_eq!(ongoing.overall().unwrap().percent, 42);
+        ongoing.update(&progress(Direction::Sending, Phase::Failed("weg".into())));
+        assert_eq!(ongoing.overall(), None);
+    }
+
+    #[test]
+    fn long_names_are_shortened_in_the_tooltip() {
+        let mut ongoing = Ongoing::default();
+        let names = vec!["Ein sehr langer Dateiname für den Bericht 2026.pdf".into()];
+        ongoing.update(&Progress { names, ..progress(Direction::Receiving, Phase::Running) });
+        let text = ongoing.overall().unwrap().text;
+        assert_eq!(text, "Ein sehr langer Dateiname für d… von „laptop“: 42 % · noch 21 s");
+        assert!(text.chars().count() < 100);
     }
 
     #[test]

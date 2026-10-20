@@ -1,4 +1,6 @@
 //! Tray-Icon: zeigt den Zustand als farbigen Punkt und im Tooltip; im Menü auch die Profile.
+//! Laufen Dateiübertragungen, steht stattdessen ihr Gesamtfortschritt als Balken im Symbol und im
+//! Tooltip, dazu als Balken in der Taskleiste (Windows) bzw. im Dock (macOS).
 //!
 //! Nicht jedes System zeigt Tray-Icons an (z. B. GNOME ohne AppIndicator-Erweiterung). Dann
 //! beendet Schließen die App, statt das Fenster unerreichbar zu verstecken.
@@ -7,12 +9,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use qross_gui::profiles::{ProfileEdit, Profiles};
+use qross_gui::transfers::{shorten, Overall};
+use qross_gui::tray_icon::{bar_fill, draw_bar, draw_dot};
 use qross_gui::Role;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::window::{ProgressBarState, ProgressBarStatus};
 use tauri::{AppHandle, Emitter, Manager, Wry};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::runtime::{Phase, Runtime, Status};
 
@@ -115,7 +120,7 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
     let _ = PROFILES.set(profiles);
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon(None))
+        .icon(icon(None, None))
         .tooltip("Qross – gestoppt")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -238,11 +243,17 @@ pub fn update_profiles(app: &AppHandle, profiles: &Profiles) {
 /// und Menü dagegen selten; ans System geht nur, was sich geändert hat.
 struct Shown {
     dot: Option<[u8; 3]>,
+    /// Gefüllte Spalten des Fortschrittsbalkens, solange Dateien übertragen werden
+    bar: Option<u8>,
     tooltip: String,
     running: bool,
 }
 
 static SHOWN: Mutex<Option<Shown>> = Mutex::new(None);
+/// Gesamtstand der laufenden Dateiübertragungen (siehe [`set_transfers`])
+static TRANSFERS: Mutex<Option<Overall>> = Mutex::new(None);
+/// Prozent im Balken der Taskleiste bzw. des Docks; `None`: beim nächsten Mal neu setzen
+static TASKBAR: Mutex<Option<Option<u8>>> = Mutex::new(Some(None));
 
 /// Zeigt den Status im Tray, auf dem Hauptthread und mit dem Stand von dann: Wer den Status meldet,
 /// wartet nicht auf das System, und dicht aufeinander folgende Meldungen enden beim neuesten Stand.
@@ -251,16 +262,42 @@ pub fn update(app: &AppHandle) {
     let _ = app.run_on_main_thread(move || show(&handle));
 }
 
+/// Laufende Dateiübertragungen, zusammengefasst; `None`, wenn keine (mehr) läuft.
+pub fn set_transfers(app: &AppHandle, overall: Option<Overall>) {
+    {
+        let mut current = TRANSFERS.lock().unwrap();
+        if *current == overall {
+            return;
+        }
+        *current = overall;
+    }
+    update(app);
+}
+
+/// Das Fenster ist (wieder) zu sehen: Windows legt seine Schaltfläche in der Taskleiste dabei neu
+/// an, ohne den Balken einer laufenden Übertragung.
+pub fn window_shown(app: &AppHandle) {
+    *TASKBAR.lock().unwrap() = None;
+    update(app);
+}
+
 fn show(app: &AppHandle) {
+    let transfer = TRANSFERS.lock().unwrap().clone();
+    show_taskbar(app, transfer.as_ref().map(|t| t.percent));
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
     let Some(rt) = app.try_state::<Arc<Runtime>>() else { return };
     let status = rt.status();
     let profile = PROFILE_NAME.lock().unwrap().clone();
-    let next = Shown { dot: dot(&status), tooltip: tooltip(&status, profile.as_deref()), running: status.running() };
+    let next = Shown {
+        dot: dot(&status),
+        bar: transfer.as_ref().map(|t| bar_fill(t.percent)),
+        tooltip: tooltip(&status, profile.as_deref(), transfer.as_ref().map(|t| t.text.as_str())),
+        running: status.running(),
+    };
     let mut shown = SHOWN.lock().unwrap();
     let before = shown.as_ref();
-    if before.is_none_or(|s| s.dot != next.dot) {
-        let _ = tray.set_icon(Some(icon(next.dot)));
+    if before.is_none_or(|s| s.dot != next.dot || s.bar != next.bar) {
+        let _ = tray.set_icon(Some(icon(next.dot, next.bar)));
     }
     if before.is_none_or(|s| s.tooltip != next.tooltip) {
         let _ = tray.set_tooltip(Some(&next.tooltip));
@@ -273,23 +310,46 @@ fn show(app: &AppHandle) {
     *shown = Some(next);
 }
 
-fn tooltip(status: &Status, profile: Option<&str>) -> String {
+/// Balken in der Taskleiste (Windows) bzw. im Dock (macOS, Linux mit libunity); `None` nimmt ihn weg.
+/// Unter Windows nur zu sehen, solange das Fenster eine Schaltfläche hat, also nicht im Tray.
+fn show_taskbar(app: &AppHandle, percent: Option<u8>) {
+    let mut shown = TASKBAR.lock().unwrap();
+    if *shown == Some(percent) {
+        return;
+    }
+    let Some(window) = app.get_webview_window("main") else { return };
+    let state = match percent {
+        Some(p) => ProgressBarState { status: Some(ProgressBarStatus::Normal), progress: Some(p.into()) },
+        None => ProgressBarState { status: Some(ProgressBarStatus::None), progress: None },
+    };
+    if let Err(e) = window.set_progress_bar(state) {
+        debug!("Fortschritt in der Taskleiste nicht gesetzt: {e}");
+    }
+    *shown = Some(percent);
+}
+
+/// Windows nimmt höchstens 127 Zeichen
+const TOOLTIP_CHARS: usize = 120;
+
+/// `transfer`: Gesamtstand laufender Übertragungen, steht dann statt der Verbindung
+fn tooltip(status: &Status, profile: Option<&str>, transfer: Option<&str>) -> String {
     let profile = profile.map(|name| format!(" ({name})")).unwrap_or_default();
     let role = match status.role {
         Some(Role::Server) => "Server",
         Some(Role::Client) => "Client",
         None => return format!("Qross{profile} – {}", if status.phase == Phase::Error { "Fehler" } else { "gestoppt" }),
     };
-    let detail = match (status.role, status.phase) {
-        (Some(Role::Server), Phase::Listening) => match status.clients.len() {
+    let detail = match (transfer, status.role, status.phase) {
+        (Some(transfer), ..) => transfer.to_owned(),
+        (_, Some(Role::Server), Phase::Listening) => match status.clients.len() {
             0 => "wartet auf Clients".to_owned(),
             1 => "1 Client verbunden".to_owned(),
             n => format!("{n} Clients verbunden"),
         },
-        (_, Phase::Connected) => format!("verbunden mit {}", status.server_name.as_deref().unwrap_or("Server")),
-        (_, Phase::Connecting) if status.retry_reason.is_some() => "Server nicht erreichbar, versucht es weiter".to_owned(),
-        (_, Phase::Connecting) => "verbindet …".to_owned(),
-        (_, Phase::Starting) => "startet …".to_owned(),
+        (_, _, Phase::Connected) => format!("verbunden mit {}", status.server_name.as_deref().unwrap_or("Server")),
+        (_, _, Phase::Connecting) if status.retry_reason.is_some() => "Server nicht erreichbar, versucht es weiter".to_owned(),
+        (_, _, Phase::Connecting) => "verbindet …".to_owned(),
+        (_, _, Phase::Starting) => "startet …".to_owned(),
         _ => status.message.clone(),
     };
     let lock = if let Some(hint) = &status.secure_input {
@@ -301,7 +361,7 @@ fn tooltip(status: &Status, profile: Option<&str>) -> String {
     } else {
         String::new()
     };
-    format!("Qross {role}{profile} – {detail}{lock}")
+    shorten(&format!("Qross {role}{profile} – {detail}{lock}"), TOOLTIP_CHARS)
 }
 
 /// Farbe des Statuspunkts; gestoppt ohne Punkt
@@ -317,26 +377,15 @@ fn dot(status: &Status) -> Option<[u8; 3]> {
     }
 }
 
-/// Basis-Icon mit Statuspunkt unten links.
-fn icon(dot: Option<[u8; 3]>) -> Image<'static> {
+/// Basis-Icon mit Statuspunkt unten links; laufen Übertragungen, stattdessen mit ihrem Balken.
+fn icon(dot: Option<[u8; 3]>, bar: Option<u8>) -> Image<'static> {
     let base = Image::from_bytes(include_bytes!("../icons/32x32.png")).expect("eingebettetes Icon");
     let (w, h) = (base.width(), base.height());
     let mut rgba = base.rgba().to_vec();
-    if let Some([r, g, b]) = dot {
-        // unten links, damit der Mauszeiger im Logo frei bleibt
-        let (cx, cy, radius) = (8.0, h as f32 - 8.0, 7.5f32);
-        for y in 0..h {
-            for x in 0..w {
-                let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
-                let i = ((y * w + x) * 4) as usize;
-                if d <= radius - 1.5 {
-                    rgba[i..i + 4].copy_from_slice(&[r, g, b, 255]);
-                } else if d <= radius {
-                    // weißer Rand, damit der Punkt auf jedem Hintergrund sichtbar ist
-                    rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
-                }
-            }
-        }
+    match (bar, dot) {
+        (Some(filled), _) => draw_bar(&mut rgba, w, h, filled),
+        (None, Some(color)) => draw_dot(&mut rgba, w, h, color),
+        (None, None) => {}
     }
     Image::new_owned(rgba, w, h)
 }
