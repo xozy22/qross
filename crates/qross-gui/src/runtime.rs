@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use qross_core::sharing::SharingRules;
 use qross_core::CaptureEvent;
+use qross_gui::elevated::{self, ElevatedHint};
 use qross_gui::i18n::{self, Lang};
 use qross_gui::lifecycle::AppState;
 use qross_gui::profiles::{self, Place, ProfileEdit, Profiles};
@@ -26,8 +27,9 @@ use qross_net::server::{
 use qross_net::usage::SharedMeter;
 use qross_net::{Fingerprint, Identity, TrustOutcome, TrustStore, KNOWN_SERVERS_FILE, TRUSTED_CLIENTS_FILE};
 use qross_platform::dryrun::{LogInjector, MemoryClipboard};
-use qross_platform::{Capture, FinderOverlay, SecureInput};
-use qross_proto::{CursorFinder, GameState, LatencySummary, Platform, Rect, Sharing, UsageReport, DEFAULT_PORT};
+use qross_platform::usage::Usage;
+use qross_platform::{Capture, ElevatedWindow, FinderOverlay, SecureInput};
+use qross_proto::{CursorFinder, GameState, LatencySummary, Platform, Rect, Sharing, UsagePart, UsageReport, DEFAULT_PORT};
 use serde::Serialize;
 use tauri::async_runtime::{self, JoinHandle};
 use tauri::{AppHandle, Emitter};
@@ -160,6 +162,12 @@ pub struct Status {
     /// Server (macOS): wer die sichere Tastatureingabe gerade hält
     #[serde(skip)]
     pub secure_holder: Option<SecureInput>,
+    /// Server (Windows): Hinweis, dass ein Fenster mit Administratorrechten, etwa der Task-Manager,
+    /// Maus und Tastatur von Qross fernhält (siehe [`elevated::hint`])
+    pub elevated: Option<ElevatedHint>,
+    /// Server (Windows): welches Fenster gerade im Weg ist
+    #[serde(skip)]
+    pub elevated_window: Option<ElevatedWindow>,
     /// Client: was der Server für den Cursor-Finder eingestellt hat (`None`: nichts gemeldet, dann
     /// ist er aus, etwa bei einem Server bis Qross 0.7)
     pub cursor_finder: Option<CursorFinder>,
@@ -236,15 +244,57 @@ pub struct UsageEvent {
     pub memory: u64,
     /// Zahl der Prozesse
     pub processes: u32,
+    /// Dieselben Werte je Art der Prozesse, Qross selbst zuerst; leer bei Clients bis Qross 0.14.0, die nur die
+    /// Summe melden
+    pub parts: Vec<UsagePartEvent>,
+}
+
+/// Anteil einer Art von Prozessen an [`UsageEvent`]
+#[derive(Serialize, Clone, Debug)]
+pub struct UsagePartEvent {
+    /// "core" (Qross selbst), "page", "graphics", "browser", "network" oder "other"
+    pub kind: &'static str,
+    pub cpu: Option<f64>,
+    pub memory: u64,
+    pub processes: u32,
 }
 
 impl UsageEvent {
-    fn reported(peer: String, report: UsageReport) -> Self {
+    fn reported(peer: String, report: UsageReport, parts: &[UsagePart]) -> Self {
+        let cpu = |permille: u32| Some(f64::from(permille) / 10.0);
         Self {
             peer: Some(peer),
-            cpu: Some(f64::from(report.cpu_permille) / 10.0),
+            cpu: cpu(report.cpu_permille),
             memory: report.memory_kib.saturating_mul(1024),
             processes: u32::from(report.processes),
+            parts: parts
+                .iter()
+                .map(|part| UsagePartEvent {
+                    kind: part.kind.name(),
+                    cpu: cpu(part.cpu_permille),
+                    memory: part.memory_kib.saturating_mul(1024),
+                    processes: u32::from(part.processes),
+                })
+                .collect(),
+        }
+    }
+
+    fn measured(usage: Usage) -> Self {
+        Self {
+            peer: None,
+            cpu: usage.cpu_percent,
+            memory: usage.memory,
+            processes: usage.processes,
+            parts: usage
+                .parts
+                .iter()
+                .map(|part| UsagePartEvent {
+                    kind: part.kind.name(),
+                    cpu: part.cpu_percent,
+                    memory: part.memory,
+                    processes: part.processes,
+                })
+                .collect(),
         }
     }
 }
@@ -389,6 +439,7 @@ impl Runtime {
             change(&mut status);
             status.message = status.text.render(lang);
             status.secure_input = secure_input::hint(status.secure_holder.as_ref(), status.clients.len(), lang);
+            status.elevated = elevated::hint(status.elevated_window.as_ref(), lang);
             status.clone()
         };
         crate::tray::update(&self.app);
@@ -637,6 +688,10 @@ impl Runtime {
         // Hält ein Programm die sichere Tastatureingabe, bleibt der Cursor auf dem Mac (Hinweis im Fenster)
         #[cfg(target_os = "macos")]
         let server = server.with_secure_input(Box::new(qross_platform::secure_input));
+        // Liegt ein Fenster mit Administratorrechten im Weg, etwa der Task-Manager, wechselt der Cursor
+        // nicht zu Clients (Hinweis im Fenster)
+        #[cfg(windows)]
+        let server = server.with_elevated_windows(qross_net::elevated::Detector::system());
         let (stop, sharing, cursor_finder) = (server.stop_handle(), server.sharing(), server.cursor_finder());
         // Zeigt das Fenster schon die Werte eines Clients (etwa vor einem Neustart des Servers), weiter so
         let usage = server.usage();
@@ -695,8 +750,7 @@ impl Runtime {
     /// CPU und Arbeitsspeicher von Qross auf diesem Rechner, samt Web-Oberfläche. Nach einer Pause misst
     /// das kurz zweimal und dauert gut eine halbe Sekunde (siehe [`qross_net::usage::measure`]).
     pub async fn local_usage(&self) -> UsageEvent {
-        let usage = qross_net::usage::measure(&self.usage_meter).await;
-        UsageEvent { peer: None, cpu: usage.cpu_percent, memory: usage.memory, processes: usage.processes }
+        UsageEvent::measured(qross_net::usage::measure(&self.usage_meter).await)
     }
 
     fn on_server_notice(&self, notice: ServerNotice) {
@@ -786,6 +840,8 @@ impl Runtime {
             ServerNotice::ClipboardConcealed => self.on_concealed(),
             ServerNotice::SecureInput { holder } => self.update(|s| s.secure_holder = holder),
             ServerNotice::SecureInputHold { from } => self.on_secure_input_hold(from),
+            ServerNotice::ElevatedWindow { window } => self.update(|s| s.elevated_window = window),
+            ServerNotice::ElevatedWindowHold => self.on_elevated_hold(),
             ServerNotice::Latency { name, summary, client_reports } => self.emit_latency(Some(name), client_reports, summary),
             ServerNotice::ClientReportsUsage { name } => self.update(|s| {
                 if let Some(c) = s.clients.iter_mut().find(|c| c.name == name) {
@@ -793,8 +849,8 @@ impl Runtime {
                 }
             }),
             // Direkt ans Fenster wie die Verbindungsqualität (alle 2 s, solange es sie zeigt)
-            ServerNotice::Usage { name, usage } => {
-                let _ = self.app.emit("usage", UsageEvent::reported(name, usage));
+            ServerNotice::Usage { name, usage, parts } => {
+                let _ = self.app.emit("usage", UsageEvent::reported(name, usage, &parts));
             }
         }
     }
@@ -805,6 +861,17 @@ impl Runtime {
     fn on_secure_input_hold(&self, from: Option<String>) {
         let app = self.status.lock().unwrap().secure_holder.as_ref().and_then(|h| h.app.clone());
         let (title, body) = secure_input::notification(from.as_deref(), app.as_deref(), i18n::lang());
+        if !crate::window_in_front(&self.app) {
+            crate::notify(&self.app, &title, &body);
+        }
+    }
+
+    /// Ein Fenster mit Administratorrechten hielt einen Wechsel auf (Cursor an der Kante zu einem Client
+    /// oder Kürzel, einmal je Mal): Systembenachrichtigung, sofern das Fenster mit dem Hinweis nicht
+    /// ohnehin vorn ist.
+    fn on_elevated_hold(&self) {
+        let window = self.status.lock().unwrap().elevated_window.clone();
+        let (title, body) = elevated::notification(window.as_ref(), i18n::lang());
         if !crate::window_in_front(&self.app) {
             crate::notify(&self.app, &title, &body);
         }

@@ -9,7 +9,7 @@ import { sharingSummary } from "../ui/js/sharing.js";
 import { hotkeyId, hotkeyLabel } from "../ui/js/keys.js";
 import { chartMax, formatMs, formatPct, formatRate } from "../ui/js/quality.js";
 import { chainNumber } from "../ui/js/latency.js";
-import { USAGE_TEXT, formatCpu, formatMemory, usageLine } from "../ui/js/usage.js";
+import { USAGE_TEXT, formatCpu, formatMemory, usageLine, usagePartLines, usageSplit } from "../ui/js/usage.js";
 import { updateStatusText } from "../ui/js/settings.js";
 import { selectedName } from "../ui/js/layout.js";
 import { clientPhase } from "../ui/js/client-view.js";
@@ -89,6 +89,42 @@ test("Auslastung: Prozent eines Kerns, Arbeitsspeicher wie im Task-Manager", () 
   assert.equal(usageLine(null), "Wird gemessen …");
   assert.equal(USAGE_TEXT.processes(1), "in 1 Prozess");
   assert.equal(USAGE_TEXT.processes(6), "in 6 Prozessen");
+});
+
+test("Auslastung: Qross selbst und Oberfläche, im Tooltip jede Art", () => {
+  const MB = 1048576;
+  const part = (kind, cpu, mb, processes = 1) => ({ kind, cpu, memory: mb * MB, processes });
+  const usage = {
+    cpu: 0.4,
+    memory: 103 * MB,
+    processes: 7,
+    parts: [
+      part("core", 0.1, 8),
+      part("page", 0.2, 30),
+      part("graphics", 0.04, 28),
+      part("browser", 0, 23),
+      part("network", 0, 6),
+      part("other", 0.1, 5, 2),
+    ],
+  };
+  assert.equal(usageSplit(usage), `Qross selbst 8,0${NB}MB · Oberfläche 92${NB}MB`);
+  assert.deepEqual(usagePartLines(usage), [
+    `Qross selbst: CPU 0,1${NB}% · RAM 8,0${NB}MB`,
+    `Seite: CPU 0,2${NB}% · RAM 30${NB}MB`,
+    `Grafik: CPU <${NB}0,1${NB}% · RAM 28${NB}MB`,
+    `Browser: CPU 0${NB}% · RAM 23${NB}MB`,
+    `Netzwerk: CPU 0${NB}% · RAM 6,0${NB}MB`,
+    `Sonstiges: CPU 0,1${NB}% · RAM 5,0${NB}MB`,
+  ]);
+  // Ohne Teile (Qross bis 0.14.0) bzw. ohne Oberfläche (Client auf der Kommandozeile) keine Aufteilung
+  assert.equal(usageSplit({ ...usage, parts: [] }), null);
+  assert.equal(usageSplit({ cpu: 0.4, memory: 8 * MB, processes: 1 }), null);
+  assert.equal(usageSplit({ ...usage, parts: [part("core", 0.1, 8)] }), null);
+  assert.equal(usageSplit(null), null);
+  assert.deepEqual(usagePartLines(null), []);
+  // Unter macOS und Linux gibt es keinen eigenen Browser-Prozess
+  const mac = { ...usage, parts: [part("core", 1.2, 41), part("page", 0.5, 62), part("network", 0, 9), part("graphics", 0.3, 12)] };
+  assert.equal(usageSplit(mac), `Qross selbst 41${NB}MB · Oberfläche 83${NB}MB`);
 });
 
 test("Diagramm: Skala mit etwas Luft über dem höchsten Wert", () => {

@@ -81,6 +81,7 @@ programm. Details im [Benchmark](docs/benchmark-ergebnisse.md).
 | Dateiübertragungen: Fortschritt, Rate und Restzeit, Abbrechen auf beiden Seiten | ✔ | ✔ | ✔ | ✔¹ |
 | Rechte je Rechner: Zwischenablage, kopierte Dateien, Drag & Drop je Richtung erlauben oder sperren | ✔ | ✔ | ✔ | ✔¹ |
 | Server: [„Sichere Tastatureingabe“](#macos-sichere-tastatureingabe) erkennen, Hinweis, Cursor bleibt auf dem Mac | entfällt | entfällt | entfällt | ✔¹ |
+| Server: Fenster mit Administratorrechten (z. B. Task-Manager) erkennen, die Maus und Tastatur für Qross sperren: Hinweis, Cursor bleibt hier | ✔ | entfällt | entfällt | entfällt |
 | Cursor-Finder: beim Wechsel Ring um den Cursor und Name des Rechners⁶ | ✔ | ✔ mit Compositor | – (keine Fenster über anderen Programmen möglich) | ✔ in der App¹ |
 | Bildschirmschoner abgleichen: startet und endet mit dem des Servers, auf Wunsch Clients mitsperren⁷ | ✔ | ✔ über den Dienst des Desktops, sonst den X-Server | ✔ über den Dienst des Desktops | ✔¹ |
 | Grafische Oberfläche mit Layout-Editor, auf Deutsch und Englisch (folgt der Systemsprache, umschaltbar) | ✔ | ✔² | ✔², mit Hinweisen zu Portal und Freigabe | ✔² |

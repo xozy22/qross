@@ -49,7 +49,8 @@ pub const PROTOCOL_VERSION: u16 = 3;
 ///   kopierte Dateien erst beim Einfügen übertragen (seit Qross 0.13)
 /// - 13: `Control::ReportsUsage`, `Control::WatchUsage` und `Control::Usage`: CPU und Arbeitsspeicher
 ///   von Qross je Rechner (seit Qross 0.14)
-pub const SERVER_VERSION: u16 = 13;
+/// - 14: `Control::UsageDetail`: dieselben Werte, aufgeteilt nach Art der Prozesse (ab Qross 0.15)
+pub const SERVER_VERSION: u16 = 14;
 /// Ab dieser `Welcome`-Version darf der Client `Control::Monitors` senden. Ältere Server trennen
 /// die Verbindung bei unbekannten Control-Nachrichten.
 pub const MONITORS_SINCE: u16 = 4;
@@ -81,6 +82,9 @@ pub const PASTE_ON_DEMAND_SINCE: u16 = 12;
 /// Ab dieser `Welcome`-Version darf der Client `Control::ReportsUsage` senden; der Server schickt ihm dann
 /// `Control::WatchUsage`, und er meldet sich mit `Control::Usage`, solange jemand hinsieht.
 pub const USAGE_SINCE: u16 = 13;
+/// Ab dieser `Welcome`-Version meldet der Client seine Werte mit `Control::UsageDetail` (Summe und Teile je Art der
+/// Prozesse) statt mit `Control::Usage`.
+pub const USAGE_DETAIL_SINCE: u16 = 14;
 /// Höchstzahl Monitore, die der Server aus `Control::Monitors` übernimmt
 pub const MAX_MONITORS: usize = 16;
 /// ALPN-Kennung im TLS-Handshake
@@ -190,10 +194,13 @@ pub enum Control {
     /// Client → Server, solange der Server hinsieht (`WatchUsage`): CPU und Arbeitsspeicher von Qross auf
     /// dem Client, etwa alle 2 s
     Usage(UsageReport),
+    /// Client → Server statt `Usage`, nur an Server ab `USAGE_DETAIL_SINCE` (ab Qross 0.15): die Summe und
+    /// dazu ihre Aufteilung nach Art der Prozesse, je Art höchstens ein Teil, in der Reihenfolge von `UsageKind`
+    UsageDetail { total: UsageReport, parts: Vec<UsagePart> },
 }
 
 /// CPU und Arbeitsspeicher von Qross auf einem Rechner, über alle seine Prozesse samt Web-Oberfläche
-/// (`Control::Usage`)
+/// (`Control::Usage`, `Control::UsageDetail`)
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UsageReport {
     /// Rechenzeit seit der vorigen Meldung in Promille eines Kerns (1000: ein ganzer Kern; mehr, wenn
@@ -204,6 +211,70 @@ pub struct UsageReport {
     pub memory_kib: u64,
     /// Zahl der Prozesse
     pub processes: u16,
+}
+
+/// Anteil einer Art von Prozessen an der Summe in `Control::UsageDetail`, in denselben Einheiten wie `UsageReport`
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsagePart {
+    pub kind: UsageKind,
+    pub cpu_permille: u32,
+    pub memory_kib: u64,
+    pub processes: u16,
+}
+
+/// Art eines Prozesses von Qross (`UsagePart::kind`). Auf der Leitung ein Byte; eine Art, die eine Gegenstelle nicht
+/// kennt (aus einer späteren Version), zählt bei ihr als `Other`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(from = "u8", into = "u8")]
+#[repr(u8)]
+pub enum UsageKind {
+    /// Qross selbst: Eingaben, Netz, Zwischenablage und der Rahmen der App
+    Core = 0,
+    /// Darstellung der Oberfläche: Renderer von WebView2, `com.apple.WebKit.WebContent`, `WebKitWebProcess`
+    Page = 1,
+    /// Grafik: GPU-Prozess von WebView2, `com.apple.WebKit.GPU`, `WebKitGPUProcess`
+    Graphics = 2,
+    /// Browser-Prozess von WebView2, der die anderen startet und verwaltet (nur Windows)
+    Browser = 3,
+    /// Netzwerkdienst der Oberfläche: `network.mojom.NetworkService` von WebView2, `com.apple.WebKit.Networking`,
+    /// `WebKitNetworkProcess`
+    Network = 4,
+    /// Alles andere: weitere Dienste von WebView2 (etwa für den Speicher), sein Absturzmelder (crashpad) und andere
+    /// Prozesse von WebKit
+    Other = 5,
+}
+
+impl UsageKind {
+    /// Kurzname für Oberfläche und Log
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Page => "page",
+            Self::Graphics => "graphics",
+            Self::Browser => "browser",
+            Self::Network => "network",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl From<u8> for UsageKind {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::Core,
+            1 => Self::Page,
+            2 => Self::Graphics,
+            3 => Self::Browser,
+            4 => Self::Network,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl From<UsageKind> for u8 {
+    fn from(kind: UsageKind) -> Self {
+        kind as u8
+    }
 }
 
 /// Cursor-Finder: Beim Wechsel blitzt auf dem Rechner, auf dem der Cursor ankommt, kurz ein Ring um
@@ -1050,5 +1121,76 @@ mod tests {
             assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), msg);
             assert!(bytes.len() <= 10, "{msg:?}: {} bytes", bytes.len());
         }
+    }
+
+    /// So sah `Control` in Qross 0.14 aus.
+    #[derive(Deserialize, Debug, PartialEq)]
+    enum ControlV014 {
+        Hello { version: u16, name: String, screen: ScreenInfo, platform: Platform },
+        Welcome { version: u16, server_name: String, platform: Platform },
+        Reject { reason: String },
+        ScreenChanged(ScreenInfo),
+        Monitors(Vec<Rect>),
+        Game(GameState),
+        TypesText,
+        Sharing(Sharing),
+        SyncsLocks,
+        CursorFinder(CursorFinder),
+        FollowsScreenSaver,
+        ScreenSaver { active: bool, lock: bool },
+        Latency(Latency),
+        PastesOnDemand,
+        ReportsUsage,
+        WatchUsage(bool),
+        Usage(UsageReport),
+    }
+
+    /// Ein Teil aus einer späteren Version, mit einer Art, die es hier noch nicht gibt
+    #[derive(Serialize)]
+    struct UsagePartLater {
+        kind: u8,
+        cpu_permille: u32,
+        memory_kib: u64,
+        processes: u16,
+    }
+
+    #[test]
+    fn usage_parts_reach_only_servers_that_understand_them() {
+        // Ein Server aus 0.14 meldet Version 13: Der Client meldet ihm weiter nur die Summe (`Usage`), die er liest.
+        // `UsageDetail` könnte er nicht lesen (er würde trennen).
+        const { assert!(USAGE_SINCE < USAGE_DETAIL_SINCE && USAGE_DETAIL_SINCE <= SERVER_VERSION) };
+        let welcome = Control::Welcome { version: SERVER_VERSION, server_name: "pc".into(), platform: Platform::Windows };
+        let bytes = postcard::to_stdvec(&welcome).unwrap();
+        assert!(matches!(postcard::from_bytes::<ControlV014>(&bytes).unwrap(), ControlV014::Welcome { version: SERVER_VERSION, .. }));
+        let total = UsageReport { cpu_permille: 37, memory_kib: 105_472, processes: 7 };
+        let bytes = postcard::to_stdvec(&Control::Usage(total)).unwrap();
+        assert_eq!(postcard::from_bytes::<ControlV014>(&bytes).unwrap(), ControlV014::Usage(total));
+
+        // So meldet sich die App unter Windows, mit allen Arten
+        let part = |kind, cpu_permille, mib: u64, processes| UsagePart { kind, cpu_permille, memory_kib: mib * 1024, processes };
+        let parts = vec![
+            part(UsageKind::Core, 12, 8, 1),
+            part(UsageKind::Page, 21, 24, 1),
+            part(UsageKind::Graphics, 4, 28, 1),
+            part(UsageKind::Browser, 0, 23, 1),
+            part(UsageKind::Network, 0, 6, 1),
+            part(UsageKind::Other, 0, 5, 2),
+        ];
+        let detail = Control::UsageDetail { total, parts };
+        let bytes = postcard::to_stdvec(&detail).unwrap();
+        assert!(postcard::from_bytes::<ControlV014>(&bytes).is_err(), "Qross 0.14 cannot read UsageDetail");
+        assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), detail);
+        assert!(bytes.len() <= 48, "{} bytes", bytes.len());
+
+        // Die Art ist ein Byte mit festen Werten; eine aus einer späteren Version zählt hier als „sonstige“.
+        let kinds = [UsageKind::Core, UsageKind::Page, UsageKind::Graphics, UsageKind::Browser, UsageKind::Network, UsageKind::Other];
+        for (value, kind) in (0u8..).zip(kinds) {
+            assert_eq!((UsageKind::from(value), u8::from(kind)), (kind, value));
+        }
+        let later = UsagePartLater { kind: 9, cpu_permille: 5, memory_kib: 2048, processes: 1 };
+        let bytes = postcard::to_stdvec(&later).unwrap();
+        let read = postcard::from_bytes::<UsagePart>(&bytes).unwrap();
+        assert_eq!(read, UsagePart { kind: UsageKind::Other, cpu_permille: 5, memory_kib: 2048, processes: 1 });
+        assert_eq!(kinds.map(UsageKind::name), ["core", "page", "graphics", "browser", "network", "other"]);
     }
 }

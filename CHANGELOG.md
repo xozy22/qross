@@ -8,6 +8,29 @@ uses the section for its version.
 
 Sections: **New**, **Improved**, **Fixed**, **Important** (e.g. breaking changes).
 
+## [Unreleased]
+
+### New
+
+- **Hint when a window running as administrator blocks Qross (Windows):** While such a window, e.g. Task Manager,
+  is in front or under the cursor, Windows doesn't let Qross see the mouse or keyboard, so the cursor can't move
+  to the other computer. Qross now says so in the window and the tray tooltip, and with a notification when you
+  push against the edge. Until you click another window, Qross doesn't switch at all, so keys can't end up in the
+  admin window.
+
+### Improved
+
+- **Much less memory in the tray:** When the window is closed, Qross ends its interface after 30 s and starts it
+  again when you open the window, in about half a second, at the same position and size. Started at login, it
+  doesn't start the interface at all. In the tray, Qross now needs about 5 MB instead of about 100 MB.
+- **CPU and memory per part:** The display shows Qross itself and its interface separately; the tooltip lists the
+  interface processes (page, graphics, browser, network, other). Clients report this from this version on.
+
+### Fixed
+
+- **Memory display too high:** On Windows, the display also counted programs that Qross had merely opened, such as
+  a browser for a link, which could add several hundred MB. It now counts only Qross itself and its interface.
+
 ## [0.14.0] - 2026-10-20
 
 ### New

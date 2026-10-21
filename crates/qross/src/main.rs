@@ -193,6 +193,10 @@ async fn run_server(data_dir: &Path, config_path: &Path) -> Result<()> {
     // Hält ein Programm die sichere Tastatureingabe, bleibt der Cursor auf dem Mac (steht im Log)
     #[cfg(target_os = "macos")]
     let server = server.with_secure_input(Box::new(qross_platform::secure_input));
+    // Liegt ein Fenster mit Administratorrechten im Weg, etwa der Task-Manager, wechselt der Cursor
+    // nicht zu Clients (steht im Log)
+    #[cfg(windows)]
+    let server = server.with_elevated_windows(qross_net::elevated::Detector::system());
     let platform = ServerPlatform {
         capture,
         events: events_rx,

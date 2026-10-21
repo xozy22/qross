@@ -37,6 +37,16 @@ pub enum ServerEvent {
     /// die Erfassung dann nicht, sondern das Programm im Vordergrund des Servers. Der Cursor kommt
     /// deshalb zurück und bleibt auf dem Server, bis sie endet.
     LocalSecureInput(bool),
+    /// Auf dem Server (Windows) liegt ein Fenster mit höheren Rechten vorne oder unter dem Cursor bzw.
+    /// wieder keines, etwa der Task-Manager: Windows lässt Eingaben an dieses Fenster nicht zur
+    /// Erfassung, Tasten landeten dort statt auf einem Client. Solange wechselt der Cursor nicht vom
+    /// Server zu einem Client; steht er schon auf einem, bleibt er dort.
+    LocalElevatedWindow(bool),
+    /// Wo der Cursor des Servers steht, abgefragt, solange `LocalElevatedWindow` gilt: Die Erfassung
+    /// sieht ihn dann womöglich nicht. Steht er nicht nur im Vorbeifliegen an einer Kante zu einem
+    /// verbundenen Client, wollte der Nutzer wechseln (`Action::HeldByElevatedWindow`); gewechselt wird
+    /// nicht.
+    LocalCursor { x: i32, y: i32 },
     /// Feststelltaste, Num und Rollen des Servers beim Start: welche Qross hier lesen kann und wie
     /// sie stehen. Danach meldet die Erfassung Änderungen mit `CaptureEvent::Locks`.
     LocalLocks(LockState),
@@ -80,6 +90,9 @@ pub enum Action {
     /// Nur melden: Wegen der sicheren Tastatureingabe bleibt der Cursor auf dem Server. `from`: von
     /// diesem Client zurückgeholt; `None`: ein Wechsel wurde verhindert (einmal, solange sie an ist)
     HeldBySecureInput { from: Option<String> },
+    /// Nur melden: Ein Fenster mit höheren Rechten auf dem Server ist im Weg, und der Nutzer wollte zu
+    /// einem Client (Kante oder Kürzel); einmal je `ServerEvent::LocalElevatedWindow(true)`
+    HeldByElevatedWindow,
     /// Feststelltaste, Num und Rollen des Servers jetzt lesen und an diesen Client schicken
     /// (`Input::Locks`), gleich hinter dem, was schon unterwegs ist
     SyncLocks { to: String },
@@ -128,6 +141,11 @@ impl Default for SwitchOptions {
 
 /// Lücke zwischen zwei Kantenberührungen, ab der ein neuer Anlauf beginnt
 const PUSH_GAP: Duration = Duration::from_millis(150);
+
+/// So lange muss der abgefragte Cursor an einer Kante stehen, solange ein Fenster mit höheren Rechten
+/// im Weg ist, damit es als Wechselversuch zählt (siehe `ServerEvent::LocalCursor`): zwei Abfragen im
+/// Takt von 250 ms, nicht nur eine im Vorbeifliegen.
+const ELEVATED_DWELL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Active {
@@ -185,6 +203,13 @@ pub struct ServerState {
     secure_input: bool,
     /// Seit sie an ist, wurde schon ein Wechsel verhindert und gemeldet
     secure_refused: bool,
+    /// Ein Fenster mit höheren Rechten auf dem Server ist im Weg: Der Cursor wechselt nicht vom Server
+    /// zu Clients
+    elevated: bool,
+    /// Seitdem wurde schon ein Wechselversuch gemeldet
+    elevated_refused: bool,
+    /// Seit wann der abgefragte Cursor an einer Kante zu einem verbundenen Client steht
+    elevated_push: Option<Instant>,
     /// Zuletzt bekannter Stand der Sperrtasten des Servers; `None` je Taste: hier nicht lesbar
     locks: LockState,
     /// Verbundene Clients, die ihre Sperrtasten auf den Stand des Servers bringen können
@@ -229,6 +254,9 @@ impl ServerState {
             sharing: SharingRules::default(),
             secure_input: false,
             secure_refused: false,
+            elevated: false,
+            elevated_refused: false,
+            elevated_push: None,
             locks: LockState::default(),
             syncs_locks: HashSet::new(),
             lock_clients: false,
@@ -391,6 +419,8 @@ impl ServerState {
                 }
             }
             ServerEvent::LocalSecureInput(on) => self.set_secure_input(on, &mut out),
+            ServerEvent::LocalElevatedWindow(on) => self.set_elevated(on),
+            ServerEvent::LocalCursor { x, y } => self.on_local_cursor(x, y, now, &mut out),
             ServerEvent::LocalLocks(locks) => self.locks = locks,
             ServerEvent::ClientSyncsLocks { name } => {
                 if self.clients.contains_key(&name) {
@@ -438,6 +468,59 @@ impl ServerState {
             self.secure_refused = true;
             out.push(Action::HeldBySecureInput { from: None });
         }
+    }
+
+    /// Fenster mit höheren Rechten auf dem Server im Weg bzw. wieder frei. Anders als bei der sicheren
+    /// Tastatureingabe holt das den Cursor nicht von einem Client zurück: Von sich aus wechselt Qross in
+    /// diesem Zustand nicht, es meldet ihn nur.
+    fn set_elevated(&mut self, on: bool) {
+        if on == self.elevated {
+            return;
+        }
+        self.elevated = on;
+        self.elevated_refused = false;
+        self.elevated_push = None;
+        if on {
+            // Eine laufende Drag-Prüfung an der Kante wechselt nicht mehr
+            self.probe = None;
+            self.push = None;
+        }
+    }
+
+    /// Ein Wechsel vom Server zu einem Client unterbleibt wegen eines Fensters mit höheren Rechten;
+    /// einmal melden, solange es im Weg ist.
+    fn refuse_for_elevated(&mut self, out: &mut Vec<Action>) {
+        if !self.elevated_refused {
+            self.elevated_refused = true;
+            out.push(Action::HeldByElevatedWindow);
+        }
+    }
+
+    /// Abgefragte Position des Cursors auf dem Server, solange ein Fenster mit höheren Rechten im Weg
+    /// ist: Steht er nicht nur kurz an einer Kante zu einem verbundenen Client, wollte der Nutzer
+    /// wechseln. Gewechselt wird nicht, nur gemeldet.
+    fn on_local_cursor(&mut self, x: i32, y: i32, now: Instant, out: &mut Vec<Action>) {
+        if !self.elevated || self.active != Active::Local || self.held() || self.edge_toward_client(x, y).is_none() {
+            self.elevated_push = None;
+            return;
+        }
+        let since = *self.elevated_push.get_or_insert(now);
+        if now.duration_since(since) >= ELEVATED_DWELL {
+            self.refuse_for_elevated(out);
+        }
+    }
+
+    /// Kante, über die der Cursor an (x, y) auf dem Server gerade zu einem verbundenen Client wechseln
+    /// würde: außen an einem Monitor, nicht in einer Ecke, und dort liegt laut Anordnung ein
+    /// verbundener Client.
+    fn edge_toward_client(&self, x: i32, y: i32) -> Option<Edge> {
+        let (x, y) = self.local.snap(x, y);
+        let monitor = self.local.monitor_at(x, y);
+        Edge::ALL.into_iter().find(|&edge| {
+            self.local.on_outer_edge(edge, x, y)
+                && !self.in_corner(monitor, edge, x, y)
+                && self.layout.neighbor(&self.me, edge).is_some_and(|name| self.clients.contains_key(name))
+        })
     }
 
     /// Bekommt der Client mit dem Cursor den Stand der Sperrtasten statt ihrer Tastendrücke?
@@ -495,15 +578,19 @@ impl ServerState {
         }
     }
 
-    /// Darf über `edge` an Position (x, y) von `rect` gewechselt werden?
-    fn may_switch(&mut self, rect: Rect, edge: Edge, x: i32, y: i32, now: Instant) -> bool {
+    /// Liegt (x, y) an der Kante `edge` von `rect` in einer Ecke, in der nicht gewechselt wird?
+    fn in_corner(&self, rect: Rect, edge: Edge, x: i32, y: i32) -> bool {
         let corner = self.options.corner_size as i32;
-        let in_corner = corner > 0
+        corner > 0
             && match edge {
                 Edge::Left | Edge::Right => y < rect.y + corner || y > rect.bottom() - corner,
                 Edge::Top | Edge::Bottom => x < rect.x + corner || x > rect.right() - corner,
-            };
-        if in_corner {
+            }
+    }
+
+    /// Darf über `edge` an Position (x, y) von `rect` gewechselt werden?
+    fn may_switch(&mut self, rect: Rect, edge: Edge, x: i32, y: i32, now: Instant) -> bool {
+        if self.in_corner(rect, edge, x, y) {
             self.push = None;
             return false;
         }
@@ -548,6 +635,9 @@ impl ServerState {
                 }
                 if self.secure_input {
                     return self.refuse_for_secure_input(out);
+                }
+                if self.elevated {
+                    return self.refuse_for_elevated(out);
                 }
                 if buttons_down {
                     // Mit gedrückter Taste nur wechseln, wenn Dateien gezogen werden
@@ -688,6 +778,14 @@ impl ServerState {
         if self.secure_input && name != self.me {
             if self.clients.contains_key(&name) {
                 self.refuse_for_secure_input(out);
+            }
+            return;
+        }
+        // Vom Server weg nicht, solange ein Fenster mit höheren Rechten im Weg ist; zwischen Clients
+        // und zurück schon
+        if self.elevated && self.active == Active::Local {
+            if self.clients.contains_key(&name) {
+                self.refuse_for_elevated(out);
             }
             return;
         }
@@ -1816,6 +1914,157 @@ mod tests {
         assert_eq!(s.handle(held_edge_hit()), vec![Action::ProbeDrag { x: 1919, y: 540 }]);
         s.handle(secure_input(true));
         let files = vec![PathBuf::from("/tmp/a.txt")];
+        assert!(s.handle(ServerEvent::Capture(CaptureEvent::DragProbeResult { files })).is_empty());
+        assert_eq!(s.active_screen(), "pc");
+    }
+
+    fn elevated(on: bool) -> ServerEvent {
+        ServerEvent::LocalElevatedWindow(on)
+    }
+
+    fn cursor(x: i32, y: i32) -> ServerEvent {
+        ServerEvent::LocalCursor { x, y }
+    }
+
+    const HELD: Action = Action::HeldByElevatedWindow;
+
+    #[test]
+    fn an_elevated_window_keeps_the_cursor_on_the_server() {
+        let mut s = state();
+        assert!(s.handle(elevated(true)).is_empty(), "auf dem Server: nichts zu tun");
+        // Sieht die Erfassung die Kante doch (das Fenster liegt nur vorne), wechselt es nicht; der erste
+        // Versuch wird gemeldet, weitere nicht
+        assert_eq!(s.handle(edge_hit(Edge::Right, 1919, 540)), vec![HELD]);
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).is_empty());
+        assert!(s.handle(held_edge_hit()).is_empty(), "auch nicht mit gedrückter Taste (Drag & Drop)");
+        assert!(s.handle(switch_to("laptop")).is_empty());
+        assert!(s.handle(switch_to("right")).is_empty());
+        assert_eq!(s.active_screen(), "pc");
+
+        // Kanten ohne Nachbarn oder ohne verbundenen Client sind kein Wechselversuch
+        let mut s = state();
+        s.handle(elevated(true));
+        assert!(s.handle(edge_hit(Edge::Left, 0, 540)).is_empty());
+        assert!(s.handle(switch_to("tablet")).is_empty());
+        s.handle(ServerEvent::ClientDisconnected { name: "laptop".into() });
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).is_empty());
+
+        // Wieder frei: Es wechselt wieder
+        let mut s = state();
+        s.handle(elevated(true));
+        assert!(s.handle(elevated(false)).is_empty());
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).contains(&Action::CaptureRemote));
+        assert_eq!(s.active_screen(), "laptop");
+    }
+
+    #[test]
+    fn each_blockade_reports_one_attempt() {
+        let mut s = state();
+        s.handle(elevated(true));
+        assert_eq!(s.handle(switch_to("laptop")), vec![HELD], "auch per Kürzel");
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).is_empty());
+        assert!(s.handle(elevated(true)).is_empty(), "dieselbe Meldung noch einmal ändert nichts");
+        assert!(s.handle(edge_hit(Edge::Right, 1919, 540)).is_empty());
+        s.handle(elevated(false));
+        s.handle(elevated(true));
+        assert_eq!(s.handle(edge_hit(Edge::Right, 1919, 540)), vec![HELD]);
+    }
+
+    #[test]
+    fn the_polled_cursor_at_an_edge_counts_as_an_attempt() {
+        let mut s = state();
+        s.set_switch_options(SwitchOptions { corner_size: 10, delay: Duration::ZERO });
+        s.handle(elevated(true));
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        // Die Erfassung sieht nichts; abgefragt steht der Cursor an der Kante zum Laptop
+        assert!(s.handle_at(cursor(1919, 540), at(0)).is_empty(), "einmal kann Vorbeifliegen sein");
+        assert_eq!(s.handle_at(cursor(1919, 540), at(250)), vec![HELD]);
+        assert!(s.handle_at(cursor(1919, 540), at(500)).is_empty(), "einmal je Blockade");
+        assert_eq!(s.active_screen(), "pc", "gewechselt wird nicht");
+
+        // Nur, wenn er die ganze Zeit an der Kante stand
+        let mut s = state();
+        s.handle(elevated(true));
+        assert!(s.handle_at(cursor(1919, 540), at(0)).is_empty());
+        assert!(s.handle_at(cursor(1500, 540), at(250)).is_empty(), "wieder weg");
+        assert!(s.handle_at(cursor(1919, 300), at(500)).is_empty(), "neuer Anlauf");
+        assert_eq!(s.handle_at(cursor(1919, 300), at(750)), vec![HELD]);
+    }
+
+    #[test]
+    fn the_polled_cursor_elsewhere_is_no_attempt() {
+        let quiet = |s: &mut ServerState, x, y| {
+            let t0 = Instant::now();
+            (0..4).all(|i| s.handle_at(cursor(x, y), t0 + Duration::from_millis(250 * i)).is_empty())
+        };
+        let mut s = state();
+        s.set_switch_options(SwitchOptions { corner_size: 10, delay: Duration::ZERO });
+        s.handle(elevated(true));
+        assert!(quiet(&mut s, 960, 540), "Bildschirmmitte");
+        assert!(quiet(&mut s, 0, 540), "links liegt kein Rechner");
+        assert!(quiet(&mut s, 960, 1079), "unten auch nicht");
+        assert!(quiet(&mut s, 1919, 3), "Ecke");
+        // Mit Monitoren: nur deren äußere Kanten zählen
+        s.handle(ServerEvent::LocalMonitors(vec![Rect::new(0, 0, 1920, 1080), Rect::new(1920, 0, 1280, 720)]));
+        s.handle(ServerEvent::LocalScreenChanged(Rect::new(0, 0, 3200, 1080)));
+        assert!(quiet(&mut s, 1919, 900), "unter dem zweiten Monitor ist keine Außenkante");
+        assert!(!quiet(&mut s, 3199, 300), "rechts am zweiten Monitor schon");
+
+        // Ohne Blockade, mit gesperrtem Cursor oder ohne verbundenen Client nicht
+        let mut s = state();
+        assert!(quiet(&mut s, 1919, 540), "nichts im Weg");
+        s.handle(elevated(true));
+        s.handle(ServerEvent::Capture(CaptureEvent::ToggleLock));
+        assert!(quiet(&mut s, 1919, 540), "Fang-Taste");
+        s.handle(ServerEvent::Capture(CaptureEvent::ToggleLock));
+        s.handle(ServerEvent::ClientDisconnected { name: "laptop".into() });
+        assert!(quiet(&mut s, 1919, 540), "Laptop nicht verbunden");
+    }
+
+    #[test]
+    fn an_elevated_window_leaves_the_cursor_on_the_client() {
+        let mut s = state();
+        s.handle(edge_hit(Edge::Right, 1919, 540));
+        // Nichts wechseln: Der Cursor bleibt auf dem Laptop und bewegt sich dort weiter
+        assert!(s.handle(elevated(true)).is_empty());
+        assert_eq!(s.active_screen(), "laptop");
+        assert_eq!(s.handle(delta(5, 0)), vec![move_laptop(1, 6, 399)]);
+        // Abgefragte Positionen des geparkten Cursors zählen nicht
+        let t0 = Instant::now();
+        assert!(s.handle_at(cursor(1919, 540), t0).is_empty());
+        assert!(s.handle_at(cursor(1919, 540), t0 + Duration::from_millis(250)).is_empty());
+        // Zurück auf den Server geht es, von dort weg nicht
+        assert!(s.handle(delta(-50, 0)).iter().any(|a| matches!(a, Action::ReleaseCapture { .. })));
+        assert_eq!(s.handle(edge_hit(Edge::Right, 1919, 540)), vec![HELD]);
+        assert_eq!(s.active_screen(), "pc");
+    }
+
+    #[test]
+    fn an_elevated_window_allows_switching_between_clients() {
+        let layout = Layout::from_links(&[
+            LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() },
+            LinkConfig { from: "laptop".into(), edge: Edge::Right, to: "tablet".into() },
+        ])
+        .unwrap();
+        let mut s = ServerState::new("pc", layout, PC);
+        for name in ["laptop", "tablet"] {
+            s.handle(ServerEvent::ClientConnected { name: name.into(), screen: LAPTOP });
+        }
+        s.handle(switch_to("laptop"));
+        s.handle(elevated(true));
+        assert!(s.handle(switch_to("tablet")).contains(&Action::Send { to: "laptop".into(), input: Input::Leave }));
+        assert_eq!(s.active_screen(), "tablet");
+        assert!(s.handle(switch_to("pc")).iter().any(|a| matches!(a, Action::ReleaseCapture { .. })));
+        assert_eq!(s.handle(switch_to("tablet")), vec![HELD]);
+    }
+
+    #[test]
+    fn an_elevated_window_drops_a_pending_drag_probe() {
+        let mut s = state();
+        assert_eq!(s.handle(held_edge_hit()), vec![Action::ProbeDrag { x: 1919, y: 540 }]);
+        s.handle(elevated(true));
+        let files = vec![PathBuf::from("C:\\daten\\a.txt")];
         assert!(s.handle(ServerEvent::Capture(CaptureEvent::DragProbeResult { files })).is_empty());
         assert_eq!(s.active_screen(), "pc");
     }

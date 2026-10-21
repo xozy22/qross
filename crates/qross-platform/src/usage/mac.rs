@@ -1,45 +1,39 @@
-//! macOS: dieser Prozess, was er selbst gestartet hat, und die Dienste, für die er verantwortlich ist. Die
-//! WebKit-Prozesse der Web-Oberfläche startet launchd; sie gehören aber zur App, wie in der
-//! Aktivitätsanzeige (`responsibility_get_pid_responsible_for_pid`, gibt es das nicht: ohne sie).
+//! macOS: dieser Prozess und die Dienste von WebKit für seine Web-Oberfläche (Seite, Netz, Grafik). Die startet
+//! launchd; sie gehören aber zur App, wie in der Aktivitätsanzeige (`responsibility_get_pid_responsible_for_pid`,
+//! gibt es das nicht: ohne sie). Was Qross selbst startet (etwa `open` für einen Link), zählt nicht mit.
 
 use std::ffi::{c_int, c_void};
 use std::mem::size_of_val;
 use std::sync::OnceLock;
 
 use libc::pid_t;
+use qross_proto::UsageKind;
 
+use super::kinds;
 use super::Process;
 
 pub(crate) fn processes() -> Vec<Process> {
     let own = std::process::id() as pid_t;
-    let Some(root) = measure(own) else { return Vec::new() };
+    let Some(root) = measure(own, UsageKind::Core) else { return Vec::new() };
     let mut found = vec![root];
-    // Selbst gestartete Prozesse und deren Nachfahren; ein Kind muss nach seinem Elternprozess gestartet
-    // sein, sonst trägt es nur eine neu vergebene Nummer.
-    let mut queue = vec![(own, root.id.1)];
-    while let Some((parent, started)) = queue.pop() {
-        for pid in children(parent) {
-            let Some(child) = measure(pid).filter(|child| child.id.1 >= started) else { continue };
-            queue.push((pid, child.id.1));
-            found.push(child);
-        }
-    }
-    // Dienste, die launchd für diese App gestartet hat. Nur, wenn sie für sich selbst verantwortlich ist
-    // (aus dem Finder, dem Dock oder als Anmeldeobjekt gestartet); aus dem Terminal heraus wäre es das
+    // Dienste von WebKit, die launchd für diese App gestartet hat. Nur, wenn sie für sich selbst verantwortlich
+    // ist (aus dem Finder, dem Dock oder als Anmeldeobjekt gestartet); aus dem Terminal heraus wäre es das
     // Terminal, und dessen Dienste gehören nicht hierher.
     if let Some(responsible) = responsible_for() {
         for pid in all_pids() {
-            if found.iter().any(|p| p.id.0 == pid as u32) || unsafe { responsible(pid) } != own {
+            if pid == own || unsafe { responsible(pid) } != own {
                 continue;
             }
-            found.extend(measure(pid));
+            if let Some(kind) = program(pid).as_deref().and_then(kinds::webkit_service_kind) {
+                found.extend(measure(pid, kind));
+            }
         }
     }
     found
 }
 
 /// Rechenzeit und physischer Speicherbedarf eines Prozesses (wie „Speicher“ in der Aktivitätsanzeige)
-fn measure(pid: pid_t) -> Option<Process> {
+fn measure(pid: pid_t, kind: UsageKind) -> Option<Process> {
     let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
     let result = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V2, (&raw mut info).cast::<libc::rusage_info_t>()) };
     if result != 0 {
@@ -49,16 +43,16 @@ fn measure(pid: pid_t) -> Option<Process> {
     let (numer, denom) = timebase();
     let ticks = info.ri_user_time.saturating_add(info.ri_system_time);
     let cpu_ns = (u128::from(ticks) * u128::from(numer) / u128::from(denom)) as u64;
-    Some(Process { id: (pid as u32, info.ri_proc_start_abstime), cpu_ns, memory: info.ri_phys_footprint })
+    Some(Process { id: (pid as u32, info.ri_proc_start_abstime), kind, cpu_ns, memory: info.ri_phys_footprint })
 }
 
-/// Prozesse, die `parent` gestartet hat
-fn children(parent: pid_t) -> Vec<pid_t> {
-    let mut pids = vec![0 as pid_t; 1024];
-    let count = unsafe { libc::proc_listchildpids(parent, pids.as_mut_ptr().cast::<c_void>(), buffer_size(&pids)) };
-    pids.truncate(usize::try_from(count).unwrap_or(0));
-    pids.retain(|&pid| pid > 0);
-    pids
+/// Name des Programms eines Prozesses: der letzte Teil seines Pfads (etwa `com.apple.WebKit.WebContent`)
+fn program(pid: pid_t) -> Option<String> {
+    let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let len = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast::<c_void>(), path.len() as u32) };
+    path.truncate(usize::try_from(len).ok().filter(|&len| len > 0)?);
+    let path = String::from_utf8_lossy(&path);
+    Some(path.rsplit('/').next().unwrap_or_default().to_owned())
 }
 
 /// Alle Prozesse des Systems

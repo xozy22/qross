@@ -11,6 +11,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Qross",
         "width": 1080,
         "height": 760,

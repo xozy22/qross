@@ -12,11 +12,11 @@ use qross_core::keys::{KeyConfig, KeyMode};
 use qross_core::server::{Action, Hold, ServerEvent, ServerState, SwitchOptions};
 use qross_core::sharing::{describe as describe_sharing, SharingRules};
 use qross_core::{CaptureEvent, Layout};
-use qross_platform::{Capture, Clipboard, FinderOverlay, SecureInput};
+use qross_platform::{Capture, Clipboard, ElevatedWindow, FinderOverlay, SecureInput};
 use qross_proto::{
     encode_datagram, is_sampled_input, is_sampled_move, read_frame, read_frame_up_to, write_frame, Clipboard as ClipboardMsg,
     ClipboardData, Control, CursorFinder, Datagram, DragMessage, FileEntry, GameState, Input, Latency, LatencySummary,
-    Platform, Rect, SampleId, Sharing, StreamKind, UsageReport, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
+    Platform, Rect, SampleId, Sharing, StreamKind, UsagePart, UsageReport, MAX_MONITORS, PROTOCOL_VERSION, SERVER_VERSION,
 };
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -25,6 +25,7 @@ use tracing::{debug, info, warn};
 use crate::clipboard::ClipboardHub;
 use crate::clipfiles::{self, FilesNotice, Notify, Ready};
 use crate::drag_preview::DragView;
+use crate::elevated;
 use crate::files::{FileOutcome, Receiver, Staging};
 use crate::game::{self, Detector};
 use crate::latency::{self, Meter};
@@ -39,6 +40,7 @@ use crate::{discovery, files};
 use crate::streams::{open_input, read_kind, send_drag_message};
 use crate::switch_trace::{EdgeHits, ServerTrace};
 use crate::tls::{peer_fingerprint, server_config};
+use crate::usage;
 use crate::wake::{self, SystemEvent};
 use crate::{Fingerprint, Identity, TrustOutcome, TrustStore};
 
@@ -89,6 +91,8 @@ pub struct Server {
     system_events: Option<mpsc::UnboundedReceiver<SystemEvent>>,
     /// Sichere Tastatureingabe abfragen (macOS)
     secure_input: Option<secure_input::Detector>,
+    /// Fenster mit höheren Rechten abfragen (Windows)
+    elevated: Option<elevated::Detector>,
     /// Cursor-Finder für alle Rechner, auch während des Laufs änderbar
     cursor_finder: CursorFinderHandle,
     /// Bildschirmschoner mit den Clients abgleichen; mit `lock_clients` sperren sie sich stattdessen
@@ -212,6 +216,14 @@ pub enum ServerNotice {
     /// Wegen der sicheren Tastatureingabe bleibt der Cursor hier: vom Client `from` zurückgeholt
     /// bzw. ein Wechsel wurde verhindert (`from: None`, einmal, solange sie an ist).
     SecureInputHold { from: Option<String> },
+    /// Auf diesem Rechner (Windows) liegt ein Fenster mit höheren Rechten vorne oder unter dem Cursor,
+    /// etwa der Task-Manager (`window`), bzw. wieder keines (`None`); kommt auch, wenn ein anderes
+    /// Programm im Weg ist. Solange sieht die Erfassung keine Eingaben an dieses Fenster, und der Cursor
+    /// wechselt nicht zu Clients (siehe [`Server::with_elevated_windows`]).
+    ElevatedWindow { window: Option<ElevatedWindow> },
+    /// Wegen so eines Fensters ging ein Wechsel nicht: Der Cursor stand an einer Kante zu einem Client,
+    /// oder ein Kürzel wollte zu einem. Einmal, solange es im Weg ist.
+    ElevatedWindowHold,
     /// Verzögerung der Eingabekette zu einem Client, etwa jede Sekunde, solange sich etwas ändert
     /// (siehe [`latency`]). Ohne `client_reports` (Client älter als `LATENCY_SINCE`) gibt es nur den
     /// Server-Anteil.
@@ -220,8 +232,9 @@ pub enum ServerNotice {
     /// `ClientConnected`; bleibt sie aus, gibt es von ihm keine Werte.
     ClientReportsUsage { name: String },
     /// CPU und Arbeitsspeicher von Qross auf einem Client, etwa alle 2 s, solange die Oberfläche sie
-    /// zeigt (siehe [`Server::usage`])
-    Usage { name: String, usage: UsageReport },
+    /// zeigt (siehe [`Server::usage`]). `parts`: aufgeteilt nach Art der Prozesse, je Art einer in der
+    /// Reihenfolge von `UsageKind`; leer bei Clients bis Qross 0.14.0, die nur die Summe melden.
+    Usage { name: String, usage: UsageReport, parts: Vec<UsagePart> },
 }
 
 /// Beendet einen laufenden Server von außen: schließt alle Verbindungen und gibt den Port frei.
@@ -258,7 +271,7 @@ enum NetEvent {
     ClipboardFilesOnDemand { name: String, id: usize, transfer: u64, entries: Vec<FileEntry>, data: ClipboardData },
     /// Der Client meldet auf Nachfrage CPU und Arbeitsspeicher (`Control::ReportsUsage`)
     ReportsUsage { name: String, id: usize },
-    Usage { name: String, id: usize, report: UsageReport },
+    Usage { name: String, id: usize, report: UsageReport, parts: Vec<UsagePart> },
     /// Antwort auf eine Drag-Nachfrage (Drag & Drop vom Client zum Server)
     DragOffer { name: String, id: usize, probe: u32, transfer: u64, entries: Vec<FileEntry> },
     DragFile { name: String, id: usize, outcome: FileOutcome },
@@ -380,6 +393,7 @@ impl Server {
             sharing: SharingHandle(Arc::new(watch::channel(SharingRules::default()).0)),
             system_events: None,
             secure_input: None,
+            elevated: None,
             cursor_finder: CursorFinderHandle(Arc::new(watch::channel(CursorFinder::OFF).0)),
             screen_saver: true,
             lock_clients: false,
@@ -401,6 +415,17 @@ impl Server {
     /// endet. Das melden `ServerNotice::SecureInput` und `ServerNotice::SecureInputHold`.
     pub fn with_secure_input(mut self, detect: secure_input::Detector) -> Self {
         self.secure_input = Some(detect);
+        self
+    }
+
+    /// Fenster mit höheren Rechten abfragen (Windows; üblich: `elevated::Detector::system()`, Standard:
+    /// gar nicht). Liegt eines vorne oder unter dem Cursor, etwa der Task-Manager, lässt Windows
+    /// Eingaben an dieses Fenster nicht zur Erfassung, und Tasten landeten darin statt auf einem Client.
+    /// Solange wechselt der Cursor nicht vom Server zu Clients, und eingespeist wird nichts; steht er
+    /// schon auf einem, bleibt er dort. Das melden `ServerNotice::ElevatedWindow` und
+    /// `ServerNotice::ElevatedWindowHold`.
+    pub fn with_elevated_windows(mut self, detect: elevated::Detector) -> Self {
+        self.elevated = Some(detect);
         self
     }
 
@@ -552,6 +577,7 @@ impl Server {
             Action::Send { to, input: Input::Enter { .. } } => self.notify(ServerNotice::CursorOn { screen: to.clone() }),
             Action::ReleaseCapture { .. } => self.notify(ServerNotice::CursorOn { screen: self.config.name.clone() }),
             Action::HeldBySecureInput { from } => self.notify(ServerNotice::SecureInputHold { from: from.clone() }),
+            Action::HeldByElevatedWindow => self.notify(ServerNotice::ElevatedWindowHold),
             _ => {}
         }
     }
@@ -589,6 +615,17 @@ impl Server {
         if let Some(detect) = self.secure_input.take() {
             secure = secure_input::watch(detect);
         }
+        // Ebenso bei Fenstern mit höheren Rechten. Liegt eines im Weg, sieht die Erfassung den Cursor
+        // womöglich nicht; dann fragt der Server selbst ab, wo er steht.
+        let (_no_elevated, mut elevated_window) = watch::channel(None);
+        let mut elevated_cursor = None;
+        if let Some(detect) = self.elevated.take() {
+            elevated_window = elevated::watch(detect.window);
+            elevated_cursor = Some(detect.cursor);
+        }
+        let mut blocked = false;
+        let mut cursor_poll = tokio::time::interval(elevated::POLL);
+        cursor_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Ebenso beim Bildschirmschoner
         let (_no_saver, mut local_saver) = watch::channel(false);
         if self.screen_saver {
@@ -905,10 +942,10 @@ impl Server {
                         self.notify(ServerNotice::ClientReportsUsage { name });
                         Vec::new()
                     }
-                    NetEvent::Usage { name, id, report } if is_current(&clients, &name, id) => {
+                    NetEvent::Usage { name, id, report, parts } if is_current(&clients, &name, id) => {
                         // Was nach dem Ende der Anzeige noch unterwegs war, braucht niemand mehr.
                         if watched.as_deref() == Some(name.as_str()) {
-                            self.notify(ServerNotice::Usage { name, usage: report });
+                            self.notify(ServerNotice::Usage { name, usage: report, parts });
                         }
                         Vec::new()
                     }
@@ -1014,6 +1051,26 @@ impl Server {
                     self.notify(ServerNotice::SecureInput { holder });
                     state.handle(ServerEvent::LocalSecureInput(on))
                 }
+                Ok(()) = elevated_window.changed() => {
+                    let window = elevated_window.borrow_and_update().clone();
+                    match &window {
+                        Some(w) => info!(
+                            "{} runs {} and is in front or under the cursor: Windows keeps mouse and keyboard \
+                             from Qross there, no switching to clients",
+                            w.describe(),
+                            if w.admin { "as administrator" } else { "with higher privileges" }
+                        ),
+                        None => info!("no window with higher privileges in the way anymore"),
+                    }
+                    blocked = window.is_some();
+                    self.notify(ServerNotice::ElevatedWindow { window });
+                    state.handle(ServerEvent::LocalElevatedWindow(blocked))
+                }
+                // Solange so ein Fenster im Weg ist: Steht der Cursor an einer Kante zu einem Client?
+                _ = cursor_poll.tick(), if blocked => match elevated_cursor.as_ref().and_then(|cursor| cursor()) {
+                    Some((x, y)) => state.handle(ServerEvent::LocalCursor { x, y }),
+                    None => Vec::new(),
+                },
                 _ = screen_poll.tick() => {
                     let (now, now_monitors) = (screen(), monitors());
                     let mut actions = Vec::new();
@@ -1382,6 +1439,9 @@ fn apply(
             warn!("Secure Keyboard Entry: cursor brought back from '{from}'; keys would not have arrived there")
         }
         Action::HeldBySecureInput { from: None } => info!("Secure Keyboard Entry: no switch, the cursor stays here"),
+        Action::HeldByElevatedWindow => {
+            info!("a window with higher privileges is in the way: no switch, the cursor stays here")
+        }
         Action::ScreenSaver { active, lock } => {
             for client in clients.values().filter(|c| c.follows_saver) {
                 let _ = client.control.send(Control::ScreenSaver { active, lock });
@@ -1560,7 +1620,10 @@ async fn handle_connection(
                 let _ = tx.send(NetEvent::ReportsUsage { name: name.clone(), id });
             }
             Ok(Some(Control::Usage(report))) => {
-                let _ = tx.send(NetEvent::Usage { name: name.clone(), id, report });
+                let _ = tx.send(NetEvent::Usage { name: name.clone(), id, report, parts: Vec::new() });
+            }
+            Ok(Some(Control::UsageDetail { total, parts })) => {
+                let _ = tx.send(NetEvent::Usage { name: name.clone(), id, report: total, parts: usage::by_kind(parts) });
             }
             Ok(Some(other)) => debug!(?other, "unexpected control message"),
             Ok(None) | Err(_) => break,

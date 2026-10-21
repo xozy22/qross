@@ -22,7 +22,7 @@
 //!   fünfmal) und nach anderthalb Sekunden zurück. Ohne Testmodus, denn erst dann steht der Ring dort, wo
 //!   der Client den echten Mauszeiger hinsetzt (links am Rand, auf halber Höhe).
 //! - `usage`: zeigt CPU und Arbeitsspeicher von Qross auf dem Client an wie die Oberfläche (Standard: 20 s)
-//!   und gibt jede Meldung aus. Der Cursor bleibt hier.
+//!   und gibt jede Meldung aus, samt Teilen je Art der Prozesse. Der Cursor bleibt hier.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -136,13 +136,23 @@ async fn main() -> Result<()> {
             usage.watch(Some(client.clone()));
             let until = tokio::time::Instant::now() + Duration::from_secs(count.into());
             while let Ok(Some(notice)) = tokio::time::timeout_at(until, notices.recv()).await {
-                if let ServerNotice::Usage { name, usage } = notice {
+                if let ServerNotice::Usage { name, usage, parts } = notice {
                     println!(
                         "\"{name}\": CPU {:.1} % of one core, RAM {:.1} MB in {} processes",
                         f64::from(usage.cpu_permille) / 10.0,
                         usage.memory_kib as f64 / 1024.0,
                         usage.processes
                     );
+                    // Je Art der Prozesse (Clients bis Qross 0.14.0 melden nur die Summe)
+                    for part in parts {
+                        println!(
+                            "    {:<9} CPU {:>5.1} %, RAM {:>6.1} MB in {} processes",
+                            part.kind.name(),
+                            f64::from(part.cpu_permille) / 10.0,
+                            part.memory_kib as f64 / 1024.0,
+                            part.processes
+                        );
+                    }
                 }
             }
             usage.watch(None);

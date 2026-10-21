@@ -17,9 +17,10 @@ use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::window::{ProgressBarState, ProgressBarStatus};
-use tauri::{AppHandle, Emitter, Manager, Wry};
+use tauri::{AppHandle, Manager, Wry};
 use tracing::{debug, info, warn};
 
+use crate::main_window;
 use crate::runtime::{Phase, Runtime, Status};
 
 const TRAY_ID: &str = "main";
@@ -176,16 +177,11 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
         .tooltip(tooltip(&Status::default(), None, None, lang))
         .menu(&menu)
         .show_menu_on_left_click(false)
+        // Was die Seite tun soll, wartet, bis das Fenster angelegt und die Seite geladen ist
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => crate::show_main(app),
-            "news" => {
-                crate::show_main(app);
-                let _ = app.emit("show-news", ());
-            }
-            "settings" => {
-                crate::show_main(app);
-                let _ = app.emit("show-settings", ());
-            }
+            "show" => main_window::show(app),
+            "news" => main_window::open(app, "show-news", ()),
+            "settings" => main_window::open(app, "show-settings", ()),
             "toggle" => {
                 let app = app.clone();
                 let rt = app.state::<Arc<Runtime>>().inner().clone();
@@ -194,16 +190,12 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
                         rt.stop().await;
                     } else if !matches!(rt.start().await, Ok(None)) {
                         // Fehler oder unbekannter Server: im Fenster zeigen
-                        crate::show_main(&app);
-                        let _ = app.emit("start-from-tray", ());
+                        main_window::open(&app, "start-from-tray", ());
                     }
                 });
             }
             "quit" => crate::quit(app),
-            "profiles-manage" => {
-                crate::show_main(app);
-                let _ = app.emit("show-settings", "set-profiles");
-            }
+            "profiles-manage" => main_window::open(app, "show-settings", "set-profiles"),
             "profiles-auto" => {
                 let rt = app.state::<Arc<Runtime>>().inner().clone();
                 let enabled = !rt.profiles().auto;
@@ -221,15 +213,13 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
                     // Server schaltet sich aus bzw. Client trennt: erst im Fenster nachfragen. Das
                     // Häkchen bleibt bis dahin beim aktiven Profil.
                     update_profiles(&app, &rt.profiles());
-                    crate::show_main(&app);
-                    let _ = app.emit("confirm-profile", id);
+                    main_window::open(&app, "confirm-profile", id);
                     return;
                 }
                 tauri::async_runtime::spawn(async move {
                     if !matches!(rt.activate_profile(&id).await, Ok(None)) {
                         // Fehler oder unbekannter Server: im Fenster zeigen
-                        crate::show_main(&app);
-                        let _ = app.emit("start-from-tray", ());
+                        main_window::open(&app, "start-from-tray", ());
                     }
                 });
             }
@@ -237,7 +227,7 @@ fn create(app: &AppHandle) -> tauri::Result<()> {
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
-                crate::show_main(tray.app_handle());
+                main_window::show(tray.app_handle());
             }
         })
         .build(app)?;
@@ -348,8 +338,8 @@ pub fn set_transfers(app: &AppHandle, overall: Option<Overall>) {
     update(app);
 }
 
-/// Das Fenster ist (wieder) zu sehen: Windows legt seine Schaltfläche in der Taskleiste dabei neu
-/// an, ohne den Balken einer laufenden Übertragung.
+/// Das Fenster ist (wieder) zu sehen, vielleicht neu angelegt: Windows legt seine Schaltfläche in der
+/// Taskleiste dabei neu an, ohne den Balken einer laufenden Übertragung.
 pub fn window_shown(app: &AppHandle) {
     *TASKBAR.lock().unwrap() = None;
     update(app);
@@ -387,13 +377,14 @@ fn show(app: &AppHandle) {
 }
 
 /// Balken in der Taskleiste (Windows) bzw. im Dock (macOS, Linux mit libunity); `None` nimmt ihn weg.
-/// Unter Windows nur zu sehen, solange das Fenster eine Schaltfläche hat, also nicht im Tray.
+/// Unter Windows nur zu sehen, solange das Fenster eine Schaltfläche hat, also nicht im Tray. Ohne
+/// Fenster setzt ihn [`window_shown`], sobald es angelegt ist.
 fn show_taskbar(app: &AppHandle, percent: Option<u8>) {
     let mut shown = TASKBAR.lock().unwrap();
     if *shown == Some(percent) {
         return;
     }
-    let Some(window) = app.get_webview_window("main") else { return };
+    let Some(window) = app.get_webview_window(qross_gui::window::LABEL) else { return };
     let state = match percent {
         Some(p) => ProgressBarState { status: Some(ProgressBarStatus::Normal), progress: Some(p.into()) },
         None => ProgressBarState { status: Some(ProgressBarStatus::None), progress: None },
@@ -438,13 +429,16 @@ fn tooltip(status: &Status, profile: Option<&str>, transfer: Option<&str>, lang:
         (_, _, Phase::Starting, Lang::En) => "starting …".to_owned(),
         _ => status.message.clone(),
     };
-    let lock = match (&status.secure_input, status.locked, status.game_hold.is_some(), lang) {
+    // Ein Fenster mit Administratorrechten hält den Cursor (Windows), solange der Hinweis gilt
+    let elevated = status.elevated.as_ref().and(status.elevated_window.as_ref());
+    let lock = match (&status.secure_input, elevated, status.locked, status.game_hold.is_some(), lang) {
         (Some(hint), ..) => qross_gui::secure_input::tray_note(hint, lang),
-        (None, true, _, Lang::De) => " · Cursor gesperrt".to_owned(),
-        (None, true, _, Lang::En) => " · cursor locked".to_owned(),
-        (None, false, true, Lang::De) => " · Spielemodus hält den Cursor".to_owned(),
-        (None, false, true, Lang::En) => " · game mode is holding the cursor".to_owned(),
-        (None, false, false, _) => String::new(),
+        (None, Some(window), ..) => qross_gui::elevated::tray_note(window, lang),
+        (None, None, true, _, Lang::De) => " · Cursor gesperrt".to_owned(),
+        (None, None, true, _, Lang::En) => " · cursor locked".to_owned(),
+        (None, None, false, true, Lang::De) => " · Spielemodus hält den Cursor".to_owned(),
+        (None, None, false, true, Lang::En) => " · game mode is holding the cursor".to_owned(),
+        (None, None, false, false, _) => String::new(),
     };
     shorten(&format!("Qross {role}{profile} – {detail}{lock}"), TOOLTIP_CHARS)
 }
@@ -468,8 +462,9 @@ fn dot(status: &Status) -> Option<[u8; 3]> {
         Phase::Error => Some([220, 38, 38]),
         Phase::Starting | Phase::Connecting => Some([234, 179, 8]),
         Phase::Listening if status.clients.is_empty() => Some([234, 179, 8]),
-        // Sichere Tastatureingabe: Der Cursor kommt nicht zu den Clients
-        Phase::Listening if status.secure_input.is_some() => Some([234, 179, 8]),
+        // Sichere Tastatureingabe bzw. ein Fenster mit Administratorrechten: Der Cursor kommt nicht zu
+        // den Clients
+        Phase::Listening if status.secure_input.is_some() || status.elevated.is_some() => Some([234, 179, 8]),
         Phase::Listening | Phase::Connected => Some([22, 163, 74]),
     }
 }

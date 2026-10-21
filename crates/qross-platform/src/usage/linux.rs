@@ -1,5 +1,5 @@
-//! Linux: dieser Prozess und alle, die er gestartet hat, samt deren Nachfahren (WebKitGTK mit Web- und
-//! Netzwerkprozess, auch hinter bubblewrap), aus `/proc`.
+//! Linux: dieser Prozess und darunter die von WebKitGTK für seine Web-Oberfläche (Seite, Netz, Grafik), auch hinter
+//! bubblewrap, aus `/proc`. Was Qross sonst startet (etwa `xdg-open` für einen Link), zählt nicht mit.
 
 use std::collections::HashMap;
 use std::fs;
@@ -10,33 +10,17 @@ use super::Process;
 
 pub(crate) fn processes() -> Vec<Process> {
     let all = all_stats();
-    let own = std::process::id();
-    let Some(&root) = all.get(&own) else { return Vec::new() };
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for (&pid, stat) in &all {
-        if pid != stat.parent {
-            children.entry(stat.parent).or_default().push(pid);
-        }
-    }
-    let mut found = vec![(own, root)];
-    // Ein Kind muss nach seinem Elternprozess gestartet sein; sonst trägt es nur eine neu vergebene Nummer.
-    let mut queue = vec![(own, root.started)];
-    while let Some((parent, started)) = queue.pop() {
-        for &pid in children.get(&parent).into_iter().flatten() {
-            let stat = all[&pid];
-            if stat.started >= started {
-                queue.push((pid, stat.started));
-                found.push((pid, stat));
-            }
-        }
-    }
     let ticks = clock_ticks();
-    found
+    procfs::qross_processes(&all, std::process::id())
         .into_iter()
-        .map(|(pid, stat)| Process {
-            id: (pid, stat.started),
-            cpu_ns: (u128::from(stat.cpu_ticks) * 1_000_000_000 / u128::from(ticks)) as u64,
-            memory: memory(pid),
+        .map(|(pid, kind)| {
+            let stat = &all[&pid];
+            Process {
+                id: (pid, stat.started),
+                kind,
+                cpu_ns: (u128::from(stat.cpu_ticks) * 1_000_000_000 / u128::from(ticks)) as u64,
+                memory: memory(pid),
+            }
         })
         .collect()
 }

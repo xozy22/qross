@@ -24,7 +24,7 @@ use qross_proto::{
     encode_datagram, read_frame, write_frame, Clipboard as ClipboardMsg, ClipboardData, Control, CursorFinder, Datagram,
     DragMessage, Edge, FileEntry, FrameError, GameState, Input, KeyCode, Latency, LatencySummary, LockState, MouseButton,
     MouseMove, Platform, Rect, ScreenInfo, StreamKind, LATENCY_SINCE, PASTE_ON_DEMAND_SINCE, PROTOCOL_VERSION,
-    SERVER_VERSION, USAGE_SINCE, UsageReport,
+    SERVER_VERSION, USAGE_DETAIL_SINCE, USAGE_SINCE, UsageKind, UsagePart, UsageReport,
 };
 use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
@@ -3306,13 +3306,13 @@ async fn the_client_offers_its_usage_only_to_servers_that_know_it() {
     assert!(!messages.iter().any(|m| matches!(m, Control::Usage(_))), "nobody is watching: {messages:?}");
 }
 
-/// Was der Server bisher über CPU und Arbeitsspeicher von „laptop“ gemeldet hat
-fn usage_reports(s: &Setup) -> Vec<UsageReport> {
+/// Was der Server bisher über CPU und Arbeitsspeicher von „laptop“ gemeldet hat, samt Teilen je Art
+fn usage_reports(s: &Setup) -> Vec<(UsageReport, Vec<UsagePart>)> {
     let notices = s.notices.lock().unwrap();
     notices
         .iter()
         .filter_map(|n| match n {
-            ServerNotice::Usage { name, usage } if name == "laptop" => Some(*usage),
+            ServerNotice::Usage { name, usage, parts } if name == "laptop" => Some((*usage, parts.clone())),
             _ => None,
         })
         .collect()
@@ -3330,9 +3330,13 @@ async fn the_client_reports_its_usage_while_the_server_watches() {
 
     s.usage.watch(Some("laptop".into()));
     wait_for("first report", || !usage_reports(&s).is_empty()).await;
-    // Gemessen wird dieser Testprozess: Server und Client laufen hier zusammen.
-    let first = usage_reports(&s)[0];
+    // Gemessen wird dieser Testprozess: Server und Client laufen hier zusammen. Er zählt als Qross selbst, und die
+    // Teile ergeben die Summe.
+    let (first, parts) = usage_reports(&s).swap_remove(0);
     assert!(first.processes >= 1 && first.memory_kib > 0, "{first:?}");
+    assert_eq!(parts.first().map(|part| part.kind), Some(UsageKind::Core), "{parts:?}");
+    let processes: u16 = parts.iter().map(|part| part.processes).sum();
+    assert_eq!(processes, first.processes, "{parts:?}");
     wait_for("next report", || usage_reports(&s).len() >= 2).await;
 
     s.usage.watch(None);
@@ -3343,4 +3347,128 @@ async fn the_client_reports_its_usage_while_the_server_watches() {
 
     s.usage.watch(Some("laptop".into()));
     wait_for("report after watching again", || usage_reports(&s).len() > stopped).await;
+}
+
+/// Ein Server mit `welcome_version`, der die Werte des Clients gleich sehen will: was der Client daraufhin bis zu
+/// seiner ersten Meldung schickt
+async fn client_usage_for(welcome_version: u16) -> Vec<Control> {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let server_id = Identity::generate().unwrap();
+    let endpoint =
+        quinn::Endpoint::server(qross_net::tls::server_config(&server_id).unwrap(), "127.0.0.1:0".parse().unwrap())
+            .unwrap();
+    let addr = endpoint.local_addr().unwrap();
+    let client_task = tokio::spawn(client::run(
+        ClientConfig {
+            name: "laptop".into(),
+            server: addr.to_string(),
+            server_fingerprint: Some(server_id.fingerprint()),
+            clipboard_file_limit: clipfiles::DEFAULT_LIMIT,
+            share_concealed: false,
+        },
+        Identity::generate().unwrap(),
+        TrustStore::in_memory(),
+        ClientPlatform {
+            injector: Box::new(RecordingInjector::default()),
+            clipboard: Box::new(SharedClipboard::default()),
+            screen: Box::new(|| LAPTOP),
+            monitors: Box::new(Vec::new),
+            game: Box::new(GameState::default),
+            finder: None,
+        },
+    ));
+    let conn = endpoint.accept().await.unwrap().await.unwrap();
+    let (mut control, mut control_rx) = conn.accept_bi().await.unwrap();
+    read_frame::<_, Control>(&mut control_rx).await.unwrap();
+    let welcome = Control::Welcome { version: welcome_version, server_name: "pc".into(), platform: Platform::Windows };
+    write_frame(&mut control, &welcome).await.unwrap();
+    write_frame(&mut control, &Control::WatchUsage(true)).await.unwrap();
+    // Die erste Meldung kommt nach der Grundmessung, eine halbe Sekunde später.
+    let mut messages = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Ok(Some(message)) = read_frame::<_, Control>(&mut control_rx).await {
+            let report = matches!(message, Control::Usage(_) | Control::UsageDetail { .. });
+            messages.push(message);
+            if report {
+                return;
+            }
+        }
+    })
+    .await;
+    client_task.abort();
+    messages
+}
+
+#[tokio::test]
+async fn the_client_splits_its_usage_only_for_servers_that_read_it() {
+    // Ein Server aus 0.14 trennte bei `UsageDetail`: Er bekommt weiter nur die Summe.
+    let old = client_usage_for(USAGE_SINCE).await;
+    assert!(matches!(old.last(), Some(Control::Usage(report)) if report.processes >= 1), "{old:?}");
+    assert!(!old.iter().any(|m| matches!(m, Control::UsageDetail { .. })), "{old:?}");
+
+    // Ein neuer bekommt die Teile je Art, Qross selbst zuerst.
+    let new = client_usage_for(USAGE_DETAIL_SINCE).await;
+    let Some(Control::UsageDetail { total, parts }) = new.last() else { panic!("no detailed report: {new:?}") };
+    assert_eq!(parts.first().map(|part| part.kind), Some(UsageKind::Core), "{parts:?}");
+    assert_eq!(parts.iter().map(|part| part.processes).sum::<u16>(), total.processes, "{parts:?}");
+    assert!(!new.iter().any(|m| matches!(m, Control::Usage(_))), "{new:?}");
+}
+
+#[tokio::test]
+async fn the_server_takes_the_plain_usage_of_older_clients() {
+    // Ein Client aus 0.14 meldet nur die Summe (`Usage`): Der Server gibt sie ohne Teile weiter.
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let (server_id, client_id) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+    let mut trust = TrustStore::in_memory();
+    trust.trust("laptop", &client_id.fingerprint()).unwrap();
+    let layout = Layout::from_links(&[LinkConfig { from: "pc".into(), edge: Edge::Right, to: "laptop".into() }]).unwrap();
+    let config = ServerConfig { name: "pc".into(), listen: "127.0.0.1:0".parse().unwrap(), layout };
+    let (notice_tx, notice_rx) = tokio::sync::mpsc::unbounded_channel();
+    let notices = collect(notice_rx);
+    let server = Server::bind(config, &server_id, trust).unwrap().with_notices(notice_tx);
+    let addr = server.local_addr().unwrap();
+    // Die Oberfläche zeigt ihn schon, bevor er sich verbindet.
+    server.usage().watch(Some("laptop".into()));
+    let (_events, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server_task = tokio::spawn(server.run(ServerPlatform {
+        capture: Arc::new(RecordingCapture::default()),
+        events: events_rx,
+        clipboard: Box::new(SharedClipboard::default()),
+        screen: Box::new(|| PC),
+        monitors: Box::new(Vec::new),
+        game: Box::new(GameState::default),
+        finder: None,
+    }));
+
+    let (_endpoint, conn) = connect_raw(addr, &client_id).await;
+    let (mut control, mut control_rx) = conn.open_bi().await.unwrap();
+    let hello =
+        Control::Hello { version: PROTOCOL_VERSION, name: "laptop".into(), screen: ScreenInfo { bounds: LAPTOP }, platform: Platform::MacOs };
+    write_frame(&mut control, &hello).await.unwrap();
+    let welcome = read_frame::<_, Control>(&mut control_rx).await.unwrap();
+    assert!(matches!(welcome, Some(Control::Welcome { version: SERVER_VERSION, .. })), "{welcome:?}");
+    write_frame(&mut control, &Control::ReportsUsage).await.unwrap();
+    let watched = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match read_frame::<_, Control>(&mut control_rx).await {
+                Ok(Some(Control::WatchUsage(on))) => return on,
+                Ok(Some(_)) => {}
+                other => panic!("control stream ended: {other:?}"),
+            }
+        }
+    })
+    .await;
+    assert_eq!(watched.ok(), Some(true), "the server asks for the values right away");
+
+    let report = UsageReport { cpu_permille: 25, memory_kib: 7_168, processes: 1 };
+    write_frame(&mut control, &Control::Usage(report)).await.unwrap();
+    let seen = notices.clone();
+    wait_for("plain report", || {
+        seen.lock().unwrap().iter().any(|n| {
+            matches!(n, ServerNotice::Usage { name, usage, parts } if name == "laptop" && *usage == report && parts.is_empty())
+        })
+    })
+    .await;
+    assert!(conn.close_reason().is_none(), "the client stays connected");
+    server_task.abort();
 }

@@ -18,8 +18,10 @@ cargo run -p qross-gui
   meldet sich ihr Ende als Systembenachrichtigung. Ausprobieren ohne zweiten Rechner: Oberfläche als Client
   mit `127.0.0.1:24990` (Testmodus), dann `cargo run -p qross-net --example scripted_server -- drag <Name> <Datei>`.
 - **Tray:** Farbiger Punkt zeigt den Zustand. Fenster schließen versteckt es nur, beendet wird über das Tray-Menü.
-  Zeigt das System kein Tray an (Linux ohne StatusNotifier-Host, z. B. GNOME ohne AppIndicator-Erweiterung),
-  beendet Schließen die App, damit sie nicht unerreichbar im Hintergrund weiterläuft.
+  Bleibt das Fenster 30 s versteckt, endet es samt den Prozessen der Web-Oberfläche (gut 80 MB) und entsteht
+  beim nächsten Öffnen an gleicher Stelle neu; per Autostart startet Qross ganz ohne Fenster. Zeigt das System
+  kein Tray an (Linux ohne StatusNotifier-Host, z. B. GNOME ohne AppIndicator-Erweiterung), beendet Schließen
+  die App, damit sie nicht unerreichbar im Hintergrund weiterläuft.
 
 Daten liegen wie beim CLI in `%APPDATA%\Qross` (`gui.json` für die Oberfläche), abweichend per
 Umgebungsvariable `QROSS_DATA_DIR`.

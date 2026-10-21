@@ -4,8 +4,8 @@ Seit Qross 0.3 abwärtskompatibel erweitert um kopierte Dateien in der Zwischena
 Drag & Drop vom Client zum Server, seit Qross 0.5 um die einzelnen Monitore eines Clients, seit Qross 0.6
 um den Spielemodus, seit Qross 0.7 um Zeichen statt Tastenpositionen und Rechte je Rechner, seit Qross 0.8
 um den Abgleich von Feststelltaste, Num und Rollen, den Cursor-Finder, den Bildschirmschoner und die Messung
-der Eingabekette, seit Qross 0.13 um kopierte Dateien auf Abruf und seit Qross 0.14 um CPU und Arbeitsspeicher je
-Rechner (siehe unten).
+der Eingabekette, seit Qross 0.13 um kopierte Dateien auf Abruf, seit Qross 0.14 um CPU und Arbeitsspeicher je
+Rechner und danach um deren Aufteilung nach Art der Prozesse (siehe unten).
 
 Entscheidungsgrundlage: [benchmark-ergebnisse.md](benchmark-ergebnisse.md).
 Implementierung: `crates/qross-proto`.
@@ -32,7 +32,7 @@ Implementierung: `crates/qross-proto`.
 
 | Kanal | Richtung | Zuverlässig | Inhalt |
 |---|---|---|---|
-| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing`, `SyncsLocks`, `CursorFinder`, `FollowsScreenSaver`, `ScreenSaver`, `Latency`, `PastesOnDemand`, `ReportsUsage`, `WatchUsage`, `Usage` |
+| Control (bidirektionaler Stream, vom Client geöffnet) | ⇄ | ja | `Hello`, `Welcome`/`Reject`, `ScreenChanged`, `Monitors`, `Game`, `TypesText`, `Sharing`, `SyncsLocks`, `CursorFinder`, `FollowsScreenSaver`, `ScreenSaver`, `Latency`, `PastesOnDemand`, `ReportsUsage`, `WatchUsage`, `Usage`, `UsageDetail` |
 | Suche (UDP-Broadcast, Port 24901, außerhalb von QUIC) | ⇄ | nein | `Discovery::Probe` / `Announce` |
 | Input (unidirektionaler Stream, Priorität 10) | Server → Client | ja, geordnet | `Enter`, `Leave`, `Key`, `Button`, `Wheel`, im Zeichenmodus `Text`, `Shortcut`, `Locks` |
 | Datagramm | Server → Client | **nein** | `MouseMove`, im Spielemodus `MouseDelta` |
@@ -652,19 +652,21 @@ Client an einem älteren Server misst nichts, dort entfällt die Anzeige.
 
 ## CPU und Arbeitsspeicher
 
-Seit Qross 0.14 (Welcome-Version 13). Die Oberfläche zeigt, wie viel Rechenzeit und Arbeitsspeicher Qross auf einem
-Rechner braucht, samt seiner Web-Oberfläche und aller Hilfsprozesse: am Server in den Details des ausgewählten
-Rechners (für einen Client im Reiter „Verbindung“, für den Server selbst als „Qross hier“), am Client in der Karte
-„Verbindung“. Implementierung: Messung in `crates/qross-platform/src/usage/`, Meldungen in
-`crates/qross-net/src/usage.rs`.
+Seit Qross 0.14 (Welcome-Version 13), aufgeteilt nach Art der Prozesse ab Welcome-Version 14 (ab Qross 0.15).
+Die Oberfläche zeigt, wie viel Rechenzeit und Arbeitsspeicher Qross auf einem Rechner braucht: Qross selbst und seine
+Web-Oberfläche samt Hilfsprozessen, am Server in den Details des ausgewählten Rechners (für einen Client im Reiter
+„Verbindung“, für den Server selbst als „Qross hier“), am Client in der Karte „Verbindung“. Programme, die Qross nur
+startet, zählen nicht mit, etwa der Browser für einen Link oder der Explorer für einen Ordner (bis Qross 0.14.0
+zählten unter Windows und Linux alle Nachfahren mit, unter macOS auch selbst gestartete Kommandozeilenprogramme).
+Implementierung: Messung in `crates/qross-platform/src/usage/`, Meldungen in `crates/qross-net/src/usage.rs`.
 
 **Gemessen** wird nur auf Abruf, nie im Hintergrund:
 
 | System | Prozesse | CPU | Arbeitsspeicher |
 |---|---|---|---|
-| Windows | dieser und alle Nachfahren (Toolhelp-Schnappschuss; WebView2 mit seinen Hilfsprozessen) | `GetProcessTimes` | privater Arbeitssatz (`PROCESS_MEMORY_COUNTERS_EX2`), wie im Task-Manager |
-| macOS | dieser, seine Nachfahren und die Dienste, für die er verantwortlich ist (die WebKit-Prozesse startet launchd) | `proc_pid_rusage`, Mach-Zeit in Nanosekunden umgerechnet | physischer Speicherbedarf (`ri_phys_footprint`), wie in der Aktivitätsanzeige |
-| Linux | dieser und alle Nachfahren (`/proc`; WebKitGTK, auch hinter bubblewrap) | `utime` + `stime` aus `/proc/<pid>/stat` | PSS aus `smaps_rollup` (geteilte Seiten anteilig), sonst der residente Teil |
+| Windows | dieser und die Nachfahren, deren Programm `msedgewebview2.exe` heißt (Toolhelp-Schnappschuss); weiter geht es nur über solche | `GetProcessTimes` | privater Arbeitssatz (`PROCESS_MEMORY_COUNTERS_EX2`), wie im Task-Manager |
+| macOS | dieser und die Dienste von WebKit (`com.apple.WebKit.*`, Name aus `proc_pidpath`), für die er verantwortlich ist; die startet launchd | `proc_pid_rusage`, Mach-Zeit in Nanosekunden umgerechnet | physischer Speicherbedarf (`ri_phys_footprint`), wie in der Aktivitätsanzeige |
+| Linux | dieser und darunter die Prozesse von WebKitGTK (Name beginnt mit `WebKit`), auch hinter bubblewrap (`bwrap`, das selbst nicht zählt); weiter geht es nur über solche (`/proc`) | `utime` + `stime` aus `/proc/<pid>/stat` | PSS aus `smaps_rollup` (geteilte Seiten anteilig), sonst der residente Teil |
 
 Ein Kind zählt nur, wenn es nach seinem Elternprozess gestartet ist; sonst trägt es nur eine neu vergebene
 Prozessnummer. Unter macOS zählen die Dienste nur, wenn die App für sich selbst verantwortlich ist (aus Finder,
@@ -674,24 +676,47 @@ ausgelastet, mit mehreren Kernen auch mehr). Liegt die vorige Messung länger al
 Abstand von 0,5 s, damit der Wert für jetzt gilt. Eine Messung sieht alle Prozesse des Systems durch (einige
 Millisekunden) und läuft deshalb in einem eigenen Thread, nie in einer Ereignisschleife.
 
+**Arten** der Prozesse (`UsageKind`, auf der Leitung ein Byte). Unter Windows steht die Art in der Kommandozeile von
+WebView2; Qross liest sie mit `NtQueryInformationProcess(ProcessCommandLineInformation)` (ab Windows 8.1, ohne den
+Speicher des Prozesses zu lesen). Lässt sie sich nicht lesen, gilt das Kind von Qross als Browser-Prozess und alles
+darunter als `Other`. Unter macOS und Linux entscheidet der Name des Programms (unter Linux der aus
+`/proc/<pid>/stat`, nach 15 Zeichen abgeschnitten).
+
+| Art | Windows (WebView2) | macOS | Linux |
+|---|---|---|---|
+| `Core` (0) | Qross selbst | Qross selbst | Qross selbst |
+| `Page` (1) | `--type=renderer` | `com.apple.WebKit.WebContent` | `WebKitWebProcess` |
+| `Graphics` (2) | `--type=gpu-process` | `com.apple.WebKit.GPU` | `WebKitGPUProcess` |
+| `Browser` (3) | ohne `--type`: der Browser-Prozess, der die anderen startet | – | – |
+| `Network` (4) | `--type=utility --utility-sub-type=network.mojom.NetworkService` | `com.apple.WebKit.Networking` | `WebKitNetworkProcess` |
+| `Other` (5) | weitere Dienste (etwa `storage.mojom.StorageService`), `--type=crashpad-handler` | weitere `com.apple.WebKit.*` | weitere `WebKit*` |
+
+Die Oberfläche zeigt unter CPU und RAM die Aufteilung „Kern … · Oberfläche …“ (Oberfläche: alle Arten außer
+`Core`) und im Tooltip dazu jede Art einzeln mit CPU und RAM.
+
 **Ablauf** für die Werte eines Clients:
 
 1. Der Client schickt `ReportsUsage` direkt nach dem `Welcome`, nur ab Version 13 und wo er messen kann.
 2. Zeigt die Oberfläche des Servers seine Werte, schickt der Server ihm `WatchUsage(true)`, sobald sie nicht mehr zu
    sehen sind (andere Auswahl, anderer Reiter, Fenster versteckt), `WatchUsage(false)`. Gezeigt wird höchstens ein
    Client zugleich; verbindet er sich neu, bekommt er `WatchUsage(true)` gleich nach seinem `ReportsUsage`.
-3. Solange er beobachtet wird, schickt der Client etwa alle 2 s `Usage(UsageReport { cpu_permille, memory_kib,
-   processes })`, die erste rund 0,5 s nach Beginn; mit Längenfeld etwa 10 Bytes. Was nach dem Ende der Anzeige
-   noch ankommt, verwirft der Server.
+3. Solange er beobachtet wird, schickt der Client etwa alle 2 s seine Werte, die erste rund 0,5 s nach Beginn: an
+   Server ab Version 14 `UsageDetail { total, parts }` mit der Summe (`UsageReport { cpu_permille, memory_kib,
+   processes }`) und je vorkommender Art einem `UsagePart { kind, cpu_permille, memory_kib, processes }` in der
+   Reihenfolge der Tabelle (mit Längenfeld etwa 45 Bytes), an ältere nur die Summe als `Usage(UsageReport)` (etwa
+   10 Bytes). Was nach dem Ende der Anzeige noch ankommt, verwirft der Server.
 
 Die eigenen Werte fragt die Oberfläche selbst ab, ebenfalls alle 2 s und nur, solange sie zu sehen sind.
 
 Ansehen ohne zweiten Rechner: `cargo run -p qross-net --example scripted_server -- usage <Client-Name>` gibt die
-Meldungen eines Clients aus, etwa der App als Client im Testmodus mit der Adresse `127.0.0.1:24990`.
+Meldungen eines Clients samt Teilen aus, etwa der App als Client im Testmodus mit der Adresse `127.0.0.1:24990`.
 
-**Kompatibilität:** Ein Server ab Qross 0.14 meldet im `Welcome` die Version 13. Nur dann schickt der Client
-`ReportsUsage` und `Usage`; ältere Server bekommen beides nie (sie trennten bei unbekannten Control-Nachrichten).
-`WatchUsage` bekommen nur Clients, die sich gemeldet haben; für ältere zeigt die Oberfläche „meldet das nicht“.
+**Kompatibilität:** Ein Server ab Qross 0.14 meldet im `Welcome` die Version 13, ein neuerer 14. Nur ab 13 schickt
+der Client `ReportsUsage` und `Usage`, nur ab 14 `UsageDetail` statt `Usage`; ältere Server bekommen nie, was sie
+nicht lesen können (sie trennten bei unbekannten Control-Nachrichten). Der Server nimmt beides; von Clients bis Qross
+0.14.0 zeigt die Oberfläche nur die Summe. Eine Art, die er nicht kennt (aus einer späteren Version), zählt er als
+`Other`, mehrere Teile derselben Art zählt er zusammen. `WatchUsage` bekommen nur Clients, die sich gemeldet haben;
+für ältere zeigt die Oberfläche „meldet das nicht“.
 
 ## Noch offen
 

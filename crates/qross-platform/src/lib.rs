@@ -6,6 +6,7 @@ pub mod clipformat;
 pub mod concealed;
 pub mod dnd_logic;
 pub mod dryrun;
+pub mod elevated;
 pub mod finder;
 pub mod keymap_linux;
 pub mod keymap_mac;
@@ -62,6 +63,7 @@ use qross_proto::{ClipboardData, GameState, LockState, Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub use secure_input::SecureInput;
+pub use elevated::ElevatedWindow;
 pub use finder::FinderOverlay;
 pub use virtual_files::{VirtualFile, VirtualFiles, VirtualSource};
 
@@ -230,6 +232,28 @@ pub fn secure_input() -> Option<SecureInput> {
     #[cfg(target_os = "macos")]
     return mac::secure_input();
     #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// Liegt unter Windows gerade ein Fenster mit höheren Rechten vorne oder unter dem Cursor, etwa der
+/// Task-Manager (siehe [`mod@elevated`])? Dann erreichen Eingaben die Erfassung des Servers nicht.
+/// Sperrbildschirm, UAC-Abfrage und Strg+Alt+Entf (ein anderer Desktop) zählen nicht dazu, ebenso
+/// Fenster, deren Rechte sich nicht ermitteln lassen. Wird regelmäßig abgefragt und ist dafür schnell
+/// genug; andere Systeme kennen das nicht und liefern `None`.
+pub fn elevated_window() -> Option<ElevatedWindow> {
+    #[cfg(windows)]
+    return win::elevated_window();
+    #[cfg(not(windows))]
+    None
+}
+
+/// Wo der Cursor gerade steht, in den Koordinaten von [`screen_bounds`]. Unter Windows auch dann,
+/// wenn ein Fenster mit höheren Rechten die Erfassung blind macht (siehe [`elevated_window`]); andere
+/// Systeme liefern `None`.
+pub fn cursor_position() -> Option<(i32, i32)> {
+    #[cfg(windows)]
+    return win::cursor_position();
+    #[cfg(not(windows))]
     None
 }
 

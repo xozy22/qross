@@ -71,7 +71,8 @@ dirs.workspace = true
 # Power: Ruhezustand und Aufwachen melden (Systemereignisse)
 # Registry, Shutdown: Bildschirmschoner (eingerichtet? sperren)
 # Diagnostics_ToolHelp, ProcessStatus: CPU und Arbeitsspeicher von Qross samt WebView2
-windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Power", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Shutdown", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation"] }
+# Wdk_System_Threading: Kommandozeilen der WebView2-Prozesse (welcher Art sie sind)
+windows-sys = { workspace = true, features = ["Wdk_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Power", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Shutdown", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation"] }
 # COM (Drag & Drop, Shell) – mit windows-sys nicht umsetzbar
 windows = { version = "0.62", features = [
     "Win32_Foundation",

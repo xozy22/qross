@@ -116,7 +116,7 @@ async fn choose(rt: &Arc<Runtime>, current: Vec<NetworkMark>, signature: String)
     let what = match (&result, settings.role, lang) {
         (Ok(Some(_)), _, _) => {
             // Das Fenster fragt nach dem Fingerprint, sobald es offen ist.
-            let _ = app.emit("start-from-tray", ());
+            crate::main_window::action(app, "start-from-tray", ());
             match lang {
                 Lang::De => " Den Server bitte im Fenster bestätigen.".to_owned(),
                 Lang::En => " Please confirm the server in the window.".to_owned(),

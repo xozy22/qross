@@ -29,6 +29,17 @@ export const USAGE_TEXT = {
   },
 };
 
+/** Arten der Prozesse in der Reihenfolge, in der sie kommen (`parts` im Ereignis `usage`): „core“ ist Qross
+ *  selbst, alle anderen zusammen sind seine Oberfläche */
+export const USAGE_KINDS = [
+  { key: "core", label: "usage.kindCore" },
+  { key: "page", label: "usage.kindPage" },
+  { key: "graphics", label: "usage.kindGraphics" },
+  { key: "browser", label: "usage.kindBrowser" },
+  { key: "network", label: "usage.kindNetwork" },
+  { key: "other", label: "usage.kindOther" },
+];
+
 /** So oft fragt die Oberfläche die eigenen Werte ab, solange sie zu sehen sind */
 export const USAGE_POLL_MS = 2000;
 
@@ -48,6 +59,40 @@ export function formatMemory(bytes) {
 export function usageLine(usage) {
   if (!usage) return USAGE_TEXT.measuring;
   return t("usage.line", { cpu: formatCpu(usage.cpu), memory: formatMemory(usage.memory) });
+}
+
+/** Arbeitsspeicher aufgeteilt, z. B. „Kern 8 MB · Oberfläche 95 MB“. Null, wenn der Rechner keine Teile meldet
+ *  (Qross bis 0.14.0) oder es keine Oberfläche gibt (Client auf der Kommandozeile). */
+export function usageSplit(usage) {
+  const parts = usage?.parts ?? [];
+  const core = parts.filter((part) => part.kind === "core");
+  const ui = parts.filter((part) => part.kind !== "core");
+  if (!ui.length) return null;
+  const memory = (list) => formatMemory(list.reduce((sum, part) => sum + part.memory, 0));
+  return t("usage.split", { core: memory(core), ui: memory(ui) });
+}
+
+/** Je Art eine Zeile, z. B. „Seite: CPU 0,2 % · RAM 30 MB“ */
+export function usagePartLines(usage) {
+  return (usage?.parts ?? []).map((part) => {
+    const kind = USAGE_KINDS.find((k) => k.key === part.kind) ?? USAGE_KINDS.at(-1);
+    return t("usage.partLine", { kind: t(kind.label), cpu: formatCpu(part.cpu), memory: formatMemory(part.memory) });
+  });
+}
+
+/** Die Aufteilung unter CPU und RAM; der Tooltip nennt jede Art einzeln. */
+function splitNode() {
+  return el("span", { class: "usage-split", tabindex: "0", hidden: true });
+}
+
+function showSplit(node, usage) {
+  const text = usageSplit(usage);
+  node.hidden = !text;
+  if (!text) return;
+  const lines = usagePartLines(usage);
+  node.textContent = text;
+  node.title = lines.join("\n");
+  node.setAttribute("aria-label", [text, ...lines].join(". "));
 }
 
 /** Zuletzt gemessen: hier und beim Client, dessen Werte der Server gerade zeigt */
@@ -72,6 +117,7 @@ export function usageBlock(peer, silent = () => false) {
     cpu: el("span", { class: "v" }),
     memory: el("span", { class: "v" }),
     memorySub: el("span", { class: "s" }),
+    split: splitNode(),
     note: el("p", { class: "qusage-note" }),
   };
   block.stats = el(
@@ -85,6 +131,7 @@ export function usageBlock(peer, silent = () => false) {
     { class: "qusage" },
     el("div", { class: "qusage-head" }, el("span", { text: peer == null ? USAGE_TEXT.here : USAGE_TEXT.there }), infoIcon(USAGE_TEXT.help)),
     block.stats,
+    block.split,
     block.note,
   );
   const refresh = () => {
@@ -92,6 +139,7 @@ export function usageBlock(peer, silent = () => false) {
     block.stats.hidden = !value;
     block.note.hidden = Boolean(value);
     block.note.textContent = peer != null && silent() ? USAGE_TEXT.silent(peer) : USAGE_TEXT.measuring;
+    showSplit(block.split, value);
     if (!value) return;
     block.cpu.textContent = formatCpu(value.cpu);
     block.memory.textContent = formatMemory(value.memory);
@@ -100,11 +148,18 @@ export function usageBlock(peer, silent = () => false) {
   return { peer, node, refresh };
 }
 
-/** Eine Zeile für Listen (dieser Rechner bzw. `peer`), die mit jeder Messung neu steht */
+/** Für Listen (dieser Rechner bzw. `peer`): eine Zeile mit CPU und RAM, darunter die Aufteilung; beides steht mit
+ *  jeder Messung neu. */
 export function usageValue(peer = null) {
-  const node = el("span", { class: "usage-line", title: USAGE_TEXT.help });
-  const view = { peer, node, refresh: () => (node.textContent = usageLine(valueOf(peer))) };
-  showUsage(view);
+  const line = el("span", { class: "usage-line", title: USAGE_TEXT.help });
+  const split = splitNode();
+  const node = el("span", { class: "usage-value" }, line, split);
+  const refresh = () => {
+    const value = valueOf(peer);
+    line.textContent = usageLine(value);
+    showSplit(split, value);
+  };
+  showUsage({ peer, node, refresh });
   return node;
 }
 

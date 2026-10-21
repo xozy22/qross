@@ -6,6 +6,7 @@
 pub mod autostart;
 pub mod changelog;
 pub mod clipboard_files;
+pub mod elevated;
 pub mod i18n;
 pub mod keys;
 pub mod lifecycle;
@@ -13,6 +14,7 @@ pub mod profiles;
 pub mod secure_input;
 pub mod transfers;
 pub mod tray_icon;
+pub mod window;
 
 use std::collections::HashSet;
 use std::fs;

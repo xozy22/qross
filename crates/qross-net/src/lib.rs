@@ -11,6 +11,7 @@ mod clipboard;
 pub mod clipfiles;
 pub mod discovery;
 mod drag_preview;
+pub mod elevated;
 pub mod files;
 pub mod game;
 mod identity;

@@ -24,6 +24,7 @@ import { onUsage, setupUsage } from "./usage.js";
 import { checkPermissions, renderPermissions } from "./permissions.js";
 import { forgetPortal, refreshPortal, renderPortal } from "./portal.js";
 import { renderSecureInput } from "./secure-input.js";
+import { renderElevated } from "./elevated.js";
 import { setupWindowControls } from "./window-controls.js";
 
 export function render() {
@@ -31,6 +32,7 @@ export function render() {
   renderPermissions();
   renderPortal();
   renderSecureInput();
+  renderElevated();
   renderTopbar();
   renderProfilePick();
   renderGameNote();
@@ -221,6 +223,9 @@ async function init() {
   document.addEventListener("click", (e) => {
     if (e.target.closest?.(".qinfo")) e.preventDefault();
   });
+  // Bereit: Aufträge aus dem Tray, die beim Öffnen des Fensters warteten (Einstellungen, Neuigkeiten,
+  // Start …), kommen jetzt als Ereignis.
+  invoke("ui_ready").catch((e) => console.warn("ui_ready:", e));
 }
 
 // Feste Texte gleich in der zuletzt gültigen Sprache; init() stellt um, falls sie nicht mehr stimmt.
