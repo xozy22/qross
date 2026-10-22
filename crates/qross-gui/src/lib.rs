@@ -10,6 +10,7 @@ pub mod elevated;
 pub mod i18n;
 pub mod keys;
 pub mod lifecycle;
+pub mod log_file;
 pub mod profiles;
 pub mod secure_input;
 pub mod transfers;

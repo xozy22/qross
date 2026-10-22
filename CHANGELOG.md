@@ -8,6 +8,20 @@ uses the section for its version.
 
 Sections: **New**, **Improved**, **Fixed**, **Important** (e.g. breaking changes).
 
+## [Unreleased]
+
+### New
+
+- **Log file:** Qross now also writes its log to `qross.log` in the data folder (Settings → About → Data folder),
+  in English and with every start, including the one at login. Above 1 MB it starts a new file and keeps the
+  previous one as `qross.old.log`.
+
+### Fixed
+
+- **Start with the system didn't start Qross on Windows:** Qross wrote its path as `\\?\C:\…` into the startup
+  entry. Windows showed the entry as enabled but didn't run it at login. Qross now writes the normal path and
+  corrects an existing entry the next time it starts, so after this update the next login starts Qross again.
+
 ## [0.15.0] - 2026-10-21
 
 ### New

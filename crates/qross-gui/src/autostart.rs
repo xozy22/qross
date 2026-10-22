@@ -128,7 +128,22 @@ pub fn target(os: Os, exe: &Path, appimage: Option<&Path>) -> Target {
             None if text.starts_with("/tmp/.mount_") => Target::Unsuitable(Unsuitable::AppImageUnknown),
             None => Target::Program(exe.to_path_buf()),
         },
+        Os::Windows => Target::Program(without_verbatim(exe)),
         _ => Target::Program(exe.to_path_buf()),
+    }
+}
+
+/// Windows: `canonicalize` liefert den Pfad als `\\?\C:\…`. Einen Autostart-Eintrag in dieser Schreibweise
+/// zeigt Windows unter „Autostart“ als eingeschaltet an, führt ihn bei der Anmeldung aber nicht aus.
+fn without_verbatim(exe: &Path) -> PathBuf {
+    let text = exe.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        // Nur mit Laufwerksbuchstaben; andere Formen (Volume-GUID) haben keine kurze Schreibweise
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => exe.to_path_buf(),
     }
 }
 
@@ -438,6 +453,20 @@ mod tests {
     fn windows_entry_quotes_the_path() {
         let entry = entry(Os::Windows, Path::new(r"C:\Users\Anna Muster\AppData\Local\Qross\qross-gui.exe"));
         assert_eq!(entry, r#""C:\Users\Anna Muster\AppData\Local\Qross\qross-gui.exe" --autostart"#);
+    }
+
+    #[test]
+    fn windows_entry_has_no_verbatim_prefix() {
+        // So liefert `canonicalize` den Pfad; Windows startet einen Eintrag mit `\\?\` bei der Anmeldung nicht.
+        let exe = Path::new(r"\\?\C:\Users\Dennis\AppData\Local\Qross\qross-gui.exe");
+        let Target::Program(program) = target(Os::Windows, exe, None) else { panic!("Ziel erwartet") };
+        assert_eq!(entry(Os::Windows, &program), r#""C:\Users\Dennis\AppData\Local\Qross\qross-gui.exe" --autostart"#);
+        let unc = Path::new(r"\\?\UNC\server\apps\Qross\qross-gui.exe");
+        assert_eq!(target(Os::Windows, unc, None), Target::Program(PathBuf::from(r"\\server\apps\Qross\qross-gui.exe")));
+        let plain = Path::new(r"D:\Qross\qross-gui.exe");
+        assert_eq!(target(Os::Windows, plain, None), Target::Program(plain.to_path_buf()));
+        let volume = Path::new(r"\\?\Volume{0f3c}\Qross\qross-gui.exe");
+        assert_eq!(target(Os::Windows, volume, None), Target::Program(volume.to_path_buf()), "keine kurze Form");
     }
 
     #[test]

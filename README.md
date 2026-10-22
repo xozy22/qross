@@ -336,6 +336,10 @@ System starten“; darunter steht, wo das System den Eintrag zeigt. Unter macOS 
 „Programme“ liegt, nicht direkt aus dem DMG. Alles Weitere, auch für `qross` ohne Oberfläche:
 [Autostart](docs/autostart.md).
 
+Was Qross tut, steht auch ohne Fenster in `qross.log` im Datenordner (Einstellungen → Info → Datenordner, dort
+„Öffnen“), auf Englisch und mit jedem Start, auch dem bei der Anmeldung („started at login“). Wird die Datei
+größer als 1 MB, beginnt eine neue; die vorige bleibt als `qross.old.log`.
+
 ## Einrichten
 
 Am einfachsten über die grafische Oberfläche (`qross-gui`). Auf der Kommandozeile geht es so:

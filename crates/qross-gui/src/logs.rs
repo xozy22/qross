@@ -1,13 +1,16 @@
-//! Log-Ansicht: ein `tracing`-Layer, der Meldungen puffert und an das Fenster schickt.
+//! Log-Ansicht: ein `tracing`-Layer, der Meldungen puffert und an das Fenster schickt, dazu die
+//! Protokolldatei `qross.log` im Datenordner.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use qross_gui::log_file::LogFile;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, SubscriberExt};
@@ -94,14 +97,19 @@ impl Visit for Message {
     }
 }
 
-/// Richtet das Logging ein: Konsole (in Debug-Builds sichtbar) und Fenster.
-pub fn init() -> Arc<LogBuffer> {
+/// Richtet das Logging ein: Konsole (in Debug-Builds sichtbar), Fenster und `qross.log` in `data_dir`.
+pub fn init(data_dir: &Path) -> Arc<LogBuffer> {
     let buffer = Arc::new(LogBuffer::default());
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,quinn=warn,tao=warn,wry=warn,tauri=warn"));
+    let file = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_ansi(false)
+        .with_writer(Mutex::new(LogFile::open(data_dir)));
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(file)
         .with(GuiLayer(buffer.clone()))
         .init();
     buffer

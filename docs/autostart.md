@@ -41,6 +41,10 @@ Ohne Tray (etwa GNOME ohne AppIndicator-Erweiterung) erscheint es minimiert.
 - **Bis Qross 0.7.0** kam der Eintrag von `tauri-plugin-autostart`, mit denselben Namen und Orten. Qross
   übernimmt ihn und bringt ihn beim ersten Start auf den neuen Stand (unter Windows mit Anführungszeichen um
   den Pfad, unter macOS mit Bundle-ID, damit die Anmeldeobjekte „Qross“ zeigen).
+- **Bis Qross 0.15.0** stand unter Windows der Pfad als `\\?\C:\…` im Eintrag. Windows zeigt ihn unter
+  „Autostart“ als eingeschaltet, führt ihn bei der Anmeldung aber nicht aus. Ab 0.15.1 schreibt Qross den
+  normalen Pfad und korrigiert einen alten Eintrag beim nächsten Start. Ob Qross bei der Anmeldung lief,
+  zeigt `qross.log` im Datenordner („started at login“).
 
 ## Ohne Oberfläche: `qross` als Dienst des Nutzers
 

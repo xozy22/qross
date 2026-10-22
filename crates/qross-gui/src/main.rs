@@ -567,10 +567,13 @@ fn data_dir() -> PathBuf {
 }
 
 fn main() {
-    let logs = logs::init();
+    let data_dir = data_dir();
+    let logs = logs::init(&data_dir);
+    // Steht auch in qross.log: Startete Qross mit der Anmeldung, sieht man es dort
+    let autostarted = std::env::args().any(|arg| arg == qross_gui::autostart::ARG);
+    info!("Qross {} started{}", env!("CARGO_PKG_VERSION"), if autostarted { " at login" } else { "" });
     qross_platform::init_process();
 
-    let data_dir = data_dir();
     // Dort merkt sich Qross unter Wayland die Freigaben der Desktop-Portale
     qross_platform::set_data_dir(&data_dir);
     let (mut settings, loaded) = match Settings::load(&data_dir) {
