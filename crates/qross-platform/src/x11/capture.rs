@@ -400,6 +400,10 @@ fn run(s: &Shared) -> Result<()> {
                 continue;
             }
             let (Event::KeyPress(e) | Event::KeyRelease(e)) = &event else {
+                if matches!(event, Event::XinputRawButtonPress(_)) {
+                    // Strg+Klick, Strg+Rad: Die Zusatztaste allein löst beim Loslassen kein Kürzel mehr aus.
+                    hotkey.on_pointer();
+                }
                 // Maus bewegt oder Taste gewechselt (XInput), Weckruf: Zeigerposition prüfen
                 check = true;
                 continue;
@@ -433,7 +437,11 @@ fn run(s: &Shared) -> Result<()> {
                 s.warp(cx, cy);
                 Some(CaptureEvent::MouseDelta { dx, dy })
             }
-            Event::ButtonPress(e) => button_event(e.detail, true),
+            Event::ButtonPress(e) => {
+                // Strg+Klick, Strg+Rad: ebenso
+                hotkey.on_pointer();
+                button_event(e.detail, true)
+            }
             Event::ButtonRelease(e) => button_event(e.detail, false),
             Event::KeyPress(e) | Event::KeyRelease(e) if e.detail as u16 >= X11_OFFSET => {
                 let down = matches!(event, Event::KeyPress(_));

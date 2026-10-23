@@ -1,6 +1,10 @@
 //! Eingaben per CGEventPost einspeisen. Damit Doppelklicks und Ziehen funktionieren, setzt
 //! macOS eigene Angaben voraus: Klickzähler, „Dragged“-Bewegungen bei gedrückter Taste und
-//! Modifier-Flags an jedem Tastenereignis.
+//! Modifier-Flags an jedem Ereignis.
+//!
+//! Die Flags kommen immer aus dem, was Qross gedrückt hält, auch an Klicks, Bewegungen und Rad
+//! (wie bei Synergy). Ohne eigene Flags hinge ihre Wirkung vom Stand der Zusatztasten ab, den macOS
+//! gerade annimmt. Weicht der ab, wirkte etwa Cmd weiter: Klicks wählten aus, das Rad zoomte.
 
 use std::time::{Duration, Instant};
 
@@ -26,7 +30,11 @@ pub struct MacInjector {
     source: CGEventSource,
     pos: CGPoint,
     buttons: [bool; 5],
-    flags: CGEventFlags,
+    /// Gedrückte Zusatztasten (macOS-Keycodes), links und rechts getrennt: Lässt man eine von beiden
+    /// los, wirkt die andere weiter.
+    modifiers: Vec<u16>,
+    /// Feststelltaste eingerastet (Stand des Servers)
+    caps: bool,
     /// Letzter Klick: Taste, Zeitpunkt, Zähler (für Doppel-/Dreifachklick)
     last_click: Option<(MouseButton, Instant, i64)>,
     wheel_rest: (i32, i32),
@@ -49,7 +57,8 @@ impl MacInjector {
             source,
             pos: CGPoint::new(0.0, 0.0),
             buttons: [false; 5],
-            flags: CGEventFlags::CGEventFlagNull,
+            modifiers: Vec::new(),
+            caps: false,
             last_click: None,
             wheel_rest: (0, 0),
             drag: DragWatch::new(),
@@ -57,7 +66,20 @@ impl MacInjector {
     }
 
     fn mouse(&self, kind: CGEventType, button: CGMouseButton) -> Option<CGEvent> {
-        CGEvent::new_mouse_event(self.source.clone(), kind, self.pos, button).ok()
+        let event = CGEvent::new_mouse_event(self.source.clone(), kind, self.pos, button).ok();
+        if let Some(e) = &event {
+            e.set_flags(self.flags());
+        }
+        event
+    }
+
+    /// Flags für jedes Ereignis: die gedrückten Zusatztasten und die Feststelltaste
+    fn flags(&self) -> CGEventFlags {
+        let mut flags = self.modifiers.iter().fold(CGEventFlags::CGEventFlagNull, |flags, &code| flags | Self::flag_for(code));
+        if self.caps {
+            flags |= CGEventFlags::CGEventFlagAlphaShift;
+        }
+        flags
     }
 
     fn post(&self, event: Option<CGEvent>) {
@@ -205,6 +227,9 @@ impl Injector for MacInjector {
                 if lines_x != 0 || lines_y != 0 {
                     let event =
                         CGEvent::new_scroll_event(self.source.clone(), ScrollEventUnit::LINE, 2, lines_y, lines_x, 0).ok();
+                    if let Some(e) = &event {
+                        e.set_flags(self.flags());
+                    }
                     self.post(event);
                 }
             }
@@ -216,17 +241,15 @@ impl Injector for MacInjector {
                     tracing::debug!(?key, "key without a macOS mapping");
                     return;
                 };
-                let flag = Self::flag_for(code);
-                if flag != CGEventFlags::CGEventFlagNull {
+                if Self::flag_for(code) != CGEventFlags::CGEventFlagNull {
+                    self.modifiers.retain(|&held| held != code);
                     if down {
-                        self.flags |= flag;
-                    } else {
-                        self.flags.remove(flag);
+                        self.modifiers.push(code);
                     }
                 }
                 let event = CGEvent::new_keyboard_event(self.source.clone(), code, down).ok();
                 if let Some(e) = &event {
-                    e.set_flags(self.flags);
+                    e.set_flags(self.flags());
                 }
                 self.post(event);
             }
@@ -247,7 +270,8 @@ impl Injector for MacInjector {
                     Some((code, shift)) => {
                         let event = CGEvent::new_keyboard_event(self.source.clone(), code, down).ok();
                         if let Some(e) = &event {
-                            e.set_flags(if shift { self.flags | CGEventFlags::CGEventFlagShift } else { self.flags });
+                            let flags = self.flags();
+                            e.set_flags(if shift { flags | CGEventFlags::CGEventFlagShift } else { flags });
                         }
                         self.post(event);
                     }
@@ -258,10 +282,8 @@ impl Injector for MacInjector {
                 super::locks::set(locks);
                 // Eingespeiste Tasten tragen ihre Flags selbst: ohne AlphaShift kämen trotz
                 // Feststelltaste Kleinbuchstaben an.
-                match locks.caps {
-                    Some(true) => self.flags |= CGEventFlags::CGEventFlagAlphaShift,
-                    Some(false) => self.flags.remove(CGEventFlags::CGEventFlagAlphaShift),
-                    None => {}
+                if let Some(caps) = locks.caps {
+                    self.caps = caps;
                 }
             }
         }

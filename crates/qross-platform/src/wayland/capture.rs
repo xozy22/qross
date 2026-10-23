@@ -532,6 +532,10 @@ impl State {
             EiEvent::Button(e) if remote => {
                 if let Some(button) = button_from_evdev(e.button) {
                     let down = e.state == ei::button::ButtonState::Press;
+                    if down {
+                        // Strg+Klick: Die Zusatztaste allein löst beim Loslassen kein Kürzel mehr aus.
+                        self.hotkey.on_pointer();
+                    }
                     self.send(CaptureEvent::Button { button, down });
                 }
                 None
@@ -583,6 +587,8 @@ impl State {
             None
         };
         if let Some((dx, dy)) = wheel {
+            // Strg+Rad zoomt: ebenso
+            self.hotkey.on_pointer();
             self.send(CaptureEvent::Wheel { dx, dy });
         }
     }

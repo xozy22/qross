@@ -8,6 +8,25 @@ uses the section for its version.
 
 Sections: **New**, **Improved**, **Fixed**, **Important** (e.g. breaking changes).
 
+## [Unreleased]
+
+### Fixed
+
+- **Ctrl or Cmd stayed pressed on the other computer:** Sometimes, e.g. after copying with Ctrl+C, the other
+  computer kept acting as if Ctrl (Cmd on a Mac) were held: clicks selected, scrolling zoomed and typing triggered
+  shortcuts until you pressed Ctrl again. If Windows removes the keyboard hook of Qross because a call took too
+  long, Qross misses the release, and as long as the mouse moved, it didn't notice the loss. While keys are held
+  on the other computer, Qross now checks the keyboard hook after a second without key presses, sets it again if
+  needed and releases the keys there. If input can't reach Qross at that moment (lock screen, UAC prompt, a window
+  running as administrator), it releases them right away. `qross.log` notes each such release.
+- **Mac: clicks and scrolling with the right modifier keys:** Qross now sends its own state of the modifier keys
+  with every click, movement and scroll, as it already did with key presses, instead of relying on what macOS
+  assumes. Left and right modifier keys count separately: releasing one of two held Cmd keys no longer releases
+  both.
+- **Ctrl+click or Ctrl+scroll switched screens:** With a modifier key alone as a shortcut (e.g. Left Ctrl to switch
+  to the Mac), releasing it after Ctrl+click or Ctrl+scroll switched to the other computer. A click or scroll now
+  makes it a combination, as Ctrl+C already did.
+
 ## [0.15.1] - 2026-10-22
 
 ### New

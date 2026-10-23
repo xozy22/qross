@@ -5,7 +5,8 @@
 //! Die Probe ist eine Mausbewegung um ein Pixel hin und zurück und ein Druck auf die Taste 0xE8
 //! (ohne Belegung, wie bei `inject::tap_menu_mask`), markiert wie alle eigenen Eingaben: Die Hooks
 //! zählen sie und lassen sie durch, Programme bemerken davon nichts. Eine Bewegung um 0 Pixel taugt
-//! nicht: Ob Windows die überhaupt an die Hooks gibt, ist nicht dokumentiert.
+//! nicht: Ob Windows die überhaupt an die Hooks gibt, ist nicht dokumentiert. Für den Tastatur-Hook
+//! allein reicht der Tastendruck.
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,17 +23,23 @@ use super::elevated::Reach;
 use super::INJECT_MAGIC;
 use crate::hook_watch::{Calls, HookWatch, Step, POLL_MS};
 
-/// Startet den Wächter. `calls` liest die Aufrufe der Hooks bisher, `rehook` lässt sie neu setzen; er
-/// endet, sobald `running` falsch wird.
+/// Startet den Wächter. `calls` liest die Aufrufe der Hooks bisher, `keys_held`, ob ein Client gerade
+/// Tasten hält, die die Hooks ihm geschickt haben; `rehook` lässt die Hooks neu setzen, `release` beim
+/// Client loslassen, was er noch hält. Er endet, sobald `running` falsch wird.
 pub(super) fn spawn(
     calls: impl Fn() -> Calls + Send + 'static,
+    keys_held: impl Fn() -> bool + Send + 'static,
     running: &'static AtomicBool,
     rehook: impl Fn() + Send + 'static,
+    release: impl Fn() + Send + 'static,
 ) -> std::io::Result<()> {
-    thread::Builder::new().name("qross-hook-watch".into()).spawn(move || run(calls, running, rehook)).map(drop)
+    thread::Builder::new()
+        .name("qross-hook-watch".into())
+        .spawn(move || run(calls, keys_held, running, rehook, release))
+        .map(drop)
 }
 
-fn run(calls: impl Fn() -> Calls, running: &AtomicBool, rehook: impl Fn()) {
+fn run(calls: impl Fn() -> Calls, keys_held: impl Fn() -> bool, running: &AtomicBool, rehook: impl Fn(), release: impl Fn()) {
     let reach = Reach::new();
     let mut watch = HookWatch::new();
     let mut lost = 0u32;
@@ -40,10 +47,15 @@ fn run(calls: impl Fn() -> Calls, running: &AtomicBool, rehook: impl Fn()) {
         thread::sleep(Duration::from_millis(POLL_MS));
         let Some(input) = last_input() else { continue };
         let now = unsafe { GetTickCount64() };
-        match watch.poll(now, input, calls(), || reach.now()) {
+        match watch.poll(now, input, calls(), keys_held(), || reach.now()) {
             Step::Wait => {}
             Step::Probe => {
                 if !probe() {
+                    watch.probe_refused();
+                }
+            }
+            Step::ProbeKeys => {
+                if !probe_keys() {
                     watch.probe_refused();
                 }
             }
@@ -55,6 +67,7 @@ fn run(calls: impl Fn() -> Calls, running: &AtomicBool, rehook: impl Fn()) {
                 );
                 rehook();
             }
+            Step::Release => release(),
         }
     }
 }
@@ -68,7 +81,15 @@ fn last_input() -> Option<u32> {
 /// Schickt die Probe für beide Hooks. Falsch, wenn Windows sie ablehnt (gesperrte oder getrennte
 /// Sitzung, z. B. ein minimiertes RDP-Fenster).
 pub(super) fn probe() -> bool {
-    let inputs = [probe_move(1), probe_move(-1), probe_key(false), probe_key(true)];
+    send(&[probe_move(1), probe_move(-1), probe_key(false), probe_key(true)])
+}
+
+/// Die Probe nur für den Tastatur-Hook. Falsch, wenn Windows sie ablehnt.
+fn probe_keys() -> bool {
+    send(&[probe_key(false), probe_key(true)])
+}
+
+fn send(inputs: &[INPUT]) -> bool {
     let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32) };
     sent as usize == inputs.len()
 }

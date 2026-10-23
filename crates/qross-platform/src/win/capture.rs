@@ -159,6 +159,8 @@ static REHOOKS: AtomicU32 = AtomicU32::new(0);
 static HOOKS_RUNNING: AtomicBool = AtomicBool::new(false);
 /// Verworfen, weil die Warteschlange voll war (meldet `forward`)
 static DROPPED: AtomicU32 = AtomicU32::new(0);
+/// Der Hook hat einem Client Tasten als gedrückt gemeldet, ihr Loslassen noch nicht (liest der Wächter)
+static KEYS_SENT: AtomicBool = AtomicBool::new(false);
 
 /// An den Hook-Thread: Hooks neu setzen
 const WM_REHOOK: u32 = WM_APP + 0x51;
@@ -166,6 +168,8 @@ const WM_REHOOK: u32 = WM_APP + 0x51;
 const WM_KEY_OPTIONS: u32 = WM_APP + 0x52;
 /// An den Hook-Thread: Hooks an den Anfang der Kette (siehe `Hooks::move_to_front`)
 const WM_HOOKS_TO_FRONT: u32 = WM_APP + 0x53;
+/// An den Hook-Thread: beim Client loslassen, was er noch gedrückt glaubt (siehe `release_held`)
+const WM_RELEASE_HELD: u32 = WM_APP + 0x54;
 /// Plätze der Warteschlange zum Server-Kern: einige Sekunden Mausbewegung
 const QUEUE_LEN: usize = 4096;
 
@@ -176,6 +180,8 @@ enum FromHook {
     RestoreCursor,
     /// Taste ohne Zuordnung, fürs Debug-Log
     Unmapped { vk: u32, scan: u32 },
+    /// Beim Client losgelassen, was er noch gedrückt hielt, fürs Log
+    Released { keys: u32, buttons: u32, why: &'static str },
 }
 
 /// Nur vom Hook-Thread benutzt.
@@ -255,6 +261,12 @@ impl HookState {
         let [caps, num, scroll] = self.locks.map(Some);
         LockState { caps, num, scroll }
     }
+
+    /// Ist `vk` beim Client gedrückt (`Some`) oder nicht mehr?
+    fn set_sent(&mut self, vk: usize, key: Option<KeyCode>) {
+        self.sent[vk] = key;
+        KEYS_SENT.store(self.sent.iter().any(Option::is_some), Ordering::Relaxed);
+    }
 }
 
 pub fn start_capture(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<Arc<dyn Capture>> {
@@ -287,7 +299,12 @@ fn start(events: UnboundedSender<CaptureEvent>) -> anyhow::Result<WinCapture> {
     let rehook = move || unsafe {
         PostThreadMessageW(thread_id, WM_REHOOK, 0, 0);
     };
-    if let Err(e) = watchdog::spawn(hook_calls, &HOOKS_RUNNING, rehook) {
+    let release = move || unsafe {
+        PostThreadMessageW(thread_id, WM_RELEASE_HELD, 0, 0);
+    };
+    let keys_held =
+        || KEYS_SENT.load(Ordering::Relaxed) && SHARED.get().is_some_and(|shared| shared.remote.load(Ordering::Acquire));
+    if let Err(e) = watchdog::spawn(hook_calls, keys_held, &HOOKS_RUNNING, rehook, release) {
         tracing::warn!("watchdog for the input hooks is not running: {e}");
     }
     if let Err(e) = dnd::start() {
@@ -329,6 +346,7 @@ unsafe fn hook_loop(ready: Sender<Result<u32, u32>>) {
     while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
         match msg.message {
             WM_REHOOK => hooks.reinstall(),
+            WM_RELEASE_HELD => release_held(),
             WM_HOOKS_TO_FRONT => hooks.move_to_front(),
             WM_KEY_OPTIONS => {
                 let options = Box::from_raw(msg.lParam as *mut KeyOptions);
@@ -423,32 +441,29 @@ impl Hooks {
     }
 }
 
+/// Maustasten mit ihrem Virtual-Key
+const BUTTONS: [(MouseButton, u16); 5] = [
+    (MouseButton::Left, VK_LBUTTON),
+    (MouseButton::Right, VK_RBUTTON),
+    (MouseButton::Middle, VK_MBUTTON),
+    (MouseButton::Back, VK_XBUTTON1),
+    (MouseButton::Forward, VK_XBUTTON2),
+];
+
 /// Nach dem Neusetzen: Was in der Lücke geschah, hat der Hook nicht gesehen. Was der Client noch
 /// gedrückt glaubt, dort loslassen, und den eigenen Stand neu aus dem System lesen. Was jetzt
 /// gedrückt ist, ging in der Lücke lokal durch – sein Loslassen muss es auch.
 fn resync() {
-    const BUTTONS: [(MouseButton, u16); 5] = [
-        (MouseButton::Left, VK_LBUTTON),
-        (MouseButton::Right, VK_RBUTTON),
-        (MouseButton::Middle, VK_MBUTTON),
-        (MouseButton::Back, VK_XBUTTON1),
-        (MouseButton::Forward, VK_XBUTTON2),
-    ];
     let remote = SHARED.get().is_some_and(|shared| shared.remote.load(Ordering::Acquire));
     let down = |vk: usize| unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0;
     STATE.with_borrow_mut(|st| {
+        release_sent(st, "Windows had removed the input hooks, so they missed the release");
         for vk in 0..256 {
-            if let Some(key) = st.sent[vk].take() {
-                emit(CaptureEvent::Key { key, down: false });
-            }
             st.pressed[vk] = down(vk);
             st.local_down[vk] = st.pressed[vk];
         }
         for (button, vk) in BUTTONS {
             let slot = button as usize;
-            if std::mem::take(&mut st.sent_buttons[slot]) {
-                emit(CaptureEvent::Button { button, down: false });
-            }
             let now_down = down(usize::from(vk));
             if st.buttons_down[slot] && !now_down {
                 // Lokal gedrückt und in der Lücke losgelassen: wie `local_release` in `handle_mouse`
@@ -468,6 +483,44 @@ fn resync() {
         let (x, y) = primary_center();
         unsafe { SetCursorPos(x, y) };
     }
+}
+
+/// Eingaben gingen an den Hooks vorbei oder erreichen sie gerade nicht (`Step::Release`). War darunter
+/// das Loslassen einer Taste, die der Client gedrückt hält, hinge sie dort – Strg bzw. Cmd wirkte
+/// weiter, bis jemand es noch einmal drückt. Also loslassen. Ist die Taste wirklich noch gedrückt,
+/// kommt ihr Loslassen später ohne Folgen nach.
+fn release_held() {
+    STATE.with_borrow_mut(|st| {
+        if release_sent(st, "input went past the hooks (lock screen, UAC, a window with higher rights or another program)") {
+            // Auch für die Kürzel und den Zeichenmodus gilt nichts mehr als gedrückt.
+            st.hotkey = HotkeyTracker::new();
+        }
+    });
+}
+
+/// Lässt beim Client los, was er laut `sent` noch gedrückt glaubt, und meldet es fürs Log. Gab es etwas?
+fn release_sent(st: &mut HookState, why: &'static str) -> bool {
+    let mut keys = 0;
+    for vk in 0..256 {
+        if let Some(key) = st.sent[vk].take() {
+            emit(CaptureEvent::Key { key, down: false });
+            st.pressed[vk] = false;
+            keys += 1;
+        }
+    }
+    KEYS_SENT.store(false, Ordering::Relaxed);
+    let mut buttons = 0;
+    for (button, _) in BUTTONS {
+        if std::mem::take(&mut st.sent_buttons[button as usize]) {
+            emit(CaptureEvent::Button { button, down: false });
+            buttons += 1;
+        }
+    }
+    if keys + buttons == 0 {
+        return false;
+    }
+    pass(FromHook::Released { keys, buttons, why });
+    true
 }
 
 fn hook_calls() -> Calls {
@@ -502,6 +555,9 @@ fn forward(mut queue: Consumer<FromHook>, events: UnboundedSender<CaptureEvent>)
                 }
                 FromHook::RestoreCursor => cursor::restore(),
                 FromHook::Unmapped { vk, scan } => tracing::debug!(vk, scan, "key without a mapping"),
+                FromHook::Released { keys, buttons, why } => {
+                    tracing::info!("released what the client still held (keys: {keys}, mouse buttons: {buttons}): {why}")
+                }
             }
         }
         let dropped = DROPPED.swap(0, Ordering::Relaxed);
@@ -635,6 +691,10 @@ fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
         }
         let slot = button as usize;
         let local_release = STATE.with_borrow_mut(|st| {
+            if down {
+                // Strg+Klick: Die Zusatztaste allein löst beim Loslassen kein Kürzel mehr aus.
+                st.hotkey.on_pointer();
+            }
             if !remote {
                 st.buttons_down[slot] = down;
                 st.sent_buttons[slot] = false;
@@ -655,6 +715,10 @@ fn handle_mouse(shared: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
             emit(CaptureEvent::Button { button, down: false });
             return false;
         }
+    }
+    if matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
+        // Strg+Rad zoomt: ebenso
+        STATE.with_borrow_mut(|st| st.hotkey.on_pointer());
     }
 
     if !remote {
@@ -753,7 +817,7 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
         }
         if !remote {
             st.local_down[vk] = !up;
-            st.sent[vk] = None;
+            st.set_sent(vk, None);
             return false;
         }
         if st.local_down[vk] {
@@ -798,11 +862,11 @@ fn handle_key(shared: &Shared, info: &KBDLLHOOKSTRUCT) -> bool {
             Some(key) if !up && is_typing_key(key) => {
                 // Zeichenmodus: was die Taste im Layout des Vordergrundfensters ergibt
                 let chars = layout::key_chars(info.vkCode, info.scanCode & 0xFF, st.modifiers(), layout::foreground_layout());
-                st.sent[vk] = Some(key);
+                st.set_sent(vk, Some(key));
                 emit(CaptureEvent::Typed { key, chars });
             }
             Some(key) => {
-                st.sent[vk] = (!up).then_some(key);
+                st.set_sent(vk, (!up).then_some(key));
                 emit(CaptureEvent::Key { key, down: !up });
             }
             None => pass(FromHook::Unmapped { vk: info.vkCode, scan: info.scanCode }),
@@ -1065,6 +1129,40 @@ mod tests {
                 assert!(st.sent.iter().all(Option::is_none) && !st.sent_buttons.contains(&true) && !st.altgr);
             });
             resync();
+            assert!(from_hook.pop().is_none(), "nichts doppelt loslassen");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn keys_held_on_the_client_are_released_once_input_went_past_the_hooks() {
+        thread::spawn(|| {
+            let (queue, mut from_hook) = spsc::queue(16);
+            OUT.set(Some((queue, thread::current())));
+            let options = KeyOptions::default();
+            STATE.with_borrow_mut(|st| {
+                // Strg ging als gedrückt an den Client; sein Loslassen sah der Hook nie.
+                st.pressed[VK_LCONTROL as usize] = true;
+                st.set_sent(VK_LCONTROL as usize, Some(KeyCode(0xE0)));
+                st.hotkey.on_key(KeyCode(0xE0), true, &options);
+                st.sent_buttons[MouseButton::Left as usize] = true;
+            });
+            release_held();
+            let mut out = Vec::new();
+            while let Some(item) = from_hook.pop() {
+                out.push(item);
+            }
+            assert!(matches!(
+                out.as_slice(),
+                [
+                    FromHook::Event(CaptureEvent::Key { key: KeyCode(0xE0), down: false }),
+                    FromHook::Event(CaptureEvent::Button { button: MouseButton::Left, down: false }),
+                    FromHook::Released { keys: 1, buttons: 1, .. },
+                ]
+            ));
+            STATE.with_borrow(|st| assert!(!st.pressed[VK_LCONTROL as usize] && !st.modifiers().ctrl));
+            release_held();
             assert!(from_hook.pop().is_none(), "nichts doppelt loslassen");
         })
         .join()

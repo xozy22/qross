@@ -159,6 +159,10 @@ fn handle(s: &Shared, state: &RefCell<TapState>, kind: CGEventType, event: &CGEv
     };
 
     if let Some((button, down)) = button_of(kind, event) {
+        if down {
+            // Cmd+Klick: Die Zusatztaste allein löst beim Loslassen kein Kürzel mehr aus.
+            st.hotkey.on_pointer();
+        }
         if button == MouseButton::Left {
             // Ein Drag im Finder beginnt erst nach dem Drücken; hier den Stand der Drag-Zwischenablage merken.
             let mut drag = s.drag.lock().unwrap_or_else(|e| e.into_inner());
@@ -176,6 +180,10 @@ fn handle(s: &Shared, state: &RefCell<TapState>, kind: CGEventType, event: &CGEv
             send(CaptureEvent::Button { button, down: false });
             return CallbackResult::Keep;
         }
+    }
+    if matches!(kind, ScrollWheel) {
+        // Cmd+Rad zoomt: ebenso
+        st.hotkey.on_pointer();
     }
 
     let keycode = || event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;

@@ -397,6 +397,12 @@ impl HotkeyTracker {
         }
     }
 
+    /// Klick oder Raddrehung: Eine allein gedrückte Zusatztaste gehört dann dazu (Strg+Klick, Strg+Rad
+    /// zum Zoomen) und löst beim Loslassen kein Kürzel aus.
+    pub fn on_pointer(&mut self) {
+        self.tap = None;
+    }
+
     /// Gerade gedrückte Zusatztasten übernehmen – für Erfassungen, die nicht jeden Tastendruck
     /// sehen (X11 im lokalen Modus).
     pub fn sync_modifiers(&mut self, mut pressed: impl FnMut(KeyCode) -> bool) {
@@ -718,6 +724,22 @@ mod tests {
         t.on_key(CTRL, true, &options);
         let switched = HotkeyEvent::Tapped { event: CaptureEvent::SwitchTo(SwitchTarget::Screen("macbook".into())) };
         assert_eq!(t.on_key(CTRL, false, &options), switched, "Strg allein getippt wechselt");
+    }
+
+    #[test]
+    fn ctrl_click_and_ctrl_wheel_are_no_tap() {
+        let entries = HashMap::from([("ControlLeft".to_owned(), "macbook".to_owned())]);
+        let options = KeyOptions { switch: parse_switch_keys(&entries).unwrap(), ..KeyOptions::default() };
+        let mut t = HotkeyTracker::new();
+        // Strg+Klick wählt mehrere Dateien aus, Strg+Rad zoomt: beides ohne Wechsel
+        for _ in 0..2 {
+            t.on_key(CTRL, true, &options);
+            t.on_pointer();
+            assert_eq!(t.on_key(CTRL, false, &options), HotkeyEvent::None);
+        }
+        // Danach wieder Strg allein
+        t.on_key(CTRL, true, &options);
+        assert!(matches!(t.on_key(CTRL, false, &options), HotkeyEvent::Tapped { .. }));
     }
 
     fn switching() -> KeyOptions {

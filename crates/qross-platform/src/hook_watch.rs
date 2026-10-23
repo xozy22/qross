@@ -9,6 +9,13 @@
 //! Tastatureingabe. Sieht einer der beiden Hooks sie nicht, ist er verloren, und beide werden neu
 //! gesetzt.
 //!
+//! Oft trifft es nur einen, etwa den Tastatur-Hook beim Loslassen von Strg nach Strg+C. Bewegt sich
+//! danach die Maus, ruft Windows weiter ihren Hook, und der Vergleich fällt nicht auf. Hält ein Client
+//! dabei eine Taste gedrückt, bliebe sie dort hängen. Deshalb prüft der Wächter den Tastatur-Hook
+//! allein, sobald er eine Weile schweigt, während ein Client Tasten hält. Erreichen Eingaben die Hooks
+//! gerade nicht, oder ging eine an den lebenden Hooks vorbei, lässt der Client los, was er hält: Sein
+//! Loslassen sieht Qross sonst womöglich nie.
+//!
 //! Gegen Fehlalarme: Auf dem Sperrbildschirm, dem UAC-Desktop und in Fenstern mit höheren Rechten
 //! erreichen Eingaben die Hooks nicht, obwohl sie leben. Das meldet `reachable`, und die erste Eingabe
 //! nach der Rückkehr zählt nicht, sie kann noch drüben gelandet sein. Lehnt Windows die Probe ab
@@ -32,6 +39,9 @@ const MAX_GAP: u64 = 2000;
 const MAX_BACKOFF: u64 = 60_000;
 /// So lange ohne neuen Fehlalarm, dann gilt wieder die kurze Wartezeit
 const CALM: u64 = 10 * 60_000;
+/// So lange darf der Tastatur-Hook schweigen, während ein Client Tasten hält. Hält jemand drüben
+/// wirklich Strg gedrückt und klickt, kommt die Probe höchstens etwa einmal je Sekunde.
+const KEYS_QUIET: u64 = 1000;
 
 /// Aufrufe der beiden Hooks bisher (dürfen überlaufen)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,8 +56,13 @@ pub(crate) enum Step {
     Wait,
     /// Eine wirkungslose Maus- und Tastatureingabe schicken: Sehen beide Hooks sie, leben sie.
     Probe,
+    /// Nur die wirkungslose Tastatureingabe: Ein Client hält Tasten, und der Tastatur-Hook schweigt.
+    ProbeKeys,
     /// Mindestens ein Hook ist verloren: neu setzen.
     Rehook,
+    /// Eingaben gingen an den Hooks vorbei oder erreichen sie gerade nicht: Was ein Client noch
+    /// gedrückt hält, dort loslassen.
+    Release,
 }
 
 #[derive(Clone, Copy)]
@@ -57,12 +72,29 @@ struct Sample {
     calls: Calls,
 }
 
+/// Eine laufende Probe
+#[derive(Clone, Copy)]
+struct Probe {
+    at: u64,
+    /// Aufrufe der Hooks, als sie abging
+    before: Calls,
+    /// Nur für den Tastatur-Hook (`Step::ProbeKeys`)
+    keys_only: bool,
+}
+
+impl Probe {
+    fn answered(&self, calls: Calls) -> bool {
+        calls.keyboard != self.before.keyboard && (self.keys_only || calls.mouse != self.before.mouse)
+    }
+}
+
 pub(crate) struct HookWatch {
     last: Option<Sample>,
     /// Seit wann eine Eingabe aussteht, die kein Hook gesehen hat
     unseen_since: Option<u64>,
-    /// Wann die Probe abging, und die Aufrufe bis dahin
-    probe: Option<(u64, Calls)>,
+    probe: Option<Probe>,
+    /// Seit wann ein Client Tasten hält, ohne dass der Tastatur-Hook gerufen wurde
+    keys_quiet_since: Option<u64>,
     /// Konnte die zuletzt geprüfte Eingabe die Hooks erreichen?
     reachable: bool,
     /// Neu gesetzt, und seitdem kein Aufruf
@@ -79,6 +111,7 @@ impl HookWatch {
             last: None,
             unseen_since: None,
             probe: None,
+            keys_quiet_since: None,
             reachable: true,
             rehooked: false,
             backoff: 0,
@@ -88,10 +121,23 @@ impl HookWatch {
 
     /// Eine Prüfung. `now`: monotone Zeit in ms, die im Ruhezustand weiterläuft; `input`: Zeitstempel
     /// der letzten Eingabe im System (nur auf Änderung verglichen, darf überlaufen); `calls`: Aufrufe
-    /// der Hooks bisher. `reachable` sagt, ob Eingaben die Hooks gerade erreichen können, und wird nur
-    /// bei Bedarf gefragt.
-    pub(crate) fn poll(&mut self, now: u64, input: u32, calls: Calls, reachable: impl FnOnce() -> bool) -> Step {
-        let Some(last) = self.last.replace(Sample { at: now, input, calls }) else {
+    /// der Hooks bisher; `keys_held`: Ein Client hält Tasten gedrückt, die Qross ihm geschickt hat.
+    /// `reachable` sagt, ob Eingaben die Hooks gerade erreichen können, und wird nur bei Bedarf gefragt.
+    pub(crate) fn poll(
+        &mut self,
+        now: u64,
+        input: u32,
+        calls: Calls,
+        keys_held: bool,
+        reachable: impl FnOnce() -> bool,
+    ) -> Step {
+        let last = self.last.replace(Sample { at: now, input, calls });
+        self.keys_quiet_since = match (keys_held, last) {
+            (false, _) => None,
+            (true, Some(last)) if calls.keyboard == last.calls.keyboard => self.keys_quiet_since.or(Some(now)),
+            (true, _) => Some(now),
+        };
+        let Some(last) = last else {
             return Step::Wait;
         };
         if self.alarmed_at.is_some_and(|at| now.saturating_sub(at) >= CALM) {
@@ -101,33 +147,53 @@ impl HookWatch {
         if now.saturating_sub(last.at) > MAX_GAP {
             self.unseen_since = None;
             self.probe = None;
+            self.keys_quiet_since = keys_held.then_some(now);
             return Step::Wait;
         }
-        if let Some((at, before)) = self.probe {
-            if calls.mouse != before.mouse && calls.keyboard != before.keyboard {
-                // Beide sahen die Probe: Sie leben, nur die Eingabe davor erreichte sie nicht. Fehlalarm,
-                // künftig länger warten.
+        if let Some(probe) = self.probe {
+            if probe.answered(calls) {
                 self.probe = None;
+                if probe.keys_only {
+                    // Er lebt: Die Taste ist drüben wohl wirklich gedrückt. Später wieder fragen.
+                    return Step::Wait;
+                }
+                // Beide sahen die Probe: Sie leben, nur die Eingabe davor erreichte sie nicht. Fehlalarm,
+                // künftig länger warten. War jene Eingabe das Loslassen einer Taste, die ein Client hält,
+                // hinge sie dort.
                 self.unseen_since = None;
                 self.reachable = true;
                 self.rehooked = false;
                 self.raise_backoff(now);
-                return Step::Wait;
+                return Step::Release;
             }
-            if now.saturating_sub(at) < PROBE_WAIT {
+            if now.saturating_sub(probe.at) < PROBE_WAIT {
                 return Step::Wait;
             }
             self.probe = None;
             self.unseen_since = None;
             if !reachable() {
-                // Inzwischen auf dem Sperrbildschirm o. Ä.: Die Probe kam womöglich gar nicht durch.
+                // Inzwischen auf dem Sperrbildschirm o. Ä.: Die Probe kam womöglich gar nicht durch, und
+                // das Loslassen gedrückter Tasten erreicht die Hooks auch nicht.
                 self.reachable = false;
-                return Step::Wait;
+                return Step::Release;
             }
             // Hilft das Neusetzen nicht (kein Aufruf danach), nicht im Sekundentakt wiederholen.
             self.rehooked = true;
             self.raise_backoff(now);
             return Step::Rehook;
+        }
+        // Vor dem Vergleich der Aufrufe unten: Solange sich die Maus bewegt, fiele ihm ein verlorener
+        // Tastatur-Hook nie auf.
+        let quiet = if self.rehooked { KEYS_QUIET + self.backoff } else { KEYS_QUIET };
+        if self.keys_quiet_since.is_some_and(|since| now.saturating_sub(since) >= quiet) {
+            self.keys_quiet_since = Some(now);
+            if !reachable() {
+                // Ihr Loslassen erreicht die Hooks gerade nicht (Sperrbildschirm, UAC, Fenster mit
+                // höheren Rechten).
+                return Step::Release;
+            }
+            self.probe = Some(Probe { at: now, before: calls, keys_only: true });
+            return Step::ProbeKeys;
         }
         if calls != last.calls {
             // Die Hooks leben.
@@ -158,7 +224,7 @@ impl HookWatch {
             self.reachable = false;
             return Step::Wait;
         }
-        self.probe = Some((now, calls));
+        self.probe = Some(Probe { at: now, before: calls, keys_only: false });
         Step::Probe
     }
 
@@ -180,7 +246,8 @@ impl HookWatch {
 mod tests {
     use super::*;
 
-    /// Nachgestellte Welt: Uhr, letzte Eingabe im System, Hook-Aufrufe, Erreichbarkeit
+    /// Nachgestellte Welt: Uhr, letzte Eingabe im System, Hook-Aufrufe, Erreichbarkeit, Tasten, die ein
+    /// Client gedrückt hält
     struct Sim {
         watch: HookWatch,
         now: u64,
@@ -188,12 +255,20 @@ mod tests {
         calls: Calls,
         reachable: bool,
         asked: u32,
+        keys_held: bool,
     }
 
     impl Sim {
         fn new() -> Self {
-            let mut sim =
-                Self { watch: HookWatch::new(), now: 1_000_000, input: 7, calls: Calls::default(), reachable: true, asked: 0 };
+            let mut sim = Self {
+                watch: HookWatch::new(),
+                now: 1_000_000,
+                input: 7,
+                calls: Calls::default(),
+                reachable: true,
+                asked: 0,
+                keys_held: false,
+            };
             assert_eq!(sim.poll(), Step::Wait, "die erste Prüfung legt nur den Stand fest");
             sim
         }
@@ -201,7 +276,7 @@ mod tests {
         fn poll(&mut self) -> Step {
             self.now += POLL_MS;
             let (reachable, asked) = (self.reachable, &mut self.asked);
-            self.watch.poll(self.now, self.input, self.calls, || {
+            self.watch.poll(self.now, self.input, self.calls, self.keys_held, || {
                 *asked += 1;
                 reachable
             })
@@ -299,7 +374,7 @@ mod tests {
         let (step, first) = sim.until_step(10_000, Sim::unseen).unwrap();
         assert_eq!(step, Step::Probe);
         sim.answer(); // Die Hooks sehen die Probe: Sie leben, die Eingaben davor erreichten sie nur nicht (Touch).
-        assert_eq!(sim.poll(), Step::Wait);
+        assert_eq!(sim.poll(), Step::Release, "die Eingabe davor kann das Loslassen einer Taste gewesen sein");
         let (step, second) = sim.until_step(10_000, Sim::unseen).unwrap();
         assert_eq!(step, Step::Probe);
         sim.answer();
@@ -355,6 +430,8 @@ mod tests {
         let mut sim = Sim::new();
         assert_eq!(sim.until_step(10_000, Sim::unseen).unwrap().0, Step::Probe);
         sim.reachable = false;
+        // Was ein Client hält, lässt er los: Das Loslassen erreicht die Hooks jetzt auch nicht.
+        assert_eq!(sim.until_step(30_000, |_| {}).unwrap().0, Step::Release);
         assert_eq!(sim.until_step(30_000, |_| {}), None);
     }
 
@@ -427,6 +504,66 @@ mod tests {
         }
         assert_eq!(sim.until_step(10_000, Sim::unseen).unwrap().0, Step::Probe);
         sim.answer();
-        assert_eq!(sim.poll(), Step::Wait, "über den Überlauf hinweg beantwortet");
+        assert_eq!(sim.poll(), Step::Release, "über den Überlauf hinweg beantwortet");
+    }
+
+    #[test]
+    fn a_lost_keyboard_hook_is_found_while_the_mouse_moves() {
+        // Windows hat nur den Tastatur-Hook entfernt, als drüben Strg gedrückt war; die Maus läuft
+        // weiter und verdeckt das.
+        let mut sim = Sim::new();
+        sim.keys_held = true;
+        let (step, after) = sim.until_step(10_000, Sim::seen).unwrap();
+        assert_eq!(step, Step::ProbeKeys);
+        assert!(after <= KEYS_QUIET + POLL_MS, "Probe nach {after} ms");
+        let (step, after) = sim.until_step(10_000, Sim::seen).unwrap();
+        assert_eq!(step, Step::Rehook);
+        assert!(after <= PROBE_WAIT + POLL_MS, "neu gesetzt nach {after} ms");
+    }
+
+    #[test]
+    fn a_living_keyboard_hook_answers_and_is_asked_again_later() {
+        // Drüben ist Strg wirklich gedrückt, hier wird nur geklickt.
+        let mut sim = Sim::new();
+        sim.keys_held = true;
+        for _ in 0..5 {
+            let (step, after) = sim.until_step(10_000, Sim::seen).unwrap();
+            assert_eq!(step, Step::ProbeKeys);
+            assert!((KEYS_QUIET..=KEYS_QUIET + POLL_MS).contains(&after), "Probe nach {after} ms");
+            sim.calls.keyboard += 1; // Der Tastatur-Hook sieht die Probe.
+            assert_eq!(sim.poll(), Step::Wait);
+        }
+    }
+
+    #[test]
+    fn typing_needs_no_keyboard_probe() {
+        // Drüben wird getippt, oder ein gehaltenes Strg wiederholt sich: Der Tastatur-Hook meldet sich selbst.
+        let mut sim = Sim::new();
+        sim.keys_held = true;
+        let typing = |sim: &mut Sim| {
+            sim.seen();
+            sim.calls.keyboard += 1;
+        };
+        assert_eq!(sim.until_step(30_000, typing), None);
+    }
+
+    #[test]
+    fn no_keyboard_probe_while_no_client_holds_keys() {
+        let mut sim = Sim::new();
+        assert_eq!(sim.until_step(30_000, Sim::seen), None);
+    }
+
+    #[test]
+    fn held_keys_are_released_when_input_cannot_reach_the_hooks() {
+        // Drüben ist Strg gedrückt, hier erscheint die UAC-Abfrage oder der Sperrbildschirm.
+        let mut sim = Sim::new();
+        sim.keys_held = true;
+        sim.reachable = false;
+        let (step, after) = sim.until_step(10_000, Sim::unseen).unwrap();
+        assert_eq!(step, Step::Release);
+        assert!(after <= KEYS_QUIET + POLL_MS, "losgelassen nach {after} ms");
+        // Losgelassen: nichts mehr zu tun
+        sim.keys_held = false;
+        assert_eq!(sim.until_step(30_000, Sim::unseen), None);
     }
 }
